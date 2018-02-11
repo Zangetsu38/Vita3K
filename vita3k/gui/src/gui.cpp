@@ -106,6 +106,7 @@ static void init_style() {
 static void init_font(GuiState &gui, HostState &host) {
     ImGuiIO &io = ImGui::GetIO();
     gui.monospaced_font = io.Fonts->AddFontDefault();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     // Set Large Font
     static const ImWchar large_font_chars[] = { L'0', L'1', L'2', L'3', L'4', L'5', L'6', L'7', L'8', L'9', L':', L'A', L'M', L'P' };

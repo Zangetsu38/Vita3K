@@ -19,6 +19,17 @@
 
 #include <module/module.h>
 
+struct SceAppUtilInitParam {
+    SceSize workBufSize;
+    SceChar8 reserved[60];
+};
+
+struct SceAppUtilBootParam {
+    SceAppUtilBootAttribute attr;
+    SceUInt32 appVersion;
+    SceChar8 reserved[32];
+};
+
 BRIDGE_DECL(sceAppUtilAddCookieWebBrowser)
 BRIDGE_DECL(sceAppUtilAddcontMount)
 BRIDGE_DECL(sceAppUtilAddcontUmount)

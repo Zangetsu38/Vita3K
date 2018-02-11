@@ -19,6 +19,20 @@
 
 #include <module/module.h>
 
+typedef int32_t SceFiosOverlayID;
+
+struct SceFiosOverlay {
+    uint8_t type;
+    uint8_t order;
+    uint16_t dst_len;
+    uint16_t src_len;
+    uint16_t unk2;
+    SceUID pid;
+    SceFiosOverlayID id;
+    char dst[292];
+    char src[292]; // src path replaces dst path based on type policy
+};
+
 BRIDGE_DECL(sceFiosOverlayAddForProcess02)
 BRIDGE_DECL(sceFiosOverlayGetInfoForProcess02)
 BRIDGE_DECL(sceFiosOverlayGetList02)

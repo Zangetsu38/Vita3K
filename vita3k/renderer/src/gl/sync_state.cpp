@@ -152,7 +152,6 @@ void sync_viewport(GLContext &context, const GxmContextState &state) {
 
     if (previous_flip_y != context.viewport_flip[1]) {
         // We need to sync again state that uses the flip
-        sync_cull(context, state);
         sync_clipping(context, state);
     }
 }

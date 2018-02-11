@@ -131,7 +131,7 @@ Address alloc(MemState &state, size_t size, const char *name) {
     const size_t page_count = (size + (state.page_size - 1)) / state.page_size;
     const Allocated::iterator block = std::search_n(state.allocated_pages.begin(), state.allocated_pages.end(), page_count, 0);
     if (block == state.allocated_pages.end()) {
-        assert(false);
+        //assert(false);
         return 0;
     }
 
@@ -164,7 +164,7 @@ void free(MemState &state, Address address) {
     assert(page < state.allocated_pages.size());
 
     const Generation generation = state.allocated_pages[page];
-    assert(generation != 0);
+    //assert(generation != 0);
 
     const auto different_generation = std::bind(std::not_equal_to<Generation>(), std::placeholders::_1, generation);
     const Allocated::iterator first_page = state.allocated_pages.begin() + page;

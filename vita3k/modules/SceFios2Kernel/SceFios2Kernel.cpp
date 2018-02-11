@@ -57,8 +57,16 @@ EXPORT(int, _sceFiosKernelOverlayGetInfoForProcess) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceFiosKernelOverlayGetList) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceFiosKernelOverlayGetList, SceUID pid, char loOrderFilter, char hiOrderFilter, sceFiosKernelOverlayGetList_opt *opt) {
+    STUBBED("Set pActualIDs to 0");
+    LOG_DEBUG("pid: {}", pid);
+    LOG_DEBUG("buffer_size: {}", opt->buffer_size);
+    LOG_DEBUG("maxIDs: {}", opt->maxIDs);
+
+    *opt->actualIDs.get(host.mem) = 0;
+    LOG_DEBUG("pActualIDs: {}", *opt->actualIDs.get(host.mem));
+
+    return 0;
 }
 
 EXPORT(int, _sceFiosKernelOverlayGetRecommendedScheduler) {
@@ -88,6 +96,7 @@ EXPORT(int, _sceFiosKernelOverlayResolveSync) {
 EXPORT(int, _sceFiosKernelOverlayResolveWithRangeSync, SceUID pid, int resolveFlag, const char *pInPath, sceFiosKernelOverlayResolveWithRangeSync_opt *opt) {
     STUBBED("Using strncpy");
     strncpy(opt->pOutPath.get(host.mem), pInPath, opt->maxPath);
+    //LOG_DEBUG("pOutPath: {}, ", opt->pOutPath.get(host.mem));
 
     return 0;
 }

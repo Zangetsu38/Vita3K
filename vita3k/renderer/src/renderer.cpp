@@ -127,6 +127,14 @@ void set_two_sided_enable(State &state, Context *ctx, GxmContextState *gxm_conte
     }
 }
 
+void set_context(State &state, Context *ctx, GxmContextState *gxm_context, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *load_depth_stencil_surface, SceGxmDepthStencilSurface *store_depth_stencil_surface) {
+    switch (state.current_backend) {
+    default:
+        renderer::add_command(ctx, renderer::CommandOpcode::SetContext, nullptr, target, color_surface, load_depth_stencil_surface, store_depth_stencil_surface);
+        break;
+    }
+}
+
 void set_context(State &state, Context *ctx, GxmContextState *gxm_context, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface) {
     switch (state.current_backend) {
     default:

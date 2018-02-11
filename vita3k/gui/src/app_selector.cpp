@@ -455,14 +455,12 @@ void draw_app_selector(GuiState &gui, HostState &host) {
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.5f, 0.5f));
     if (current_scroll_pos > 0) {
         ImGui::SetCursorPos(ImVec2(display_size.x - SELECT_SIZE.x - (5.f * scal.x), 48.f));
-        if ((ImGui::Selectable("^", false, ImGuiSelectableFlags_None, SELECT_SIZE))
-            || ImGui::IsKeyPressed(host.cfg.keyboard_leftstick_up) || ImGui::IsKeyPressed(host.cfg.keyboard_button_up))
+        if (ImGui::Selectable("^", false, ImGuiSelectableFlags_None, SELECT_SIZE) || ImGui::IsKeyPressed(host.cfg.keyboard_button_up))
             scroll_type = 1;
     }
     if (!gui.apps_list_opened.empty()) {
         ImGui::SetCursorPos(ImVec2(display_size.x - SELECT_SIZE.x - (5.f * scal.x), (display_size.y / 2.f) - (SELECT_SIZE.y / 2.f)));
-        if ((ImGui::Selectable(">", false, ImGuiSelectableFlags_None, SELECT_SIZE))
-            || ImGui::IsKeyPressed(host.cfg.keyboard_button_r1) || ImGui::IsKeyPressed(host.cfg.keyboard_leftstick_right)) {
+        if (ImGui::Selectable(">", false, ImGuiSelectableFlags_None, SELECT_SIZE) || ImGui::IsKeyPressed(host.cfg.keyboard_button_r1)) {
             last_time["start"] = 0;
             ++gui.current_app_selected;
             gui.live_area.app_selector = false;
@@ -472,7 +470,7 @@ void draw_app_selector(GuiState &gui, HostState &host) {
     if (current_scroll_pos < max_scroll_pos) {
         ImGui::SetCursorPos(ImVec2(display_size.x - SELECT_SIZE.x - (5.f * scal.x), display_size.y - SELECT_SIZE.y - (34.f * scal.y)));
         if ((ImGui::Selectable("v", false, ImGuiSelectableFlags_None, SELECT_SIZE))
-            || ImGui::IsKeyPressed(host.cfg.keyboard_leftstick_down) || ImGui::IsKeyPressed(host.cfg.keyboard_button_down))
+            || ImGui::IsKeyPressed(host.cfg.keyboard_button_down))
             scroll_type = -1;
     }
     ImGui::SetWindowFontScale(1.f * scal.x);

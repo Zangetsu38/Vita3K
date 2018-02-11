@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 
+#define SCE_GXM_COMMAND_LIST_WORD_COUNT 8U
 #define SCE_GXM_DEFAULT_UNIFORM_BUFFER_CONTAINER_INDEX 0xE
 #define SCE_GXM_MAX_VERTEX_STREAMS 16
 #define SCE_GXM_MAX_TEXTURE_UNITS 16
@@ -1208,7 +1209,8 @@ struct GXMRecordState {
 
 struct GxmContextState {
     // Constant after initialisation.
-    SceGxmContextParams params;
+    SceGxmContextParams immediate_params;
+    SceGxmDeferredContextParams deferred_params;
 
     // Surfaces.
     SceGxmColorSurface color_surface;
@@ -1247,6 +1249,10 @@ struct GxmContextState {
     SceGxmDepthFunc back_depth_func = SCE_GXM_DEPTH_FUNC_LESS_EQUAL;
     SceGxmDepthWriteMode front_depth_write_enable = SCE_GXM_DEPTH_WRITE_ENABLED;
     SceGxmDepthWriteMode back_depth_write_enable = SCE_GXM_DEPTH_WRITE_ENABLED;
+
+    // Fragment Program
+    SceGxmFragmentProgramMode front_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
+    SceGxmFragmentProgramMode back_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
 
     // Stencil.
     GxmStencilState front_stencil;

@@ -47,6 +47,15 @@ struct SceNgsVoiceInfo {
     SceUInt32 update_passed;
 };
 
+struct SceNgsVoicePreset {
+    SceInt32 name_offset;
+    SceUInt32 name_length;
+    SceInt32 preset_data_offset;
+    SceUInt32 size_preset_data;
+    SceInt32 bypass_flags_offset;
+    SceUInt32 num_bypass_blags;
+};
+
 static_assert(sizeof(SceNgsPatchAudioPropInfo) == 24);
 
 struct SceNgsPatchDeliveryInfo {
@@ -526,8 +535,18 @@ EXPORT(int, sceNgsVoiceGetStateData, SceNgsVoiceHandle voice_handle, const std::
     return SCE_NGS_OK;
 }
 
-EXPORT(int, sceNgsVoiceInit) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceNgsVoiceInit, SceNgsVoiceHandle voice_handle, const SceNgsVoicePreset *pPreset, const SceUInt32 uInitFlags) {
+    if (host.cfg.disable_ngs) {
+        return 0;
+    }
+
+    ngs::Voice *voice = voice_handle.get(host.mem);
+
+    if (!voice) {
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    }
+
+    voice;
 }
 
 EXPORT(int, sceNgsVoiceKeyOff) {

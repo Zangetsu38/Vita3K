@@ -2757,6 +2757,13 @@ NID(sceKernelGetRandomNumber, 0xB2700165)
 // Library "SceLibSsp"
 NID(sceLibSspStackChkFail, 0x39AD080B)
 // Module "SceLibMono"
+// Library "SceKernelForMono"
+NID(SceKernelForMono_1BECC64C, 0x1BECC64C)
+NID(SceKernelForMono_38839DA2, 0x38839DA2)
+NID(SceKernelForMono_92A0964D, 0x92A0964D)
+NID(SceKernelForMono_9A6D085B, 0x9A6D085B)
+NID(SceKernelForMono_AD210F16, 0xAD210F16)
+NID(SceKernelForMono_E513151F, 0xE513151F)
 // Library "SceLibMono"
 NID(mono_security_enable_core_clr, 0x02A867BC)
 // Module "SceLibMonoBridge"

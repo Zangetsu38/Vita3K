@@ -417,12 +417,13 @@ EXPORT(int, _sceKernelUnlockLwMutex) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceKernelWaitCond) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceKernelWaitCond, SceUID cond_id, SceUInt32 *timeout) {
+    return condvar_wait(host.kernel, host.mem, export_name, thread_id, cond_id, timeout, SyncWeight::Heavy);
 }
 
-EXPORT(int, _sceKernelWaitCondCB) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceKernelWaitCondCB, SceUID cond_id, SceUInt32 *timeout) {
+    STUBBED("no CB");
+    return condvar_wait(host.kernel, host.mem, export_name, thread_id, cond_id, timeout, SyncWeight::Heavy);
 }
 
 EXPORT(SceInt32, _sceKernelWaitEvent, SceUID eventId, SceUInt32 waitPattern, SceUInt32 *pResultPattern, SceUInt64 *pUserData, SceUInt32 *pTimeout) {
@@ -494,8 +495,9 @@ EXPORT(int, _sceKernelWaitSignal, uint32_t unknown, uint32_t delay, uint32_t tim
     return SCE_KERNEL_OK;
 }
 
-EXPORT(int, _sceKernelWaitSignalCB) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceKernelWaitSignalCB, uint32_t unknown, uint32_t delay, uint32_t timeout, SceKernelWaitSignalParams *params) {
+    STUBBED("sceKernelWaitSignal, no CB");
+    return export__sceKernelWaitSignal(host, thread_id, "_sceKernelWaitSignalCB", unknown, delay, timeout, params);
 }
 
 int wait_thread_end(HostState &host, SceUID thread_id, SceUID thid, int *stat) {
@@ -567,7 +569,9 @@ EXPORT(int, sceKernelChangeThreadVfpException) {
 }
 
 EXPORT(int, sceKernelCheckCallback) {
-    return UNIMPLEMENTED();
+    //   const ThreadStatefPtr thread = lock_and_find(thread_id, host.kernel.threads, host.kernel.mutex);
+    STUBBED("checkcallback");
+    return 1;
 }
 
 EXPORT(int, sceKernelCheckWaitableStatus) {

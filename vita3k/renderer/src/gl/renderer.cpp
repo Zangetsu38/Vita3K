@@ -446,9 +446,8 @@ void set_context(GLContext &context, GxmContextState &state, const MemState &mem
 void get_surface_data(GLContext &context, size_t width, size_t height, size_t stride_in_pixels, uint32_t *pixels, SceGxmColorFormat format) {
     R_PROFILE(__func__);
 
-    if (pixels == nullptr) {
+    if (!pixels)
         return;
-    }
 
     glPixelStorei(GL_PACK_ROW_LENGTH, static_cast<GLint>(stride_in_pixels));
 
@@ -461,6 +460,7 @@ void get_surface_data(GLContext &context, size_t width, size_t height, size_t st
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, pixels);
         break;
     case SCE_GXM_COLOR_FORMAT_U8U8U8U8_RGBA:
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_U8U8U8U8_RGBA");
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         for (int i = 0; i < width * height; ++i) {
             uint8_t *pixel = reinterpret_cast<uint8_t *>(&pixels[i]);
@@ -468,8 +468,21 @@ void get_surface_data(GLContext &context, size_t width, size_t height, size_t st
             std::swap(pixel[1], pixel[2]);
         }
         break;
+    case SCE_GXM_COLOR_FORMAT_U4U4U4U4_ARGB: // Time travel
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_U4U4U4U4_ARGB");
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, pixels);
+        break;
+    case SCE_GXM_COLOR_FORMAT_F32_R: // Gundam Extreme
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F32_R");
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RED, GL_FLOAT, pixels);
+        break;
+    case SCE_GXM_COLOR_FORMAT_F11F11F10_RGB: // F1 2011
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F11F11F10_RGB");
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, pixels);
+        break;
     case SCE_GXM_COLOR_FORMAT_U8U8U8_BGR:
-        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGB, GL_UNSIGNED_BYTE, pixels);
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_U8U8U8_BGR");
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_BGR, GL_UNSIGNED_BYTE, pixels);
         break;
     case SCE_GXM_COLOR_FORMAT_U5U6U5_RGB:
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGB, GL_UNSIGNED_SHORT_5_6_5, pixels);
@@ -481,21 +494,30 @@ void get_surface_data(GLContext &context, size_t width, size_t height, size_t st
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RED, GL_UNSIGNED_BYTE, pixels);
         break;
     case SCE_GXM_COLOR_FORMAT_U2F10F10F10_ABGR:
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_U2F10F10F10_ABGR");
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, pixels);
         break;
     case SCE_GXM_COLOR_FORMAT_F16_R:
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F16F16_GR");
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RED, GL_HALF_FLOAT, pixels);
         break;
     case SCE_GXM_COLOR_FORMAT_F16F16_GR:
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F16F16_GR");
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RG, GL_HALF_FLOAT, pixels);
         break;
     case SCE_GXM_COLOR_FORMAT_F16F16F16F16_ABGR:
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_HALF_FLOAT, pixels);
         break;
-    case SCE_GXM_COLOR_FORMAT_F16F16F16F16_ARGB:
+    case SCE_GXM_COLOR_FORMAT_F16F16F16F16_ARGB: // Gundam Extreme, Call of Duty
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F16F16F16F16_ARGB");
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_BGRA, GL_HALF_FLOAT, pixels);
         break;
-    case SCE_GXM_COLOR_FORMAT_F32F32_GR:
+    case SCE_GXM_COLOR_FORMAT_F16F16F16F16_RGBA: // Wipeout 2048 (Photos mode)
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F16F16F16F16_RGBA");
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_HALF_FLOAT, pixels);
+        break;
+    case SCE_GXM_COLOR_FORMAT_F32F32_GR: 
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F32F32_GR");
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RG, GL_FLOAT, pixels);
         break;
     case SCE_GXM_COLOR_FORMAT_SE5M9M9M9_RGB:
@@ -512,8 +534,25 @@ void get_surface_data(GLContext &context, size_t width, size_t height, size_t st
         }
         break;
     }
-    case SCE_GXM_COLOR_FORMAT_U10U10U10U2_RGBA:
-        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, pixels);
+    case SCE_GXM_COLOR_FORMAT_U10U10U10U2_RGBA: // Chronovolt
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_U10U10U10U2_RGBA");
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_BGRA, GL_UNSIGNED_INT_2_10_10_10_REV, pixels);
+        break;
+    case SCE_GXM_COLOR_FORMAT_F10F11F11_BGR: // Trillion: God of Destruction
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_BGR, GL_UNSIGNED_INT_10F_11F_11F_REV, pixels);
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F10F11F11_BGR");
+        break;
+    case SCE_GXM_COLOR_FORMAT_F10F10F10U2_RGBA: // f1 2011
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_INT_10_10_10_2, pixels);
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_F10F10F10U2_RGBA");
+        break;
+    case SCE_GXM_COLOR_FORMAT_U8U8_GR: // Grim fandango
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RG, GL_UNSIGNED_BYTE, pixels);
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_U8U8_GR");
+        break;
+    case SCE_GXM_COLOR_FORMAT_U16_R: // LBP
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RED, GL_UNSIGNED_SHORT, pixels);
+        LOG_DEBUG("Todo: SCE_GXM_COLOR_FORMAT_U16_R");
         break;
     default:
         LOG_ERROR("Color format not implemented: {}, report this to developer", format);

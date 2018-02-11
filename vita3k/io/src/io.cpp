@@ -230,7 +230,8 @@ std::string translate_path(const char *path, VitaIoDevice &device, const IOState
         break;
     }
     case +VitaIoDevice::tty0:
-    case +VitaIoDevice::tty1: {
+    case +VitaIoDevice::tty1:
+    case +VitaIoDevice::tty2: {
         return std::string{};
     }
     default: {
@@ -264,7 +265,7 @@ SceUID open_file(IOState &io, const char *path, const int flags, const std::wstr
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    if (device == VitaIoDevice::tty0 || device == VitaIoDevice::tty1) {
+    if (device == VitaIoDevice::tty0 || device == VitaIoDevice::tty1 || device == VitaIoDevice::tty2) {
         assert(flags >= 0);
 
         auto tty_type = TTY_UNKNOWN;

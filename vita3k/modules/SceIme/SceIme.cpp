@@ -17,11 +17,65 @@
 
 #include "SceIme.h"
 
+struct SceImeRect {
+    SceUInt32 x;
+    SceUInt32 y;
+    SceUInt32 width;
+    SceUInt32 height;
+};
+
+struct SceImeEditText {
+    SceUInt32 preeditIndex;
+    SceUInt32 preeditLength;
+    SceUInt32 caretIndex;
+    Ptr<SceWChar16> str;
+    SceUInt32 editIndex;
+    SceInt32 editLengthChange;
+};
+
+union SceImeEventParam {
+    SceImeRect rect;
+    SceImeEditText text;
+    SceUInt32 caretIndex;
+    SceUChar8 reserved[40];
+};
+
+typedef struct SceImeEvent {
+    SceUInt32 id;
+    SceImeEventParam param;
+};
+
+typedef void (*SceImeEventHandler)(void *arg, const SceImeEvent *e);
+
+typedef SceInt32 (*SceImeTextFilter)(
+    SceWChar16 *outText,
+    SceUInt32 *outTextLength,
+    const SceWChar16 *srcText,
+    SceUInt32 srcTextLength);
+
+struct SceImeParam {
+    SceUInt32 sdkVersion;
+    SceUInt32 inputMethod;
+    SceUInt64 supportedLanguages;
+    SceBool languagesForced;
+    SceUInt32 type;
+    SceUInt32 option;
+    void *work;
+    void *arg;
+    SceImeEventHandler handler;
+    SceImeTextFilter filter;
+    Ptr<SceWChar16> initialText;
+    SceUInt32 maxTextLength;
+    SceWChar16 *inputTextBuffer;
+    SceUChar8 enterLabel;
+    SceUChar8 reserved[7];
+};
+
 EXPORT(int, sceImeClose) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceImeOpen) {
+EXPORT(int, sceImeOpen, SceImeParam *param) {
     return UNIMPLEMENTED();
 }
 
@@ -38,7 +92,8 @@ EXPORT(int, sceImeSetText) {
 }
 
 EXPORT(int, sceImeUpdate) {
-    return UNIMPLEMENTED();
+    STUBBED("Hack");
+    return 0x80100701;
 }
 
 BRIDGE_IMPL(sceImeClose)

@@ -1520,7 +1520,7 @@ void draw_live_area_screen(GuiState &gui, HostState &host) {
     ImGui::SetWindowFontScale(2.f * scal.x);
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.5f, 0.5f));
     ImGui::SetCursorPos(SELECTABLE_POS);
-    if ((ImGui::Selectable("<", false, ImGuiSelectableFlags_None, SELECTABLE_SIZE)) || ImGui::IsKeyPressed(host.cfg.keyboard_button_l1) || ImGui::IsKeyPressed(host.cfg.keyboard_leftstick_left) || (wheel_counter == 1)) {
+    if ((ImGui::Selectable("<", false, ImGuiSelectableFlags_None, SELECTABLE_SIZE)) || ImGui::IsKeyPressed(host.cfg.keyboard_button_l1) || (wheel_counter == 1)) {
         if (gui.current_app_selected == 0) {
             gui.live_area.live_area_screen = false;
             gui.live_area.app_selector = true;
@@ -1529,7 +1529,7 @@ void draw_live_area_screen(GuiState &gui, HostState &host) {
     }
     if (gui.current_app_selected < gui.apps_list_opened.size() - 1) {
         ImGui::SetCursorPos(ImVec2(display_size.x - SELECTABLE_SIZE.x - SELECTABLE_POS.x, SELECTABLE_POS.y));
-        if ((ImGui::Selectable(">", false, ImGuiSelectableFlags_None, SELECTABLE_SIZE)) || ImGui::IsKeyPressed(host.cfg.keyboard_button_r1) || ImGui::IsKeyPressed(host.cfg.keyboard_leftstick_right) || (wheel_counter == -1))
+        if ((ImGui::Selectable(">", false, ImGuiSelectableFlags_None, SELECTABLE_SIZE)) || ImGui::IsKeyPressed(host.cfg.keyboard_button_r1) || (wheel_counter == -1))
             ++gui.current_app_selected;
     }
     ImGui::SetWindowFontScale(1.0f * scal.x);

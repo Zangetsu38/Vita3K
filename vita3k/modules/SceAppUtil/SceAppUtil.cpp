@@ -98,8 +98,15 @@ EXPORT(int, sceAppUtilBgdlGetStatus) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAppUtilDrmClose) {
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceAppUtilDrmClose, const SceAppUtilDrmAddcontId *dirName, const SceAppUtilMountPoint *mountPoint) {
+    if (!dirName)
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
+
+    const auto drm_content_id_path{ fs::path(host.pref_path) / (+VitaIoDevice::ux0)._to_string() / host.io.device_paths.addcont0 / reinterpret_cast<const char *>(dirName->data) };
+    if (!fs::exists(drm_content_id_path) || (fs::is_empty(drm_content_id_path)))
+        return RET_ERROR(SCE_APPUTIL_ERROR_NOT_MOUNTED);
+
+    return 0;
 }
 
 EXPORT(SceInt32, sceAppUtilDrmOpen, const SceAppUtilDrmAddcontId *dirName, const SceAppUtilMountPoint *mountPoint) {
@@ -114,7 +121,7 @@ EXPORT(SceInt32, sceAppUtilDrmOpen, const SceAppUtilDrmAddcontId *dirName, const
     return 0;
 }
 
-EXPORT(int, sceAppUtilInit) {
+EXPORT(int, sceAppUtilInit, const SceAppUtilInitParam *initParam, SceAppUtilBootParam *bootParam) {
     return UNIMPLEMENTED();
 }
 

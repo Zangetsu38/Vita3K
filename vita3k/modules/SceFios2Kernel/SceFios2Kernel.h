@@ -19,6 +19,17 @@
 
 #include <module/module.h>
 
+typedef int32_t SceFiosOverlayID;
+
+struct sceFiosKernelOverlayGetList_opt {
+    Ptr<SceFiosOverlayID> outIDs;
+    SceSize maxIDs;
+    Ptr<SceSize> actualIDs;
+    int buffer_size;
+    int reserved1;
+    int reserved2;
+};
+
 struct sceFiosKernelOverlayResolveWithRangeSync_opt {
     Ptr<char> pOutPath;
     SceSize maxPath;
