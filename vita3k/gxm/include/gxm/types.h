@@ -1248,6 +1248,10 @@ struct GxmContextState {
     SceGxmDepthWriteMode front_depth_write_enable = SCE_GXM_DEPTH_WRITE_ENABLED;
     SceGxmDepthWriteMode back_depth_write_enable = SCE_GXM_DEPTH_WRITE_ENABLED;
 
+    // Fragment Program
+    SceGxmFragmentProgramMode front_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
+    SceGxmFragmentProgramMode back_fragment_program_enable = SCE_GXM_FRAGMENT_PROGRAM_ENABLED;
+
     // Stencil.
     GxmStencilState front_stencil;
     GxmStencilState back_stencil;

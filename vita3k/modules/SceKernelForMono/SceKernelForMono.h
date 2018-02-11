@@ -17,30 +17,11 @@
 
 #pragma once
 
-#include <enum.h>
+#include <module/module.h>
 
-BETTER_ENUM(VitaIoDevice, int,
-    addcont0 = 0,
-    app0,
-    host0,
-    gro0,
-    grw0,
-    imc0,
-    os0,
-    pd0,
-    sa0,
-    savedata0,
-    savedata1,
-    sd0,
-    tm0,
-    tty0,
-    tty1,
-    tty2,
-    ud0,
-    uma0,
-    ur0,
-    ux0,
-    vd0,
-    vs0,
-    xmc0,
-    _INVALID = -1)
+BRIDGE_DECL(SceKernelForMono_1BECC64C)
+BRIDGE_DECL(SceKernelForMono_38839DA2)
+BRIDGE_DECL(SceKernelForMono_92A0964D)
+BRIDGE_DECL(SceKernelForMono_9A6D085B)
+BRIDGE_DECL(SceKernelForMono_AD210F16)
+BRIDGE_DECL(SceKernelForMono_E513151F)

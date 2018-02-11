@@ -153,6 +153,19 @@ void decompress_packed_float_e5m9m9m9(SceGxmTextureBaseFormat fmt, void *dest, c
     }
 }
 
+void decompress_packed_float_x8u24(SceGxmTextureBaseFormat fmt, void *dest, const void *data, const uint32_t width, const uint32_t height) {
+    const uint32_t *in = reinterpret_cast<const uint32_t *>(data);
+    uint16_t *out = reinterpret_cast<uint16_t *>(dest);
+
+    for (uint32_t in_offset = 0, out_offset = 0; in_offset < width * height; ++in_offset) {
+        const uint32_t packed = in[in_offset];
+        const uint16_t exponent = static_cast<uint16_t>(packed >> 8);
+
+        out[out_offset++] = exponent | ((packed & (0x1FF << 9)) >> 8);
+        out[out_offset++] = exponent | ((packed & 0x1FF) << 1);
+    }
+}
+
 void upload_bound_texture(const SceGxmTexture &gxm_texture, const MemState &mem) {
     R_PROFILE(__func__);
 
@@ -201,6 +214,7 @@ void upload_bound_texture(const SceGxmTexture &gxm_texture, const MemState &mem)
 
         switch (texture_type) {
         case SCE_GXM_TEXTURE_SWIZZLED:
+        case SCE_GXM_TEXTURE_CUBE:
         case SCE_GXM_TEXTURE_TILED:
         case SCE_GXM_TEXTURE_SWIZZLED_ARBITRARY: {
             if (texture_type == SCE_GXM_TEXTURE_SWIZZLED_ARBITRARY) {
@@ -220,6 +234,11 @@ void upload_bound_texture(const SceGxmTexture &gxm_texture, const MemState &mem)
             if (base_format == SCE_GXM_TEXTURE_BASE_FORMAT_SE5M9M9M9) {
                 texture_data_decompressed.resize(width * height * 6);
                 decompress_packed_float_e5m9m9m9(base_format, texture_data_decompressed.data(), pixels, width, height);
+                pixels = texture_data_decompressed.data();
+            } else if (base_format == SCE_GXM_TEXTURE_BASE_FORMAT_X8U24) {
+                LOG_DEBUG("Using X8U24: {}", texture_type);
+                texture_data_decompressed.resize(width * height * 6);
+                decompress_packed_float_x8u24(base_format, texture_data_decompressed.data(), pixels, width, height);
                 pixels = texture_data_decompressed.data();
             } else if (!((base_format >= SCE_GXM_TEXTURE_BASE_FORMAT_PVRT2BPP) && (base_format <= SCE_GXM_TEXTURE_BASE_FORMAT_PVRTII4BPP))) {
                 // Convert data
@@ -303,14 +322,6 @@ void upload_bound_texture(const SceGxmTexture &gxm_texture, const MemState &mem)
 
         glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(pixels_per_stride));
 
-        GLuint sampler_state = 0;
-        glGenSamplers(1, &sampler_state);
-        glSamplerParameterf(sampler_state, GL_TEXTURE_LOD_BIAS, (gxm_texture.lod_bias - 31) / 8);
-        glSamplerParameterf(sampler_state, GL_TEXTURE_MIN_LOD, gxm_texture.lod_min0 | (gxm_texture.lod_min1 << 2));
-
-        GLuint texture_unit = 0;
-        glBindSampler(texture_unit, sampler_state);
-
         if (need_decompress_and_unswizzle_on_cpu)
             glTexSubImage2D(GL_TEXTURE_2D, mip_index, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         else {
@@ -324,8 +335,6 @@ void upload_bound_texture(const SceGxmTexture &gxm_texture, const MemState &mem)
             }
         }
 
-        glBindSampler(texture_unit, 0);
-        glDeleteSamplers(1, &sampler_state);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
         mip_index++;

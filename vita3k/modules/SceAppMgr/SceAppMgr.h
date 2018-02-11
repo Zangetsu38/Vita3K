@@ -57,7 +57,7 @@ EXPORT(SceInt32, _sceAppMgrAppParamGetString, int pid, int param, char *string, 
 EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[], const SceAppMgrLoadExecOptParam *optParam);
 
 SceInt32 __sceAppMgrGetAppState(SceAppMgrAppState *appState, SceUInt32 sizeofSceAppMgrAppState, SceUInt32 buildVersion);
-SceInt32 _sceAppMgrLoadExec(const char *appPath, char *const argv[], const SceAppMgrLoadExecOptParam *optParam);
+SceInt32 _sceAppMgrLoadExec(char *const *appPath, char *const argv[], const SceAppMgrLoadExecOptParam *optParam);
 
 BRIDGE_DECL(__sceAppMgrGetAppState)
 BRIDGE_DECL(_sceAppMgrAcidDirSet)

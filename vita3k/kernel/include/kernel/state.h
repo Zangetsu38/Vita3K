@@ -219,6 +219,9 @@ struct PlayerInfoState {
     // Framebuffer count is defined in info. I'm being safe now and forcing it to 4 (even though its usually 2).
     constexpr static uint32_t RING_BUFFER_COUNT = 4;
 
+    Ptr<char> defaultLanguage;
+    bool auto_start = false;
+
     uint32_t video_buffer_ring_index = 0;
     uint32_t video_buffer_size = 0;
     std::array<Ptr<uint8_t>, RING_BUFFER_COUNT> video_buffer;

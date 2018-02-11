@@ -334,12 +334,12 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
                 if (i)
                     host.load_self_argv += ' ';
                 std::string c_argv = argv[i].get(host.mem);
-                std::replace(c_argv.begin(), c_argv.end(), ' ', '#');
+                std::replace(c_argv.begin(), c_argv.end(), ' ', '?');
                 host.load_self_argv += c_argv;
             }
             host.load_self_argv += "\"";
             const auto args = host.load_self_argv.size() - 2; // Remove this 2 "" counted
-
+            LOG_DEBUG("argv: {}, size: {}", host.load_self_argv, args);
             if (args > 1024)
                 return RET_ERROR(SCE_APPMGR_ERROR_TOO_LONG_ARGV);
         }

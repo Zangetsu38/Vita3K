@@ -90,7 +90,8 @@ EXPORT(int, sceNgsPatchCreateRouting, ngs::PatchSetupInfo *patch_info, SceNgsPat
     *handle = source->rack->system->voice_scheduler.patch(host.mem, patch_info);
 
     if (!*handle) {
-        return RET_ERROR(SCE_NGS_ERROR);
+        LOG_ERROR("Create patch error");
+        return 0; //RET_ERROR(SCE_NGS_ERROR);
     }
 
     return SCE_NGS_OK;
@@ -117,7 +118,8 @@ EXPORT(int, sceNgsPatchRemoveRouting, SceNgsPatchHandle patch_handle) {
     }
 
     if (!patch->source->remove_patch(host.mem, patch_handle)) {
-        return RET_ERROR(SCE_NGS_ERROR);
+        LOG_ERROR("Remove patch error");
+        return 0; // RET_ERROR(SCE_NGS_ERROR);
     }
 
     return 0;
@@ -431,7 +433,7 @@ EXPORT(int, sceNgsVoiceKill, SceNgsVoiceHandle voice_handle) {
     }
 
     if (!voice->rack->system->voice_scheduler.stop(voice)) {
-        return RET_ERROR(SCE_NGS_ERROR);
+        return 0; //RET_ERROR(SCE_NGS_ERROR);
     }
 
     return 0;

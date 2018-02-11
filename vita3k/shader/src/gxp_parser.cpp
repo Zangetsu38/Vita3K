@@ -167,7 +167,7 @@ ProgramInput shader::get_program_input(const SceGxmProgram &program) {
             break;
         }
         default: {
-            LOG_CRITICAL("Unknown parameter type used in shader.");
+            LOG_CRITICAL("Unknown parameter type used in shader: {}.", parameter.category);
             break;
         }
         }

@@ -223,6 +223,31 @@ COMMAND_SET_STATE(depth_write_enable) {
     }
 }
 
+COMMAND_SET_STATE(fragment_program_enable) {
+    const bool is_front = helper.pop<bool>();
+
+    if (is_front) {
+        state->front_fragment_program_enable = helper.pop<SceGxmFragmentProgramMode>();
+    } else {
+        state->back_fragment_program_enable = helper.pop<SceGxmFragmentProgramMode>();
+    }
+
+    switch (renderer.current_backend) {
+    case Backend::OpenGL: {
+        if (is_front)
+            gl::sync_front_fragment_program_enable(*state);
+        else
+            // LOG_WARN("Unhandle set back polygon mode for OpenGL backend");
+
+            break;
+    }
+
+    default:
+        REPORT_MISSING(renderer.current_backend);
+        break;
+    }
+}
+
 COMMAND_SET_STATE(polygon_mode) {
     const bool is_front = helper.pop<bool>();
 
@@ -395,6 +420,7 @@ COMMAND(handle_set_state) {
         { renderer::GXMState::DepthBias, cmd_set_state_depth_bias },
         { renderer::GXMState::DepthFunc, cmd_set_state_depth_func },
         { renderer::GXMState::DepthWriteEnable, cmd_set_state_depth_write_enable },
+        { renderer::GXMState::FragmentProgramEnable, cmd_set_state_fragment_program_enable },
         { renderer::GXMState::PolygonMode, cmd_set_state_polygon_mode },
         { renderer::GXMState::PointLineWidth, cmd_set_state_point_line_width },
         { renderer::GXMState::StencilFunc, cmd_set_state_stencil_func },

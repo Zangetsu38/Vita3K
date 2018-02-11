@@ -473,6 +473,11 @@ spv::Id USSETranslatorVisitor::do_alu_op(Instruction &inst, const Imm4 source_ma
     }
 
     case Opcode::FPSUB8:
+    case Opcode::FSUB:
+        LOG_DEBUG("Using shader FSUB");
+        result = m_b.createBinOp(spv::OpFSub, source_type, vsrc1, vsrc2);
+        break;
+
     case Opcode::ISUBU16:
     case Opcode::ISUB16:
     case Opcode::ISUBU32:
@@ -1352,6 +1357,7 @@ bool USSETranslatorVisitor::vdual(
             result = load(ops[0], write_mask_source);
             break;
         }
+        case Opcode::FADD:
         case Opcode::VADD: {
             const spv::Id first = load(ops[0], write_mask_source);
             const spv::Id second = load(ops[1], write_mask_source);

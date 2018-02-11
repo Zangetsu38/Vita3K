@@ -152,7 +152,7 @@ void sync_viewport(GLContext &context, const GxmContextState &state) {
 
     if (previous_flip_y != context.viewport_flip[1]) {
         // We need to sync again state that uses the flip
-        sync_cull(context, state);
+        //sync_cull(context, state);
         sync_clipping(context, state);
     }
 }
@@ -212,6 +212,10 @@ void sync_front_depth_func(const GxmContextState &state) {
 
 void sync_front_depth_write_enable(const GxmContextState &state) {
     glDepthMask(state.front_depth_write_enable == SCE_GXM_DEPTH_WRITE_ENABLED ? GL_TRUE : GL_FALSE);
+}
+
+void sync_front_fragment_program_enable(const GxmContextState &state) {
+    glDepthMask(state.front_fragment_program_enable == SCE_GXM_FRAGMENT_PROGRAM_ENABLED ? GL_TRUE : GL_FALSE);
 }
 
 bool sync_depth_data(const GxmContextState &state) {

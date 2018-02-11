@@ -226,8 +226,10 @@ EXPORT(int, _sceGxmMidSceneFlush) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceGxmSetVertexTexture) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceGxmSetVertexTexture, SceGxmContext *context, uint32_t textureIndex, const SceGxmTexture *texture) {
+    context->state.fragment_textures[textureIndex] = *texture;
+
+    return 0;
 }
 
 EXPORT(int, _sceGxmTextureSetHeight) {
@@ -249,8 +251,8 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion, SceGxmSyncObject *vertexSyncObject, Ptr<SceGxmSyncObject> fragmentSyncObject, const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *depthStencil) {
-    if (!context) {
+EXPORT(int, sceGxmBeginScene, SceGxmContext *immediateContext, uint32_t flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion, SceGxmSyncObject *vertexSyncObject, Ptr<SceGxmSyncObject> fragmentSyncObject, const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *depthStencil) {
+    if (!immediateContext) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
 
@@ -266,7 +268,7 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_SCENE);
     }
 
-    context->state.fragment_sync_object = fragmentSyncObject;
+    immediateContext->state.fragment_sync_object = fragmentSyncObject;
     if (fragmentSyncObject.get(host.mem) != nullptr) {
         SceGxmSyncObject *sync = fragmentSyncObject.get(host.mem);
         // Wait for both display queue and fragment stage to be done.
@@ -275,8 +277,8 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
     }
 
     // TODO This may not be right.
-    context->state.fragment_ring_buffer_used = 0;
-    context->state.vertex_ring_buffer_used = 0;
+    immediateContext->state.fragment_ring_buffer_used = 0;
+    immediateContext->state.vertex_ring_buffer_used = 0;
 
     // It's legal to set at client.
     host.gxm.is_in_scene = true;
@@ -299,21 +301,23 @@ EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceG
     const std::uint32_t xmax = (validRegion ? validRegion->xMax : renderTarget->width - 1);
     const std::uint32_t ymax = (validRegion ? validRegion->yMax : renderTarget->height - 1);
 
-    renderer::set_context(*host.renderer, context->renderer.get(), &context->state, renderTarget->renderer.get(),
+    renderer::set_context(*host.renderer, immediateContext->renderer.get(), &immediateContext->state, renderTarget->renderer.get(),
         color_surface_copy, depth_stencil_surface_copy);
 
     // Set default region clip and viewport
-    renderer::set_region_clip(*host.renderer, context->renderer.get(), &context->state, SCE_GXM_REGION_CLIP_OUTSIDE,
+    renderer::set_region_clip(*host.renderer, immediateContext->renderer.get(), &immediateContext->state, SCE_GXM_REGION_CLIP_OUTSIDE,
         xmin, xmax, ymin, ymax);
 
-    renderer::set_viewport(*host.renderer, context->renderer.get(), &context->state,
+    renderer::set_viewport(*host.renderer, immediateContext->renderer.get(), &immediateContext->state,
         0.5f * static_cast<float>(1.0f + xmin + xmax), 0.5f * (static_cast<float>(1.0 + ymin + ymax)),
         0.5f, 0.5f * static_cast<float>(1.0f + xmax - xmin), -0.5f * static_cast<float>(1.0f + ymax - ymin), 0.5f);
 
     return 0;
 }
 
-EXPORT(int, sceGxmBeginSceneEx, SceGxmContext *immediateContext, uint32_t flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion, SceGxmSyncObject *vertexSyncObject, SceGxmSyncObject *fragmentSyncObject, const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *loadDepthStencilSurface, const SceGxmDepthStencilSurface *storeDepthStencilSurface) {
+EXPORT(int, sceGxmBeginSceneEx, SceGxmContext *immediateContext, uint32_t flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion, SceGxmSyncObject *vertexSyncObject, Ptr<SceGxmSyncObject> fragmentSyncObject, const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *loadDepthStencilSurface, const SceGxmDepthStencilSurface *storeDepthStencilSurface) {
+    LOG_DEBUG("STUB sceGxmBeginSceneEx");
+
     if (!immediateContext) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
@@ -330,7 +334,57 @@ EXPORT(int, sceGxmBeginSceneEx, SceGxmContext *immediateContext, uint32_t flags,
         return RET_ERROR(SCE_GXM_ERROR_WITHIN_SCENE);
     }
 
-    return UNIMPLEMENTED();
+    immediateContext->state.fragment_sync_object = fragmentSyncObject;
+    if (fragmentSyncObject.get(host.mem) != nullptr) {
+        SceGxmSyncObject *sync = fragmentSyncObject.get(host.mem);
+        // Wait for both display queue and fragment stage to be done.
+        // If it's offline render, the sync object already has the display queue subject done, so don't worry.
+        renderer::wishlist(sync, (renderer::SyncObjectSubject)(renderer::SyncObjectSubject::DisplayQueue | renderer::SyncObjectSubject::Fragment));
+    }
+
+    // TODO This may not be right.
+    immediateContext->state.fragment_ring_buffer_used = 0;
+    immediateContext->state.vertex_ring_buffer_used = 0;
+
+    // It's legal to set at client.
+    host.gxm.is_in_scene = true;
+
+    SceGxmColorSurface *color_surface_copy = nullptr;
+    SceGxmDepthStencilSurface *load_depth_stencil_surface_copy = nullptr;
+    SceGxmDepthStencilSurface *store_depth_stencil_surface_copy = nullptr;
+
+    if (colorSurface) {
+        color_surface_copy = new SceGxmColorSurface;
+        *color_surface_copy = *colorSurface;
+    }
+
+    if (loadDepthStencilSurface) {
+        load_depth_stencil_surface_copy = new SceGxmDepthStencilSurface;
+        *load_depth_stencil_surface_copy = *loadDepthStencilSurface;
+    }
+
+    if (storeDepthStencilSurface) {
+        store_depth_stencil_surface_copy = new SceGxmDepthStencilSurface;
+        *store_depth_stencil_surface_copy = *storeDepthStencilSurface;
+    }
+
+    const std::uint32_t xmin = 0;
+    const std::uint32_t ymin = 0;
+    const std::uint32_t xmax = (validRegion ? validRegion->xMax : renderTarget->width - 1);
+    const std::uint32_t ymax = (validRegion ? validRegion->yMax : renderTarget->height - 1);
+
+    renderer::set_context(*host.renderer, immediateContext->renderer.get(), &immediateContext->state, renderTarget->renderer.get(),
+        color_surface_copy, load_depth_stencil_surface_copy, store_depth_stencil_surface_copy);
+
+    // Set default region clip and viewport
+    renderer::set_region_clip(*host.renderer, immediateContext->renderer.get(), &immediateContext->state, SCE_GXM_REGION_CLIP_OUTSIDE,
+        xmin, xmax, ymin, ymax);
+
+    renderer::set_viewport(*host.renderer, immediateContext->renderer.get(), &immediateContext->state,
+        0.5f * static_cast<float>(1.0f + xmin + xmax), 0.5f * (static_cast<float>(1.0 + ymin + ymax)),
+        0.5f, 0.5f * static_cast<float>(1.0f + xmax - xmin), -0.5f * static_cast<float>(1.0f + ymax - ymin), 0.5f);
+
+    return 0;
 }
 
 EXPORT(void, sceGxmColorSurfaceGetClip, const SceGxmColorSurface *surface, uint32_t *xMin, uint32_t *yMin, uint32_t *xMax, uint32_t *yMax) {
@@ -434,13 +488,17 @@ EXPORT(int, sceGxmColorSurfaceSetData, SceGxmColorSurface *surface, Ptr<void> da
         return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
     }
 
-    return UNIMPLEMENTED();
+    surface->data = data.address();
+
+    return 0;
 }
 
 EXPORT(int, sceGxmColorSurfaceSetDitherMode, SceGxmColorSurface *surface, SceGxmColorSurfaceDitherMode ditherMode) {
     if (!surface) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
+
+    //surface->pbeEmitWords[5] = ditherMode;
 
     return UNIMPLEMENTED();
 }
@@ -450,7 +508,9 @@ EXPORT(int, sceGxmColorSurfaceSetFormat, SceGxmColorSurface *surface, SceGxmColo
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
 
-    return UNIMPLEMENTED();
+    surface->colorFormat = format;
+
+    return 0;
 }
 
 EXPORT(int, sceGxmColorSurfaceSetGammaMode, SceGxmColorSurface *surface, SceGxmColorSurfaceGammaMode gammaMode) {
@@ -458,12 +518,14 @@ EXPORT(int, sceGxmColorSurfaceSetGammaMode, SceGxmColorSurface *surface, SceGxmC
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
 
-    return UNIMPLEMENTED();
+    surface->backgroundTex.gamma_mode = gammaMode;
+
+    return 0;
 }
 
 EXPORT(void, sceGxmColorSurfaceSetScaleMode, SceGxmColorSurface *surface, SceGxmColorSurfaceScaleMode scaleMode) {
     assert(surface);
-    UNIMPLEMENTED();
+    surface->downscale = scaleMode;
 }
 
 EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmContext> *context) {
@@ -625,15 +687,15 @@ EXPORT(void, sceGxmDepthStencilSurfaceSetBackgroundStencil, SceGxmDepthStencilSu
 EXPORT(void, sceGxmDepthStencilSurfaceSetForceLoadMode, SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceLoadMode forceLoad) {
     assert(surface);
     // TODO: Implement on the renderer side
-    // surface->zlsControl = (forceLoad & SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED) | (surface->zlsControl & ~SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED);
-    UNIMPLEMENTED();
+    //LOG_DEBUG_IF(forceLoad == SCE_GXM_DEPTH_STENCIL_FORCE_LOAD_ENABLED, "forceload enable");
+    surface->zlsControl = (forceLoad & 2) | (surface->zlsControl & 0xFFFFFFFD);
 }
 
 EXPORT(void, sceGxmDepthStencilSurfaceSetForceStoreMode, SceGxmDepthStencilSurface *surface, SceGxmDepthStencilForceStoreMode forceStore) {
     assert(surface);
     // TODO: Implement on the renderer side
-    // surface->zlsControl = (forceStore & SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED) | (surface->zlsControl & ~SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED);
-    UNIMPLEMENTED();
+    //LOG_DEBUG_IF(forceStore == SCE_GXM_DEPTH_STENCIL_FORCE_STORE_ENABLED, "forcemode enable");
+    surface->zlsControl = (forceStore & 4) | (surface->zlsControl & 0xFFFFFFFB);
 }
 
 EXPORT(int, sceGxmDestroyContext, Ptr<SceGxmContext> context) {
@@ -1196,7 +1258,9 @@ EXPORT(int, sceGxmNotificationWait, const SceGxmNotification *notification) {
     if (!notification) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
-    return UNIMPLEMENTED();
+    notification->address.address() == notification->value;
+
+    return 0;
 }
 
 EXPORT(int, sceGxmPadHeartbeat, const SceGxmColorSurface *displaySurface, SceGxmSyncObject *displaySyncObject) {
@@ -1689,6 +1753,7 @@ EXPORT(int, sceGxmProgramParameterGetType, const SceGxmProgramParameter *paramet
 }
 
 EXPORT(bool, sceGxmProgramParameterIsRegFormat, const SceGxmProgram *program, const SceGxmProgramParameter *parameter) {
+    STUBBED("sceGxmProgramParameterIsRegFormat");
     if (program->is_fragment()) {
         return false;
     }
@@ -1697,7 +1762,7 @@ EXPORT(bool, sceGxmProgramParameterIsRegFormat, const SceGxmProgram *program, co
         return false;
     }
 
-    return UNIMPLEMENTED();
+    return program->is_frag_color_used();
 }
 
 EXPORT(bool, sceGxmProgramParameterIsSamplerCube, const SceGxmProgramParameter *parameter) {
@@ -1763,7 +1828,7 @@ EXPORT(void, sceGxmSetBackDepthWriteEnable, SceGxmContext *context, SceGxmDepthW
 }
 
 EXPORT(void, sceGxmSetBackFragmentProgramEnable, SceGxmContext *context, SceGxmFragmentProgramMode enable) {
-    UNIMPLEMENTED();
+    renderer::set_fragment_program_enable_mode(*host.renderer, context->renderer.get(), &context->state, false, enable);
 }
 
 EXPORT(void, sceGxmSetBackLineFillLastPixelEnable, SceGxmContext *context, SceGxmLineFillLastPixelMode enable) {
@@ -1843,9 +1908,6 @@ EXPORT(int, sceGxmSetFragmentDefaultUniformBuffer, SceGxmContext *context, Ptr<c
 }
 
 EXPORT(void, sceGxmSetFragmentProgram, SceGxmContext *context, Ptr<const SceGxmFragmentProgram> fragmentProgram) {
-    assert(context);
-    assert(fragmentProgram);
-
     if (!context || !fragmentProgram)
         return;
 
@@ -1859,6 +1921,10 @@ EXPORT(int, sceGxmSetFragmentTexture, SceGxmContext *context, uint32_t textureIn
 
     if (textureIndex > (SCE_GXM_MAX_TEXTURE_UNITS - 1)) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
+    }
+
+    if (texture->data_addr == 0) {
+        LOG_DEBUG("NULL DATA for texture addr 0x{:X}", (std::uint64_t)texture);
     }
 
     renderer::set_fragment_texture(*host.renderer, context->renderer.get(), &context->state, textureIndex, *texture);
@@ -1892,7 +1958,7 @@ EXPORT(void, sceGxmSetFrontDepthWriteEnable, SceGxmContext *context, SceGxmDepth
 }
 
 EXPORT(void, sceGxmSetFrontFragmentProgramEnable, SceGxmContext *context, SceGxmFragmentProgramMode enable) {
-    UNIMPLEMENTED();
+    renderer::set_fragment_program_enable_mode(*host.renderer, context->renderer.get(), &context->state, true, enable);
 }
 
 EXPORT(void, sceGxmSetFrontLineFillLastPixelEnable, SceGxmContext *context, SceGxmLineFillLastPixelMode enable) {
@@ -2108,9 +2174,6 @@ EXPORT(int, sceGxmSetVertexDefaultUniformBuffer, SceGxmContext *context, Ptr<con
 }
 
 EXPORT(void, sceGxmSetVertexProgram, SceGxmContext *context, Ptr<const SceGxmVertexProgram> vertexProgram) {
-    assert(context);
-    assert(vertexProgram);
-
     if (!context || !vertexProgram)
         return;
 
@@ -2137,8 +2200,9 @@ EXPORT(int, sceGxmSetVertexTexture, SceGxmContext *context, uint32_t textureInde
     if (textureIndex > (SCE_GXM_MAX_TEXTURE_UNITS - 1)) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_VALUE);
     }
+    context->state.fragment_textures[textureIndex] = *texture;
 
-    return UNIMPLEMENTED();
+    return 0;
 }
 
 EXPORT(int, sceGxmSetVertexUniformBuffer, SceGxmContext *context, uint32_t bufferIndex, Ptr<const void> bufferData) {
@@ -2667,17 +2731,21 @@ EXPORT(int, sceGxmTextureInitCube, SceGxmTexture *texture, Ptr<const void> data,
     if (!texture) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
-    STUBBED("Stub InitCube");
-    const int result = init_texture_base(export_name, texture, data, texFormat, width, height, mipCount, SCE_GXM_TEXTURE_CUBE);
+
+    const auto result = init_texture_base(export_name, texture, data, texFormat, width, height, mipCount, SCE_GXM_TEXTURE_CUBE);
+    LOG_DEBUG("sceGxmTextureInitCube Inimplemeted: width: {}, height: {}", width, height);
 
     return result;
 }
 
-EXPORT(int, sceGxmTextureInitCubeArbitrary, SceGxmTexture *texture, const void *data, SceGxmTextureFormat texFormat, uint32_t width, uint32_t height, uint32_t mipCount) {
+EXPORT(int, sceGxmTextureInitCubeArbitrary, SceGxmTexture *texture, Ptr<const void> data, SceGxmTextureFormat texFormat, uint32_t width, uint32_t height, uint32_t mipCount) {
     if (!texture) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
     }
-    return UNIMPLEMENTED();
+    const auto result = init_texture_base(export_name, texture, data, texFormat, width, height, mipCount, SCE_GXM_TEXTURE_CUBE_ARBITRARY);
+    LOG_DEBUG("sceGxmTextureInitCubeArbitrary Inimplemeted: width: {}, height: {}", width, height);
+
+    return result;
 }
 
 EXPORT(int, sceGxmTextureInitLinear, SceGxmTexture *texture, Ptr<const void> data, SceGxmTextureFormat texFormat, uint32_t width, uint32_t height, uint32_t mipCount) {

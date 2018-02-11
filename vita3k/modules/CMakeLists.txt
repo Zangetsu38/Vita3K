@@ -64,6 +64,7 @@ add_library(modules STATIC
 	SceJpegEnc/SceJpegEncUser.cpp SceJpegEnc/SceJpegEncUser.h
 	SceJpegEncArm/SceJpegEncArm.cpp SceJpegEncArm/SceJpegEncArm.h
 	SceKernelDmacMgr/SceDmacmgr.cpp SceKernelDmacMgr/SceDmacmgr.h
+	SceKernelForMono/SceKernelForMono.cpp SceKernelForMono/SceKernelForMono.h
 	SceKernelModulemgr/SceBacktrace.cpp SceKernelModulemgr/SceBacktrace.h
 	SceKernelModulemgr/SceModulemgr.cpp SceKernelModulemgr/SceModulemgr.h
 	SceKernelThreadMgr/SceThreadmgr.cpp SceKernelThreadMgr/SceThreadmgr.h

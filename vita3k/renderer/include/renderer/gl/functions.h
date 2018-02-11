@@ -68,6 +68,7 @@ void sync_clipping(GLContext &context, const GxmContextState &state);
 void sync_cull(GLContext &context, const GxmContextState &state);
 void sync_front_depth_func(const GxmContextState &state);
 void sync_front_depth_write_enable(const GxmContextState &state);
+void sync_front_fragment_program_enable(const GxmContextState &state);
 bool sync_depth_data(const GxmContextState &state);
 bool sync_stencil_data(const GxmContextState &state, const MemState &mem);
 void sync_stencil_func(const GxmContextState &state, const MemState &mem, bool is_back_stencil);

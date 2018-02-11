@@ -80,6 +80,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzle1Mode mode) {
         return swizzle_r000;
     case SCE_GXM_TEXTURE_SWIZZLE1_R111:
         return swizzle_r111;
+    default:
+        LOG_ERROR("Translate swizzle unsupported: {}", log_hex(mode));
     }
 
     return swizzle_r;
@@ -99,6 +101,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzle2Mode mode) {
         return swizzle_grgr;
     case SCE_GXM_TEXTURE_SWIZZLE2_00RG:
         return swizzle_00rg;
+    default:
+        LOG_ERROR("Translate swizzle mode 2 unsupported: {}", log_hex(mode));
     }
 
     return swizzle_gr;
@@ -110,6 +114,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzle2ModeAlt mode) {
         return swizzle_sd;
     case SCE_GXM_TEXTURE_SWIZZLE2_DS:
         return swizzle_ds;
+    default:
+        LOG_ERROR("Translate swizzle 2 mode alt unsupported: {}", log_hex(mode));
     }
 
     return swizzle_sd;
@@ -121,6 +127,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzle3Mode mode) {
         return swizzle_bgr;
     case SCE_GXM_TEXTURE_SWIZZLE3_RGB:
         return swizzle_rgb;
+    default:
+        LOG_ERROR("Translate swizzle 3 mode unsupported: {}", log_hex(mode));
     }
 
     return swizzle_bgr;
@@ -144,6 +152,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzle4Mode mode) {
         return swizzle_rgb1;
     case SCE_GXM_TEXTURE_SWIZZLE4_BGR1:
         return swizzle_bgr1;
+    default:
+        LOG_ERROR("Translate swizzle 4 mode unsupported: {}", log_hex(mode));
     }
 
     return swizzle_abgr;
@@ -159,6 +169,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzleYUV420Mode mode) {
         return swizzle_yuv_csc1;
     case SCE_GXM_TEXTURE_SWIZZLE_YVU_CSC1:
         return swizzle_yvu_csc1;
+    default:
+        LOG_ERROR("Translate swizzle YUV 420 mode unsupported: {}", log_hex(mode));
     }
 
     return swizzle_yuv_csc0;
@@ -182,6 +194,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzleYUV422Mode mode) {
         return swizzle_uyvy_csc1;
     case SCE_GXM_TEXTURE_SWIZZLE_VYUY_CSC1:
         return swizzle_vyuy_csc1;
+    default:
+        LOG_ERROR("Translate swizzle YUV 422 mode unsupported: {}", log_hex(mode));
     }
 
     return swizzle_yuyv_csc0;
@@ -190,6 +204,8 @@ static const GLint *translate_swizzle(SceGxmTextureSwizzleYUV422Mode mode) {
 GLenum translate_internal_format(SceGxmTextureFormat src) {
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(src);
     switch (base_format) {
+    default:
+        LOG_ERROR("Translate internal format unsupported: {}", log_hex(base_format));
     // 1 Component.
     case SCE_GXM_TEXTURE_BASE_FORMAT_U8:
     case SCE_GXM_TEXTURE_BASE_FORMAT_S8:
@@ -220,13 +236,11 @@ GLenum translate_internal_format(SceGxmTextureFormat src) {
     case SCE_GXM_TEXTURE_BASE_FORMAT_U5U6U5:
     case SCE_GXM_TEXTURE_BASE_FORMAT_S5S5U6:
     case SCE_GXM_TEXTURE_BASE_FORMAT_X8S8S8U8:
+    case SCE_GXM_TEXTURE_BASE_FORMAT_SE5M9M9M9:
     case SCE_GXM_TEXTURE_BASE_FORMAT_F11F11F10:
     case SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8:
     case SCE_GXM_TEXTURE_BASE_FORMAT_S8S8S8:
         return GL_RGB;
-
-    case SCE_GXM_TEXTURE_BASE_FORMAT_SE5M9M9M9:
-        return GL_RGB16F;
 
     // 4 components.
     case SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4:
@@ -264,6 +278,8 @@ GLenum translate_internal_format(SceGxmTextureFormat src) {
 GLenum translate_format(SceGxmTextureFormat src) {
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(src);
     switch (base_format) {
+    default:
+        LOG_ERROR("Translate format unsupported: {}", log_hex(base_format));
     // 1 Component.
     case SCE_GXM_TEXTURE_BASE_FORMAT_U8:
     case SCE_GXM_TEXTURE_BASE_FORMAT_S8:
@@ -288,6 +304,7 @@ GLenum translate_format(SceGxmTextureFormat src) {
 
     // 2 components (depth-stencil.)
     case SCE_GXM_TEXTURE_BASE_FORMAT_X8U24:
+        LOG_DEBUG("Using X8U24");
         return GL_DEPTH_STENCIL;
 
     // 3 components.
@@ -396,7 +413,7 @@ GLenum translate_type(SceGxmTextureFormat format) {
         return GL_HALF_FLOAT;
     case SCE_GXM_TEXTURE_BASE_FORMAT_F11F11F10:
         LOG_WARN("Unhandled base format SCE_GXM_TEXTURE_BASE_FORMAT_F11F11F10");
-        return GL_UNSIGNED_INT_2_10_10_10_REV;
+        return GL_UNSIGNED_INT_10F_11F_11F_REV;
     case SCE_GXM_TEXTURE_BASE_FORMAT_F16F16F16F16:
         return GL_HALF_FLOAT;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U16U16U16U16:
@@ -440,7 +457,9 @@ GLenum translate_type(SceGxmTextureFormat format) {
         return GL_BYTE;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U2F10F10F10:
         LOG_WARN("Unhandled base format SCE_GXM_TEXTURE_BASE_FORMAT_U2F10F10F10");
-        return GL_INT_2_10_10_10_REV;
+        return GL_UNSIGNED_INT_2_10_10_10_REV;
+    default:
+        LOG_ERROR("Translate type unsupported: {}", log_hex(base_format));
     }
 
     LOG_WARN("Unhandled base format {}", log_hex(base_format));
@@ -517,6 +536,8 @@ const GLint *translate_swizzle(SceGxmTextureFormat fmt) {
     // YUV422.
     case SCE_GXM_TEXTURE_BASE_FORMAT_YUV422:
         return translate_swizzle(static_cast<SceGxmTextureSwizzleYUV422Mode>(swizzle));
+    default:
+        LOG_ERROR("Translate swizzle unsupported: {}", log_hex(base_format));
     }
 
     LOG_WARN("Invalid base format {}", log_hex(base_format));
@@ -527,10 +548,12 @@ GLenum translate_wrap_mode(SceGxmTextureAddrMode src) {
     switch (src) {
     case SCE_GXM_TEXTURE_ADDR_REPEAT:
         return GL_REPEAT;
+    case SCE_GXM_TEXTURE_ADDR_MIRROR:
+        return GL_MIRRORED_REPEAT;
     case SCE_GXM_TEXTURE_ADDR_CLAMP:
         return GL_CLAMP_TO_EDGE;
     case SCE_GXM_TEXTURE_ADDR_MIRROR_CLAMP:
-        return GL_CLAMP_TO_EDGE; // FIXME: GL_MIRROR_CLAMP_TO_EDGE is not supported in OpenGL 4.1 core.
+        return GL_MIRROR_CLAMP_TO_EDGE;
     case SCE_GXM_TEXTURE_ADDR_REPEAT_IGNORE_BORDER:
         return GL_REPEAT; // FIXME: Is this correct?
     case SCE_GXM_TEXTURE_ADDR_CLAMP_FULL_BORDER:

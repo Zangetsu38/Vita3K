@@ -15,32 +15,35 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-#pragma once
+#include "SceKernelForMono.h"
 
-#include <enum.h>
+EXPORT(int, SceKernelForMono_1BECC64C) {
+    return UNIMPLEMENTED();
+}
 
-BETTER_ENUM(VitaIoDevice, int,
-    addcont0 = 0,
-    app0,
-    host0,
-    gro0,
-    grw0,
-    imc0,
-    os0,
-    pd0,
-    sa0,
-    savedata0,
-    savedata1,
-    sd0,
-    tm0,
-    tty0,
-    tty1,
-    tty2,
-    ud0,
-    uma0,
-    ur0,
-    ux0,
-    vd0,
-    vs0,
-    xmc0,
-    _INVALID = -1)
+EXPORT(int, SceKernelForMono_38839DA2) {
+    return UNIMPLEMENTED();
+}
+
+EXPORT(int, SceKernelForMono_92A0964D) {
+    return UNIMPLEMENTED();
+}
+
+EXPORT(int, SceKernelForMono_9A6D085B) {
+    return UNIMPLEMENTED();
+}
+
+EXPORT(int, SceKernelForMono_AD210F16) {
+    return UNIMPLEMENTED();
+}
+
+EXPORT(int, SceKernelForMono_E513151F) {
+    return UNIMPLEMENTED();
+}
+
+BRIDGE_IMPL(SceKernelForMono_1BECC64C)
+BRIDGE_IMPL(SceKernelForMono_38839DA2)
+BRIDGE_IMPL(SceKernelForMono_92A0964D)
+BRIDGE_IMPL(SceKernelForMono_9A6D085B)
+BRIDGE_IMPL(SceKernelForMono_AD210F16)
+BRIDGE_IMPL(SceKernelForMono_E513151F)

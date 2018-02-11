@@ -228,12 +228,15 @@ static bool load_func_exports(Ptr<const void> &entry_point, const uint32_t *nids
         if (nid == NID_MODULE_STOP || nid == NID_MODULE_EXIT)
             continue;
 
-        kernel.export_nids.emplace(nid, entry.address());
-        kernel.nid_from_export.emplace(entry.address(), nid);
+        const char *const name = import_name(nid);
+
+        if (strstr(name, "LwMutex") == NULL && strstr(name, "sceKernelGetProcessTime") == NULL) {
+            kernel.export_nids.emplace(nid, entry.address());
+            kernel.nid_from_export.emplace(entry.address(), nid);
+        } else
+            LOG_DEBUG("\tNID {} ({}) at {}", log_hex(nid), name, log_hex(entry.address()));
 
         if (cfg.log_exports) {
-            const char *const name = import_name(nid);
-
             LOG_DEBUG("\tNID {} ({}) at {}", log_hex(nid), name, log_hex(entry.address()));
         }
     }

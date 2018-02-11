@@ -230,7 +230,8 @@ std::string translate_path(const char *path, VitaIoDevice &device, const IOState
         break;
     }
     case +VitaIoDevice::tty0:
-    case +VitaIoDevice::tty1: {
+    case +VitaIoDevice::tty1:
+    case +VitaIoDevice::tty2: {
         return std::string{};
     }
     default: {
@@ -259,12 +260,15 @@ std::string expand_path(IOState &io, const char *path, const std::wstring &pref_
 SceUID open_file(IOState &io, const char *path, const int flags, const std::wstring &pref_path, const char *export_name) {
     auto device = device::get_device(path);
     auto device_for_icase = device;
+    std::string path_str = path;
     if (device == VitaIoDevice::_INVALID) {
         LOG_ERROR("Cannot find device for path: {}", path);
-        return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
-    }
+        device = VitaIoDevice::app0;
+        path_str = "app0:data/minigame/segaages/vita/beruga" + path_str;
+        //return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+    } 
 
-    if (device == VitaIoDevice::tty0 || device == VitaIoDevice::tty1) {
+    if (device == VitaIoDevice::tty0 || device == VitaIoDevice::tty1 || device == VitaIoDevice::tty2) {
         assert(flags >= 0);
 
         auto tty_type = TTY_UNKNOWN;
@@ -280,7 +284,7 @@ SceUID open_file(IOState &io, const char *path, const int flags, const std::wstr
         return fd;
     }
 
-    const auto translated_path = translate_path(path, device, io.device_paths);
+    const auto translated_path = translate_path(path_str.c_str(), device, io.device_paths);
     if (translated_path.empty()) {
         LOG_ERROR("Cannot translate path: {}", path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
@@ -448,16 +452,18 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const std::wstrin
 
     memset(statp, '\0', sizeof(SceIoStat));
 
+    std::string file_str = file;
     fs::path file_path = "";
     if (fd == invalid_fd) {
         auto device = device::get_device(file);
         auto device_for_icase = device;
         if (device == VitaIoDevice::_INVALID) {
             LOG_ERROR("Cannot find device for path: {}", file);
-            return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+            device = VitaIoDevice::app0;
+            file_str = "app0:data/minigame/segaages/vita/beruga" + file_str;
+            //return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
         }
-
-        const auto translated_path = translate_path(file, device, io.device_paths);
+        const auto translated_path = translate_path(file_str.c_str(), device, io.device_paths);
         file_path = device::construct_emulated_path(device, translated_path, pref_path, io.redirect_stdio);
 
         if (!fs::exists(file_path)) {

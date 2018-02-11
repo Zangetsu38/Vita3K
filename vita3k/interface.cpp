@@ -276,8 +276,8 @@ static auto pre_load_module(HostState &host, const std::vector<std::string> &lib
             } else
                 return FileNotFound;
         } else {
-            LOG_DEBUG("Pre-load module at \"{}\" not present", module_path);
-            return FileNotFound;
+            LOG_WARN("Pre-load module at \"{}\" not present", module_path);
+            continue;
         }
     }
 
@@ -338,11 +338,11 @@ static ExitCode load_app_impl(Ptr<const void> &entry_point, HostState &host, con
     const auto is_app = fs::exists(module_app_path) && !fs::is_empty(module_app_path);
     if (is_app) {
         // Load application module
-        const std::vector<std::string> lib_load_list = {
-            "sce_module/libc.suprx",
-            "sce_module/libfios2.suprx",
-            "sce_module/libult.suprx",
-        };
+        std::vector<std::string> lib_load_list;
+        for (const auto &module : fs::directory_iterator(module_app_path)) {
+            if (module.path().extension() == ".suprx")
+                lib_load_list.push_back({ "sce_module/" + module.path().filename().string() });
+        }
 
         pre_load_module(host, lib_load_list, VitaIoDevice::app0);
     }
@@ -358,6 +358,7 @@ static ExitCode load_app_impl(Ptr<const void> &entry_point, HostState &host, con
         const std::vector<std::string> lib_load_list_to_add = {
             "sys/external/libc.suprx",
             "sys/external/libfios2.suprx",
+            "sys/external/libsmart.suprx",
             "sys/external/libult.suprx"
         };
 
@@ -556,12 +557,14 @@ ExitCode run_app(HostState &host, Ptr<const void> &entry_point) {
     SceKernelThreadOptParam param{ 0, 0 };
 
     if (!host.cfg.console_arguments.empty()) {
-        auto args = split(host.cfg.console_arguments, "\\s+");
+        auto split_args = split(host.cfg.console_arguments, "\\s+");
+        //LOG_DEBUG("args: {}", host.cfg.console_arguments);
         // why is this flipped
         std::vector<uint8_t> buf;
-        for (int i = 0; i < args.size(); ++i) {
-            std::replace(args[i].begin(), args[i].end(), '#', ' ');
-            buf.insert(buf.end(), args[i].c_str(), args[i].c_str() + args[i].size() + 1);
+        for (auto &args : split_args) {
+            std::replace(args.begin(), args.end(), '?', ' ');
+            buf.insert(buf.end(), args.c_str(), args.c_str() + args.size() + 1);
+            LOG_DEBUG("args: {}", args);
         }
         auto arr = Ptr<uint8_t>(alloc(host.mem, buf.size(), "arg"));
         memcpy(arr.get(host.mem), buf.data(), buf.size());
