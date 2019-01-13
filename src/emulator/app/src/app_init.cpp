@@ -151,6 +151,9 @@ bool init(HostState &state, Config cfg, const Root &root_paths) {
     if (state.cfg.wait_for_debugger) {
         state.kernel.wait_for_debugger = state.cfg.wait_for_debugger.value();
     }
+
+    state.kernel.cpu_backend = (state.cfg.cpu_backend == 1) ? CPUBackend::Dynarmic : CPUBackend::Unicorn;
+
     state.base_path = root_paths.get_base_path_string();
 
     // If configuration does not provide a preference path, use SDL's default

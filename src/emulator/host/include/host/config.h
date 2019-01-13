@@ -53,4 +53,5 @@ struct Config {
     std::string background_image = {};
     float background_alpha = 0.300f;
     int icon_size = 64;
+    int cpu_backend = 0;
 };
