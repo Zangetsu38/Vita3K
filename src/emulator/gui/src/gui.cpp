@@ -179,6 +179,34 @@ static void init_icons(HostState &host) {
     }
 }
 
+static void init_icon(State& gui, const std::string& image_path) {
+    if (!std::ifstream(image_path).good()) {
+        LOG_INFO("Invalid icon file path {}.", image_path);
+        return;
+    }
+
+    int32_t width = 128;
+    int32_t height = 128;
+    stbi_uc* data = stbi_load(image_path.c_str(), &width, &height, nullptr, STBI_rgb_alpha);
+
+    if (!data) {
+        LOG_INFO("Could not load icon from {}.", image_path);
+        return;
+    }
+
+    GLuint texture;
+    glGenTextures(1, &texture);
+    gui.icon_texture.init(texture, glDeleteTextures);
+
+    glBindTexture(GL_TEXTURE_2D, gui.icon_texture.get());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+}
+
 void init(HostState &host) {
     ImGui::CreateContext();
     ImGui_ImplSdlGL3_Init(host.window.get());

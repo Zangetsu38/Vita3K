@@ -37,6 +37,7 @@ enum SortState {
 };
 
 struct Game {
+    std::string icon;
     std::string app_ver;
     std::string title;
     std::string title_id;
@@ -47,6 +48,7 @@ struct GamesSelector {
     std::map<std::string, GLObject> icons;
     std::string selected_title_id;
     bool is_game_list_sorted{ false };
+    SortState icon_sort_state = NOT_SORTED;
     SortState title_id_sort_state = NOT_SORTED;
     SortState app_ver_sort_state = NOT_SORTED;
     SortState title_sort_state = NOT_SORTED;
@@ -94,6 +96,7 @@ struct State {
     std::vector<std::string> disassembly;
 
     GLObject background_texture;
+    GLObject icon_texture;
 
     SceUID thread_watch_index = -1;
 
