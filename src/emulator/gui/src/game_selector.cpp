@@ -22,6 +22,8 @@
 #include <host/state.h>
 #include <util/string_utils.h>
 
+constexpr float icon_size = 64.0f;
+
 using namespace std::string_literals;
 
 namespace gui {
@@ -46,23 +48,26 @@ void draw_game_selector(HostState &host) {
 
     switch (host.gui.game_selector.state) {
     case SELECT_APP:
-        ImGui::Columns(3);
+        ImGui::Columns(4);
+        ImGui::SetWindowFontScale(1.1f);
+        ImGui::PushStyleColor(ImGuiCol_Text, GUI_COLOR_TEXT_TITLE);
+        ImGui::SetColumnWidth(0, icon_size + /* padding */20);
+        ImGui::Button("Icon"); // Button to fit style, does nothing.
+        ImGui::NextColumn();
         std::string title_id_label = "TitleID";
         switch (host.gui.game_selector.title_id_sort_state) {
         case ASCENDANT:
             title_id_label += " >";
-            ImGui::SetColumnWidth(0, 100);
+            ImGui::SetColumnWidth(1, 100);
             break;
         case DESCENDANT:
             title_id_label += " <";
-            ImGui::SetColumnWidth(0, 100);
+            ImGui::SetColumnWidth(1, 100);
             break;
         default:
-            ImGui::SetColumnWidth(0, 80);
+            ImGui::SetColumnWidth(1, 80);
             break;
         }
-        ImGui::SetWindowFontScale(1.1f);
-        ImGui::PushStyleColor(ImGuiCol_Text, GUI_COLOR_TEXT_TITLE);
         if (ImGui::Button(title_id_label.c_str())) {
             host.gui.game_selector.title_id_sort_state = static_cast<gui::SortState>(std::max(1, (host.gui.game_selector.title_id_sort_state + 1) % 3));
             host.gui.game_selector.app_ver_sort_state = NOT_SORTED;
@@ -87,14 +92,14 @@ void draw_game_selector(HostState &host) {
         switch (host.gui.game_selector.app_ver_sort_state) {
         case ASCENDANT:
             app_ver_label += " >";
-            ImGui::SetColumnWidth(1, 90);
+            ImGui::SetColumnWidth(2, 90);
             break;
         case DESCENDANT:
             app_ver_label += " <";
-            ImGui::SetColumnWidth(1, 90);
+            ImGui::SetColumnWidth(2, 90);
             break;
         default:
-            ImGui::SetColumnWidth(1, 70);
+            ImGui::SetColumnWidth(2, 70);
             break;
         }
         if (ImGui::Button(app_ver_label.c_str())) {
@@ -159,19 +164,24 @@ void draw_game_selector(HostState &host) {
         ImGui::Separator();
         ImGui::SetWindowFontScale(1);
         ImGui::PushStyleColor(ImGuiCol_Text, GUI_COLOR_TEXT);
-        for (auto game : host.gui.game_selector.games) {
-            bool selected_1 = false;
-            bool selected_2 = false;
-            bool selected_3 = false;
+        for (const auto &game : host.gui.game_selector.games) {
+            bool selected[4] = { false, false, false, false };
             if (!search_bar.PassFilter(game.title.c_str()) && !search_bar.PassFilter(game.title_id.c_str()))
                 continue;
-            ImGui::Selectable(game.title_id.c_str(), &selected_1, ImGuiSelectableFlags_SpanAllColumns);
+            if (host.gui.game_selector.icons[game.title_id]) {
+                GLuint texture = host.gui.game_selector.icons[game.title_id].get();
+                if (ImGui::ImageButton(reinterpret_cast<void*>(texture), ImVec2(icon_size, icon_size))) {
+                    selected[0] = true;
+                }
+            }
             ImGui::NextColumn();
-            ImGui::Selectable(game.app_ver.c_str(), &selected_2, ImGuiSelectableFlags_SpanAllColumns);
+            ImGui::Selectable(game.title_id.c_str(), &selected[1], ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, icon_size));
             ImGui::NextColumn();
-            ImGui::Selectable(game.title.c_str(), &selected_3, ImGuiSelectableFlags_SpanAllColumns);
+            ImGui::Selectable(game.app_ver.c_str(), &selected[2], ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, icon_size));
             ImGui::NextColumn();
-            if (selected_1 || selected_2 || selected_3) {
+            ImGui::Selectable(game.title.c_str(), &selected[3], ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, icon_size));
+            ImGui::NextColumn();
+            if (std::find(std::begin(selected), std::end(selected), true) != std::end(selected)) {
                 host.gui.game_selector.selected_title_id = game.title_id;
             }
         }
