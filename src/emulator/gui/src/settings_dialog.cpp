@@ -98,6 +98,9 @@ void draw_settings_dialog(HostState &host) {
     // Core
     if (ImGui::BeginTabItem("Core")) {
         ImGui::PopStyleColor();
+        ImGui::Text("CPU emulation Backend \nSelect your Backend.\n(Reboot after change for apply)");
+        ImGui::RadioButton("Unicorn", &host.cfg.cpu_backend, 0);
+        ImGui::RadioButton("Dynarmic", &host.cfg.cpu_backend, 1);
         if (fs::exists(host.pref_path + "vs0/sys/external")) {
             ImGui::Text("Module List");
             if (ImGui::IsItemHovered())

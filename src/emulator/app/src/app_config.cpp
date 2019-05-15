@@ -17,6 +17,7 @@
 
 #include <app/app_config.h>
 
+#include <cpu/common.h>
 #include <host/version.h>
 #include <psp2/system_param.h>
 #include <util/log.h>
@@ -168,7 +169,7 @@ static ExitCode parse(Config &cfg, fs::path load_path, const std::string &root_p
     get_yaml_value(config_node, "background-alpha", &cfg.background_alpha, 0.300f);
     get_yaml_value(config_node, "log-level", &cfg.log_level, static_cast<int>(spdlog::level::trace));
     get_yaml_value(config_node, "pref-path", &cfg.pref_path, root_pref_path);
-    get_yaml_value(config_node, "cpu-backend", &cfg.cpu_backend, 0);
+    get_yaml_value(config_node, "cpu-backend", &cfg.cpu_backend, static_cast<int>(CPUBackend::Unicorn));
     get_yaml_value_optional(config_node, "wait-for-debugger", &cfg.wait_for_debugger);
 
     if (!fs::exists(cfg.pref_path) && !cfg.pref_path.empty()) {
@@ -213,6 +214,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths)
         po::options_description config_desc("Configuration");
         config_desc.add_options()
             ("archive-log,A", po::bool_switch(&cfg.archive_log), "Makes a duplicate of the log file with TITLE_ID and Game ID as title")
+            ("cpu-backend,b", po::value(&cfg.cpu_backend), "cpu backend:\nUnicorn = 0\nDynarmic = 1")
             ("config-location,c", po::value<fs::path>(&cfg.config_path), "Get a configuration file from a given location. If a filename is given, it must end with \".yml\", otherwise it will be assumed to be a directory. \nDefault: <Vita3K folder>/config.yml")
             ("keep-config,w", po::bool_switch(&cfg.overwrite_config)->default_value(true), "Do not modify the configuration file after loading.")
             ("load-config,f", po::bool_switch(&cfg.load_config), "Load a configuration file. Setting --keep-config with this option preserves the configuration file.")
@@ -287,6 +289,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths)
             modules.pop_back();
             LOG_INFO("lle-modules: {}", modules);
         }
+        LOG_INFO("cpu-backend: {}", cfg.cpu_backend);
         LOG_INFO("log-level: {}", cfg.log_level);
         LOG_INFO("log-imports: {}", cfg.log_imports);
         LOG_INFO("log-exports: {}", cfg.log_exports);
