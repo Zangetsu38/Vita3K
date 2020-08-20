@@ -505,6 +505,9 @@ void get_surface_data(GLContext &context, size_t width, size_t height, size_t st
         }
         break;
     }
+    case SCE_GXM_COLOR_FORMAT_U10U10U10U2_RGBA:
+        glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, pixels);
+        break;
     default:
         LOG_ERROR("Color format not implemented: {}, report this to developer", format);
         glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, pixels);
