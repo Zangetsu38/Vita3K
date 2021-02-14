@@ -274,6 +274,14 @@ void upload_bound_texture(const SceGxmTexture &gxm_texture, const MemState &mem)
 
         glPixelStorei(GL_UNPACK_ROW_LENGTH, static_cast<GLint>(pixels_per_stride));
 
+        GLuint sampler_state = 0;
+        glGenSamplers(1, &sampler_state);
+        glSamplerParameterf(sampler_state, GL_TEXTURE_LOD_BIAS, (gxm_texture.lod_bias - 31) / 8);
+        glSamplerParameterf(sampler_state, GL_TEXTURE_MIN_LOD, gxm_texture.lod_min0 | (gxm_texture.lod_min1 << 2));
+
+        GLuint texture_unit = 0;
+        glBindSampler(texture_unit, sampler_state);
+
         if (need_decompress_and_unswizzle_on_cpu)
             glTexSubImage2D(GL_TEXTURE_2D, mip_index, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
         else {
@@ -287,6 +295,8 @@ void upload_bound_texture(const SceGxmTexture &gxm_texture, const MemState &mem)
             }
         }
 
+        glBindSampler(texture_unit, 0);
+        glDeleteSamplers(1, &sampler_state);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 
         mip_index++;
