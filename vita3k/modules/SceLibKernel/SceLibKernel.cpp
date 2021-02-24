@@ -939,8 +939,8 @@ EXPORT(int, sceKernelCreateSema_16XX, const char *name, SceUInt attr, int initVa
     return res;
 }
 
-EXPORT(int, sceKernelCreateSimpleEvent) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceKernelCreateSimpleEvent, const char *name, unsigned int attr, unsigned int flags, SceKernelEventFlagOptParam *opt) {
+    return eventflag_create(host.kernel, export_name, name, thread_id, attr, flags);
 }
 
 EXPORT(SceUID, sceKernelCreateThread, const char *name, SceKernelThreadEntry entry, int init_priority, int stack_size, SceUInt attr, int cpu_affinity_mask, Ptr<SceKernelThreadOptParam> option) {
@@ -1483,8 +1483,8 @@ EXPORT(int, sceKernelWaitCondCB, SceUID cond_id, SceUInt32 *timeout) {
     return condvar_wait(host.kernel, host.mem, export_name, thread_id, cond_id, timeout, SyncWeight::Heavy);
 }
 
-EXPORT(int, sceKernelWaitEvent) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceKernelWaitEvent, SceUID event_id, unsigned int flags, unsigned int wait, unsigned int *outBits, SceUInt *timeout) {
+    return eventflag_wait(host.kernel, export_name, thread_id, event_id, flags, wait, outBits, timeout);
 }
 
 EXPORT(int, sceKernelWaitEventCB) {

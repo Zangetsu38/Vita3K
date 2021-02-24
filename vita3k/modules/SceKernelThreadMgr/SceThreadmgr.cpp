@@ -116,8 +116,8 @@ EXPORT(int, _sceKernelCreateSema_16XX, const char *name, SceUInt attr, int initV
     return semaphore_create(host.kernel, export_name, name, thread_id, attr, initVal, opt.get(host.mem)->maxVal);
 }
 
-EXPORT(int, _sceKernelCreateSimpleEvent) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceKernelCreateSimpleEvent, const char *name, unsigned int attr, unsigned int flags, SceKernelEventFlagOptParam *opt) {
+    return eventflag_create(host.kernel, export_name, name, thread_id, attr, flags);
 }
 
 EXPORT(int, _sceKernelCreateTimer) {
@@ -425,8 +425,8 @@ EXPORT(int, _sceKernelWaitCondCB) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceKernelWaitEvent) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceKernelWaitEvent, SceUID event_id, unsigned int flags, unsigned int wait, unsigned int *outBits, SceUInt *timeout) {
+    return eventflag_wait(host.kernel, export_name, thread_id, event_id, flags, wait, outBits, timeout);
 }
 
 EXPORT(int, _sceKernelWaitEventCB) {
@@ -569,8 +569,16 @@ EXPORT(int, sceKernelCheckWaitableStatus) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelClearEvent) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceKernelClearEvent, SceUID eventid, unsigned int flags) {
+    const EventFlagPtr event = lock_and_find(eventid, host.kernel.eventflags, host.kernel.mutex);
+    if (!event) {
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_EVF_ID);
+    }
+
+    const std::lock_guard<std::mutex> event_lock(event->mutex);
+    event->flags &= flags;
+
+    return 0;
 }
 
 EXPORT(int, sceKernelClearEventFlag, SceUID eventid, unsigned int flags) {
@@ -885,8 +893,8 @@ EXPORT(int, sceKernelSendSignal, SceUID target_thread_id) {
     return SCE_KERNEL_OK;
 }
 
-EXPORT(int, sceKernelSetEvent) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceKernelSetEvent, SceUID eventid, unsigned int flags) {
+    return eventflag_set(host.kernel, export_name, thread_id, eventid, flags);
 }
 
 EXPORT(int, sceKernelSetEventFlag, SceUID eventid, unsigned int flags) {
