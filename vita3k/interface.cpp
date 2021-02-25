@@ -378,9 +378,10 @@ static ExitCode load_app_impl(Ptr<const void> &entry_point, HostState &host, con
             LOG_INFO("Main executable {} ({}) loaded", module->module_name, host.load_self_path);
         } else
             return FileNotFound;
-    } else
+    } else {
+        LOG_ERROR("Main executable {} not found", host.load_self_path);    
         return FileNotFound;
-
+    }
     return Success;
 }
 
@@ -556,15 +557,31 @@ ExitCode run_app(HostState &host, Ptr<const void> &entry_point) {
 
     SceKernelThreadOptParam param{ 0, 0 };
 
-    if (!host.cfg.console_arguments.empty()) {
-        auto split_args = split(host.cfg.console_arguments, "\\s+");
-        //LOG_DEBUG("args: {}", host.cfg.console_arguments);
+    if (!host.cfg.console_arguments.empty() || host.cfg.load_exec_argv) {
+        std::vector<std::string> args;
+        if (host.cfg.load_exec_argv) {
+            const auto exec_path{ fs::path(host.base_path) / "exec" };
+            std::ifstream exec_file(exec_path.c_str());
+            if (exec_file.is_open()) {
+                std::string arg;
+                while (getline(exec_file, arg)) {
+                    args.push_back(arg);
+                    LOG_DEBUG("argv: {}", arg);
+                }
+                exec_file.close();
+            } else {
+                app::error_dialog("No found argument for load_exec.", host.window.get());
+                return RunThreadFailed;
+            }
+                fs::remove(exec_path);        
+        } else
+            args = split(host.cfg.console_arguments, "\\s+");
+
         // why is this flipped
         std::vector<uint8_t> buf;
-        for (auto &args : split_args) {
-            std::replace(args.begin(), args.end(), '?', ' ');
-            buf.insert(buf.end(), args.c_str(), args.c_str() + args.size() + 1);
-            LOG_DEBUG("args: {}", args);
+        for (auto &arg : args) {
+            buf.insert(buf.end(), arg.c_str(), arg.c_str() + arg.size() + 1);
+            LOG_DEBUG("args: {}", arg);
         }
         auto arr = Ptr<uint8_t>(alloc(host.mem, buf.size(), "arg"));
         memcpy(arr.get(host.mem), buf.data(), buf.size());

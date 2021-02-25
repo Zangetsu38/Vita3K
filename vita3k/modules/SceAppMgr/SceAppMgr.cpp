@@ -329,19 +329,21 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
     vfs::FileBuffer exec_buffer;
     if (vfs::read_app_file(exec_buffer, host.pref_path, host.io.title_id, exec_path)) {
         if (argv && argv->get(host.mem)) {
-            host.load_self_argv = "\"";
+            std::ofstream exec;
+            size_t args = 0;
+            const auto exec_path{ fs::path(host.base_path) / "exec" };
+            exec.open(exec_path.c_str());
             for (auto i = 0; argv[i]; i++) {
-                if (i)
-                    host.load_self_argv += ' ';
-                std::string c_argv = argv[i].get(host.mem);
-                std::replace(c_argv.begin(), c_argv.end(), ' ', '?');
-                host.load_self_argv += c_argv;
+                exec << argv[i].get(host.mem) << std::endl;                
+                args += strlen(argv[i].get(host.mem));
+                LOG_DEBUG("args: {}, argv: {}", args, argv[i].get(host.mem));
             }
-            host.load_self_argv += "\"";
-            const auto args = host.load_self_argv.size() - 2; // Remove this 2 "" counted
-            LOG_DEBUG("argv: {}, size: {}", host.load_self_argv, args);
+            exec.close();
+            LOG_DEBUG("args final: {}", args);
             if (args > 1024)
                 return RET_ERROR(SCE_APPMGR_ERROR_TOO_LONG_ARGV);
+
+            host.load_exec_argv = true;
         }
 
         stop_all_threads(host.kernel);

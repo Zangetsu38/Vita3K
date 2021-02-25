@@ -65,7 +65,7 @@ struct HostState {
     std::string default_path;
     std::wstring pref_path;
     bool load_exec = false;
-    std::string load_self_argv;
+    bool load_exec_argv = false;
     std::string load_self_path;
     Config cfg;
     SceUID main_thread_id;

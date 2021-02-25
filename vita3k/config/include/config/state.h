@@ -81,6 +81,7 @@ private:
         console = rhs.console;
         console_arguments = rhs.console_arguments;
         self_path = rhs.self_path;
+        load_exec_argv = rhs.load_exec_argv;
     }
 
 public:
@@ -100,6 +101,7 @@ public:
     bool load_config = false;
     bool fullscreen = false;
     bool console = false;
+    bool load_exec_argv = false;
 
     Config() {
         update_yaml();

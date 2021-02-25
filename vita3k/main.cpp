@@ -292,9 +292,9 @@ int main(int argc, char *argv[]) {
         args[2] = host.app_title_id.data();
         args[3] = "--self";
         args[4] = host.load_self_path.data();
-        if (!host.load_self_argv.empty()) {
-            args[5] = "--console-arguments";
-            args[6] = host.load_self_argv.data();
+        if (host.load_exec_argv) {
+            args[5] = "--load-exec-argv";
+            args[6] = "true";
             args[7] = NULL;
         } else
             args[5] = NULL;
