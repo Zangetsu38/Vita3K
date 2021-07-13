@@ -37,6 +37,7 @@ bool refresh_app_list(GuiState &gui, HostState &host) {
     gui.apps_list_opened.clear();
     for (auto &app : gui.app_selector.user_apps_icon)
         app.second = {};
+
     gui.app_selector.user_apps_icon.clear();
     gui.current_app_selected = -1;
     gui.live_area_contents.clear();

@@ -24,12 +24,12 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <glutil/gl.h>
 #include <host/functions.h>
-#include <host/state.h>
 #include <io/VitaIoDevice.h>
 #include <io/vfs.h>
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
+#include <gui/state.h>
 
 #include <SDL_video.h>
 
@@ -204,12 +204,13 @@ static void init_font(GuiState &gui, HostState &host) {
     io.DisplayFramebufferScale = { host.dpi_scale, host.dpi_scale };
 }
 
-void init_app_icon(GuiState &gui, HostState &host, const std::string &app_path) {
-    int32_t width = 0;
-    int32_t height = 0;
+static IconData load_app_icon(GuiState &gui, HostState &host, const std::string &app_path) {
+    IconData image;
     vfs::FileBuffer buffer;
 
-    if (app_path.find("NPXS") != std::string::npos)
+    auto is_sys = app_path.find("NPXS") != std::string::npos;
+
+    if (is_sys)
         vfs::read_file(VitaIoDevice::vs0, buffer, host.pref_path, "app/" + app_path + "/sce_sys/icon0.png");
     else
         vfs::read_app_file(buffer, host.pref_path, app_path, "sce_sys/icon0.png");
@@ -222,29 +223,94 @@ void init_app_icon(GuiState &gui, HostState &host, const std::string &app_path) 
     if (buffer.empty()) {
         if (fs::exists(default_fw_icon) || fs::exists(default_icon)) {
             LOG_INFO("Default icon found for title {}, [{}] in path {}.", APP_INDEX->title_id, APP_INDEX->title, app_path);
-            std::ifstream image_stream(fs::exists(default_fw_icon) ? default_fw_icon.string() : default_icon.string(), std::ios::binary | std::ios::ate);
+            auto icon_path = fs::exists(default_fw_icon) ? default_fw_icon.string() : default_icon.string();
+            std::ifstream image_stream(icon_path, std::ios::binary | std::ios::ate);
             const std::size_t fsize = image_stream.tellg();
             buffer.resize(fsize);
             image_stream.seekg(0, std::ios::beg);
-            image_stream.read(reinterpret_cast<char *>(&buffer[0]), fsize);
+            image_stream.read(reinterpret_cast<char *>(buffer.data()), fsize);
         } else {
-            LOG_WARN("Default icon not found for title {}, [{}] in path {}.", APP_INDEX->title_id, APP_INDEX->title, app_path);
-            return;
+            LOG_WARN("Default icon not found for title {}, [{}] in path {}.",
+                APP_INDEX->title_id, APP_INDEX->title, app_path);
+            return { };
         }
     }
-    stbi_uc *data = stbi_load_from_memory(&buffer[0], static_cast<int>(buffer.size()), &width, &height, nullptr, STBI_rgb_alpha);
-    if (!data || width != 128 || height != 128) {
-        LOG_ERROR("Invalid icon for title {}, [{}] in path {}.", APP_INDEX->title_id, APP_INDEX->title, app_path);
-        return;
+    image.data.reset(stbi_load_from_memory(
+        buffer.data(), static_cast<int>(buffer.size()),
+        &image.width, &image.height, nullptr, STBI_rgb_alpha));
+    if (!image.data || image.width != 128 || image.height != 128) {
+        LOG_ERROR("Invalid icon for title {}, [{}] in path {}.",
+            APP_INDEX->title_id, APP_INDEX->title, app_path);
+        return { };
     }
-    auto &app_icon = app_path.find("NPXS") != std::string::npos ? gui.app_selector.sys_apps_icon : gui.app_selector.user_apps_icon;
-    app_icon[app_path].init(gui.imgui_state.get(), data, width, height);
-    stbi_image_free(data);
+
+    return std::move(image);
+}
+
+void init_app_icon(GuiState &gui, HostState &host, const std::string &app_path) {
+    auto is_sys = app_path.find("NPXS") != std::string::npos;
+
+    auto &app_icon = is_sys ? gui.app_selector.sys_apps_icon : gui.app_selector.user_apps_icon;
+    IconData data = load_app_icon(gui, host, app_path);
+
+    app_icon[app_path].init(gui.imgui_state.get(), data.data.get(), data.width, data.height);
 }
 
 void init_apps_icon(GuiState &gui, HostState &host, const std::vector<gui::App> &app_list) {
     for (const auto &app : app_list)
         init_app_icon(gui, host, app.path);
+}
+
+IconData::IconData() : data(nullptr, stbi_image_free) { }
+
+void IconAsyncLoader::commit(GuiState &gui) {
+    std::lock_guard<std::mutex> lock(mutex);
+
+    for (const auto &pair : results) {
+        auto is_sys = pair.first.find("NPXS") != std::string::npos;
+        auto &app_icon = is_sys ? gui.app_selector.sys_apps_icon : gui.app_selector.user_apps_icon;
+
+        app_icon[pair.first].init(gui.imgui_state.get(), pair.second.data.get(), pair.second.width, pair.second.height);
+    }
+
+    results.clear();
+}
+
+IconAsyncLoader::IconAsyncLoader(GuiState &gui, HostState &host, const std::vector<gui::App> &app_list) {
+    // I don't feel comfortable passing app_list down to be iterated by thread.
+    // Methods like delete_app might mutate it, so I'd like to copy what I need now.
+    auto paths = [&app_list]() {
+        std::vector<std::string> copy(app_list.size());
+        std::transform(app_list.begin(), app_list.end(), copy.begin(), [](const auto &a) { return a.path; });
+
+        return copy;
+    };
+
+    quit = false;
+    thread = std::thread([&, paths = paths()]() {
+        for (const auto &path : paths) {
+            if (quit)
+                return;
+
+            // load the actual texture
+            IconData data = load_app_icon(gui, host, path);
+
+            // Duplicate code here from init_app_icon
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                results[path] = std::move(data);
+            }
+        }
+    });
+}
+
+IconAsyncLoader::~IconAsyncLoader() {
+    quit = true;
+    thread.join();
+}
+
+void init_apps_icon_async(GuiState &gui, HostState &host, const std::vector<gui::App> &app_list) {
+    gui.app_selector.icon_async_loader.emplace(gui, host, app_list);
 }
 
 void init_app_background(GuiState &gui, HostState &host, const std::string &app_path) {
@@ -374,7 +440,7 @@ void init_home(GuiState &gui, HostState &host) {
             get_user_apps_title(gui, host);
             save_apps_cache(gui, host);
         }
-        init_apps_icon(gui, host, gui.app_selector.user_apps);
+        init_apps_icon_async(gui, host, gui.app_selector.user_apps);
     }
 
     get_time_apps(gui, host);
@@ -599,6 +665,11 @@ void init(GuiState &gui, HostState &host) {
 void draw_begin(GuiState &gui, HostState &host) {
     ImGui_ImplSdl_NewFrame(gui.imgui_state.get());
     host.renderer_focused = !ImGui::GetIO().WantCaptureMouse;
+
+    // async loading, renderer texture creation needs to be synchronous
+    // cant bind opengl context outside main thread on macos now
+    if (gui.app_selector.icon_async_loader)
+        gui.app_selector.icon_async_loader->commit(gui);
 }
 
 void draw_end(GuiState &gui, SDL_Window *window) {

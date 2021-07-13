@@ -56,6 +56,7 @@ void init(GuiState &gui, HostState &host);
 void init_app_background(GuiState &gui, HostState &host, const std::string &app_path);
 void init_app_icon(GuiState &gui, HostState &host, const std::string &app_path);
 void init_apps_icon(GuiState &gui, HostState &host, const std::vector<gui::App> &app_list);
+void init_apps_icon_async(GuiState &gui, HostState &host, const std::vector<gui::App> &app_list);
 void init_config(GuiState &gui, HostState &host, const std::string &app_path);
 void init_content_manager(GuiState &gui, HostState &host);
 void init_home(GuiState &gui, HostState &host);
