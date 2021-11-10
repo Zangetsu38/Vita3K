@@ -91,7 +91,7 @@ jobs:
             rm SDL2-${SDL2VER}.tar.gz
           fi
           sudo make -C SDL2-${SDL2VER} install
-        if: matrix.os == 'ubuntu-latest'   ```
+        if: matrix.os == 'ubuntu-latest'
 
       - uses: actions/checkout@v2
         with:
