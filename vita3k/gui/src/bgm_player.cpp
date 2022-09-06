@@ -32,7 +32,7 @@ struct PcmBuffer {
 };
 
 struct PcmData {
-    static constexpr int NUM_BUFFERS = 4;
+    static constexpr int NUM_BUFFERS = 6;
     PcmBuffer buffers[NUM_BUFFERS];
     uint32_t write_buffer_index = 0;
     uint32_t next_audio_buffer = 0;
