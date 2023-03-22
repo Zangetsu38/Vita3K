@@ -415,7 +415,7 @@ bool download_file(std::string url, const std::string output_file_path, Progress
         if (progress_state.download)
             LOG_ERROR("Downloaded size is not equal to file size, downloaded size: {}/{}", downloaded_file_size, file_size);
         else
-            LOG_WARN("Canceled by user, dowloaded size: {}/{}", downloaded_file_size, file_size);
+            LOG_WARN("Cancelled by user, dowloaded size: {}/{}", downloaded_file_size, file_size);
         return false;
     }
 
