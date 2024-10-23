@@ -47,18 +47,24 @@ struct Theme {
 
 static std::map<std::string, Theme> themes_info;
 static std::vector<std::pair<std::string, time_t>> themes_list;
-
+static time_t last_update_themes = 0;
 static void get_themes_list(GuiState &gui, EmuEnvState &emuenv) {
-    gui.themes_preview.clear();
-    themes_info.clear();
-    themes_list.clear();
-
     const auto theme_path{ emuenv.pref_path / "ux0/theme" };
     const auto fw_theme_path{ emuenv.pref_path / "vs0/data/internal/theme" };
     if ((!fs::exists(fw_theme_path) || fs::is_empty(fw_theme_path)) && (!fs::exists(theme_path) || fs::is_empty(theme_path))) {
         LOG_WARN("Theme path is empty");
         return;
     }
+
+    // Check if the theme has been updated recently to avoid unnecessary updates
+    if ((fs::last_write_time(theme_path) < last_update_themes) && (fs::last_write_time(fw_theme_path) < last_update_themes))
+        return;
+    else if (last_update_themes != 0)
+        LOG_INFO("Found new update of themes, updating themes list...");
+
+    gui.themes_preview.clear();
+    themes_info.clear();
+    themes_list.clear();
 
     std::string user_lang;
     const auto sys_lang = static_cast<SceSystemParamLang>(emuenv.cfg.sys_lang);
@@ -180,6 +186,8 @@ static void get_themes_list(GuiState &gui, EmuEnvState &emuenv) {
             }
         }
     }
+
+    last_update_themes = time(0);
 }
 
 static std::string popup, menu, sub_menu, selected, title, delete_user_background, delete_theme;

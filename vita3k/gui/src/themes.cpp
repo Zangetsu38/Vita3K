@@ -17,7 +17,10 @@
 
 #include "private.h"
 
+#include <audio/state.h>
+#include <codec/state.h>
 #include <config/state.h>
+#include <cubeb/cubeb.h>
 #include <gui/functions.h>
 #include <io/VitaIoDevice.h>
 #include <io/state.h>
@@ -211,8 +214,255 @@ bool init_user_start_background(GuiState &gui, const std::string &image_path) {
     return gui.start_background;
 }
 
+// Structure to store PCM data
+struct PcmData {
+    std::vector<uint8_t> data;
+    uint32_t position;
+    std::mutex mutex;
+};
+
+static long data_callback(cubeb_stream *stream, void *user_ptr, const void *input_buffer, void *output_buffer, long nframes) {
+    PcmData *pcm = static_cast<PcmData *>(user_ptr);
+    // Lock the mutex to access pcm->position and pcm->data
+    std::lock_guard<std::mutex> lock(pcm->mutex);
+
+    // Calculate the number of bytes to copy (2 bytes per sample, 2 channels) and the length of the PCM data
+    const uint32_t bytes_to_copy = nframes * 2 * sizeof(uint16_t);
+    const uint32_t length = pcm->data.size();
+
+    // If we reach the end of the buffer, return to zero (loop)
+    if (pcm->position >= length) {
+        pcm->position = 0;
+    }
+
+    // Calculate how much data is left to copy
+    const size_t bytes_to_copy_now = std::min(bytes_to_copy, length - pcm->position);
+
+    // Copy the PCM data into the output buffer
+    std::memcpy(output_buffer, pcm->data.data() + pcm->position, bytes_to_copy_now);
+
+    // Update the position
+    pcm->position += bytes_to_copy_now;
+
+    // If we copied less data than the buffer, fill the rest with silence
+    if (bytes_to_copy_now < bytes_to_copy)
+        std::memset((uint8_t *)output_buffer + bytes_to_copy_now, 0, bytes_to_copy - bytes_to_copy_now);
+
+    // Return the number of frames copied
+    return nframes;
+}
+
+// Callback called when the stream state changes
+void state_callback(cubeb_stream *stream, void *user_ptr, cubeb_state state) {
+    switch (state) {
+    case CUBEB_STATE_DRAINED:
+        LOG_INFO("Playback drained.");
+        break;
+    case CUBEB_STATE_ERROR:
+        LOG_ERROR("Playback error.");
+        break;
+    default:
+        break;
+    }
+}
+
+std::thread playback_thread;
+cubeb_stream *stream = nullptr;
+bool stop_requested;
+std::condition_variable stop_condition;
+cubeb *ctx = nullptr;
+PcmData pcm_data;
+
+void stop_bgm() {
+    if (!stream) {
+        return;
+    }
+
+    {
+        // We lock the mutex to protect access to stop_requested
+        std::lock_guard<std::mutex> lock(pcm_data.mutex);
+        stop_requested = true;
+    }
+
+    // Notify the condition to wake up the thread
+    stop_condition.notify_one();
+
+    // Wait for the playback thread to finish
+    if (playback_thread.joinable()) {
+        playback_thread.join();
+    }
+
+    // Stop and destroy the stream
+    cubeb_stream_stop(stream);
+    cubeb_stream_destroy(stream);
+    stream = nullptr;
+
+    // Reset the stop indicator
+    stop_requested = false;
+}
+
+void switch_state_bgm(const bool pause) {
+    if (!stream) {
+        LOG_ERROR("The background music stream is not initialized!");
+        return;
+    }
+
+    if (pause)
+        cubeb_stream_stop(stream);
+    else
+        cubeb_stream_start(stream);
+}
+
+void set_volume_bgm(const float volume) {
+    if (!stream) {
+        LOG_ERROR("The background music stream is not initialized!");
+        return;
+    }
+
+    cubeb_stream_set_volume(stream, volume / 100.f);
+}
+
+static void pcm_playback_thread() {
+    std::unique_lock<std::mutex> lock(pcm_data.mutex);
+
+    // Wait until stop is requested
+    stop_condition.wait(lock, [] { return stop_requested; });
+
+    // Destroy the context
+    cubeb_destroy(ctx);
+}
+
+void init_player_bgm(const float vol) {
+    if (cubeb_init(&ctx, "Player BGM", nullptr) != CUBEB_OK) {
+        LOG_ERROR("Failed to initialize Cubeb context");
+        return;
+    }
+
+    // Configure the audio output parameters
+    cubeb_stream_params output_params;
+    output_params.format = CUBEB_SAMPLE_S16LE; // Format PCM 16-bit, little-endian
+    output_params.rate = 48000; // Sample rate 48 kHz
+    output_params.channels = 2; // Stereo
+    output_params.layout = CUBEB_LAYOUT_STEREO;
+
+    if (cubeb_stream_init(ctx, &stream, "Stream BGM", nullptr, nullptr,
+            nullptr, &output_params, 4096, data_callback, state_callback, &pcm_data)
+        != CUBEB_OK) {
+        LOG_ERROR("Failed to initialize Cubeb stream");
+        return;
+    }
+
+    set_volume_bgm(vol);
+
+    // Start playback in a new thread
+    playback_thread = std::thread(pcm_playback_thread);
+}
+
+struct At9Header {
+    char magic[4];
+    uint32_t file_size;
+    char id[4];
+    char fmt[4];
+    uint32_t fmt_size;
+    uint16_t format_tag;
+    uint16_t num_channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    uint16_t extension_size;
+    uint16_t samples_per_block;
+    uint32_t channel_mask;
+    char codec_id[16];
+    uint32_t version;
+    uint32_t config_data;
+};
+
+static void load_bgm(std::vector<uint8_t> at9_data) {
+    uint8_t *es_data = at9_data.data();
+
+    // Get the header of the AT9 file
+    At9Header header;
+    memcpy(&header, es_data, sizeof(At9Header));
+
+    const uint32_t es_size = at9_data.size();
+
+    // Create a new decoder with the configuration data from the AT9 header
+    Atrac9DecoderState decoder(header.config_data);
+
+    const uint32_t super_frame_size = decoder.get(DecoderQuery::AT9_SUPERFRAME_SIZE);
+    const auto es_size_max = std::min(super_frame_size, 1024u);
+
+    uint32_t total_bytes_read = 0;
+
+    // Set offset of data start
+    const auto data_start = 168;
+
+    // Set data size
+    const auto data_size = es_size - data_start;
+
+    // Set data start pointer
+    es_data += data_start;
+
+    // Get the maximum size of the PCM buffer for a single super frame
+    const uint64_t max_pcm_size = static_cast<uint64_t>(decoder.get(DecoderQuery::AT9_SAMPLE_PER_FRAME) * decoder.get(DecoderQuery::CHANNELS)) * sizeof(int16_t);
+    std::vector<uint8_t> data_bgm{};
+
+    // Decode the AT9 data
+    while (total_bytes_read < data_size) {
+        // Set the number of bytes to send to the decoder
+        const size_t bytes_to_send = std::min(es_size_max, data_size - total_bytes_read);
+        DecoderSize size;
+        std::vector<uint8_t> pcm_buffer(max_pcm_size);
+
+        // Send the data to the decoder and receive the decoded PCM data
+        if (!decoder.send(es_data, bytes_to_send)
+            || !decoder.receive(pcm_buffer.data(), &size)) {
+            LOG_ERROR("Error at offset {} while sending or decoding AT9 after sending {} bytes.", total_bytes_read, bytes_to_send);
+            return;
+        }
+
+        // Get es size used, update the total bytes read and the es data to the next super frame
+        const uint32_t es_size_used = std::min(decoder.get_es_size(), es_size_max);
+        total_bytes_read += es_size_used;
+        es_data += es_size_used;
+
+        // Get the size of the PCM data given by the decoder and insert it into the PCM  data buffer
+        const uint64_t pcm_size_given = static_cast<uint64_t>(size.samples * decoder.get(DecoderQuery::CHANNELS)) * sizeof(int16_t);
+        data_bgm.insert(data_bgm.end(), pcm_buffer.begin(), pcm_buffer.begin() + pcm_size_given);
+    }
+
+    // Check if PCM data is valid
+    if (data_bgm.empty()) {
+        LOG_ERROR("Error: PCM data is empty!");
+        return;
+    }
+
+    // Change the BGM theme with the new PCM data
+    std::lock_guard<std::mutex> lock(pcm_data.mutex);
+    pcm_data.data = data_bgm;
+}
+
+void init_bgm(EmuEnvState &emuenv, const std::pair<std::string, std::string> path_bgm) {
+    vfs::FileBuffer buffer_bgm;
+    const auto device = VitaIoDevice::_from_string(path_bgm.first.c_str());
+    const auto path = path_bgm.second;
+    if (!vfs::read_file(device, buffer_bgm, emuenv.pref_path, path)) {
+        LOG_ERROR_IF(device == VitaIoDevice::ux0, "Failed to read theme BGM file: {}:{}", path_bgm.first, path);
+        return;
+    }
+
+    // Load the BGM data from the buffer
+    load_bgm(buffer_bgm);
+}
+
 bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_id) {
     std::vector<std::string> theme_bg_name;
+
+    // Set default values of bgm theme
+    std::pair<std::string, std::string> path_bgm = { "pd0", "data/systembgm/home.at9" };
+
+    // Create a map to associate specific system app title IDs with their corresponding theme icon names.
     std::map<std::string, std::string> theme_icon_name = {
         { "NPXS10003", {} },
         { "NPXS10008", {} },
@@ -220,12 +470,15 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
         { "NPXS10026", {} }
     };
 
+    // Clear the current theme
     gui.app_selector.sys_apps_icon.clear();
     gui.current_theme_bg = 0;
     gui.information_bar_color = {};
     gui.theme_backgrounds.clear();
     gui.theme_backgrounds_font_color.clear();
     gui.theme_information_bar_notice.clear();
+    pcm_data.data.clear();
+    pcm_data.position = 0;
 
     const auto content_id_path = fs_utils::utf8_to_path(content_id);
 
@@ -248,6 +501,10 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
                     theme_icon_name["NPXS10015"] = home_property.child("m_settings").child("m_iconFilePath").text().as_string();
                 if (!home_property.child("m_hostCollabo").child("m_iconFilePath").text().empty())
                     theme_icon_name["NPXS10026"] = home_property.child("m_hostCollabo").child("m_iconFilePath").text().as_string();
+
+                // Bgm theme
+                if (!home_property.child("m_bgmFilePath").text().empty())
+                    path_bgm = { "ux0", (fs::path("theme") / content_id / home_property.child("m_bgmFilePath").text().as_string()).string() };
 
                 // Home
                 for (const auto &param : home_property.child("m_bgParam")) {
@@ -308,6 +565,7 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
         } else
             LOG_ERROR("theme.xml not found for Content ID: {}, in path: {}", content_id, THEME_XML_PATH);
     } else {
+        // Default theme background
         constexpr std::array<const char *, 5> app_id_bg_list = {
             "NPXS10002",
             "NPXS10006",
@@ -320,6 +578,9 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
                 theme_bg_name.push_back(bg);
         }
     }
+
+    // Initialize the theme BGM with the path
+    init_bgm(emuenv, path_bgm);
 
     for (const auto &icon : theme_icon_name) {
         int32_t width = 0;
@@ -504,6 +765,7 @@ void draw_start_screen(GuiState &gui, EmuEnvState &emuenv) {
 
     if ((ImGui::IsWindowHovered(ImGuiFocusedFlags_RootWindow) && ImGui::IsMouseClicked(0))) {
         gui.vita_area.start_screen = false;
+        switch_state_bgm(false);
         gui.vita_area.home_screen = true;
         if (emuenv.cfg.show_info_bar)
             gui.vita_area.information_bar = true;

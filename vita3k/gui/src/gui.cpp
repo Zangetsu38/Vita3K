@@ -712,6 +712,9 @@ void pre_init(GuiState &gui, EmuEnvState &emuenv) {
     init_font(gui, emuenv);
     lang::init_lang(gui.lang, emuenv);
 
+    get_users_list(gui, emuenv);
+    init_player_bgm(emuenv.cfg.bgm_volume);
+
     bool result = ImGui_ImplSdl_CreateDeviceObjects(gui.imgui_state.get());
     assert(result);
 }
@@ -719,7 +722,6 @@ void pre_init(GuiState &gui, EmuEnvState &emuenv) {
 void init(GuiState &gui, EmuEnvState &emuenv) {
     get_modules_list(gui, emuenv);
     get_notice_list(emuenv);
-    get_users_list(gui, emuenv);
     get_time_apps(gui, emuenv);
 
     if (emuenv.cfg.show_welcome)
