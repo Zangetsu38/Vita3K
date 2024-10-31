@@ -1,4 +1,4 @@
-// Vita3K emulator project
+﻿// Vita3K emulator project
 // Copyright (C) 2026 Vita3K team
 //
 // This program is free software; you can redistribute it and/or modify
@@ -31,6 +31,7 @@
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 #include <util/string_utils.h>
+#include <packages/sfo.h>
 
 #include <gui/functions.h>
 #include <gui/state.h>
@@ -120,7 +121,7 @@ static void reset_emulator(GuiState &gui, EmuEnvState &emuenv) {
     bgm_player::stop_bgm();
 
     // Clean User apps list
-    gui.app_selector.user_apps.clear();
+    gui.app_selector.vita_apps.clear();
 
     get_modules_list(gui, emuenv);
     get_sys_apps_title(gui, emuenv);
@@ -163,7 +164,7 @@ static void change_emulator_path(GuiState &gui, EmuEnvState &emuenv) {
  * but it's corrupted or invalid.
  */
 static bool get_custom_config(EmuEnvState &emuenv, const std::string &app_path) {
-    const auto CUSTOM_CONFIG_PATH{ emuenv.config_path / "config" / fmt::format("config_{}.xml", app_path) };
+    const auto CUSTOM_CONFIG_PATH{ emuenv.config_path / "config" / fmt::format("config_{}.xml", fs::path(app_path).stem().string()) };
 
     if (fs::exists(CUSTOM_CONFIG_PATH)) {
         pugi::xml_document custom_config_xml;
@@ -259,6 +260,64 @@ static void set_backend_renderer(EmuEnvState &emuenv, const std::string &backend
 static int current_aniso_filter_log, max_aniso_filter_log, audio_backend_idx, current_user_lang;
 static std::vector<std::string> list_user_lang;
 
+constexpr std::array<std::string_view, 26> firmware_apps_paths = {
+    "pd0:app/NPXS10007", // Welcome Park
+    "vs0:app/NPXS10000", // Near
+    "vs0:app/NPXS10001", // Party
+    "vs0:app/NPXS10002", // Ps Store
+    "vs0:app/NPXS10003", // Web Browser
+    "vs0:app/NPXS10004", // Picture
+    "vs0:app/NPXS10006", // Friends
+    "vs0:app/NPXS10008", // Trophy
+    "vs0:app/NPXS10009", // Music
+    "vs0:app/NPXS10010", // Video
+    "vs0:app/NPXS10012", // PS3 Remote Play
+    "vs0:app/NPXS10013", // PS4 Link
+    "vs0:app/NPXS10014", // Message
+    "vs0:app/NPXS10015", // Settings
+    "vs0:app/NPXS10018", // Suscription
+    "vs0:app/NPXS10021", // Mobile Network Operator
+    "vs0:app/NPXS10026", // Content Manager
+    "vs0:app/NPXS10031", // Package Installer
+    "vs0:app/NPXS10072", // Email
+    "vs0:app/NPXS10078", // Cross-Controller
+    "vs0:app/NPXS10091", // Calendar
+    "vs0:app/NPXS10094", // Parental Controls
+    "vs0:app/NPXS10095", // Panoramic Camera
+    "vs0:app/NPXS10098", // Link to PS4
+};
+
+static std::vector<std::pair<std::string, std::string>> fw_apps;
+static std::vector<std::string> current_fw_apps;
+static void get_firmware_apps_title(EmuEnvState &emuenv) {
+    current_fw_apps.clear();
+    fw_apps.clear();
+    for (const auto &app_path : firmware_apps_paths) {
+        vfs::FileBuffer param;
+        sfo::SfoAppInfo app_info;
+        if (vfs::read_app_file(param, emuenv.pref_path, std::string(app_path), "sce_sys/param.sfo")) {
+            sfo::get_param_info(app_info, param, emuenv.cfg.sys_lang);
+            if (!app_info.app_title.empty())
+                fw_apps.emplace_back(app_path, app_info.app_title);
+        }
+    }
+
+    for (const auto &app_path : emuenv.cfg.firmware_apps) {
+        current_fw_apps.emplace_back(app_path);
+    }
+
+    // Sort fw_apps by present in current_fw_apps and then by title
+    std::sort(fw_apps.begin(), fw_apps.end(), [](const auto &a, const auto &b) {
+        const auto a_in_current = vector_utils::contains(current_fw_apps, a.first);
+        const auto b_in_current = vector_utils::contains(current_fw_apps, b.first);
+        if (a_in_current && !b_in_current)
+            return true;
+        if (!a_in_current && b_in_current)
+            return false;
+        return a.second < b.second;
+    });
+}
+
 /**
  * @brief Initialize the `config` struct with the values set in the global emulator config.
  *
@@ -321,6 +380,7 @@ void init_config(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path
 
     current_user_lang = emuenv.cfg.user_lang.empty() ? 0 : (vector_utils::find_index(list_user_lang, emuenv.cfg.user_lang) + 1);
 
+    get_firmware_apps_title(emuenv);
     get_modules_list(gui, emuenv);
     config.stretch_the_display_area = emuenv.cfg.stretch_the_display_area;
     config.fullscreen_hd_res_pixel_perfect = emuenv.cfg.fullscreen_hd_res_pixel_perfect;
@@ -346,7 +406,7 @@ void init_config(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path
 static void save_config(GuiState &gui, EmuEnvState &emuenv) {
     if (gui.configuration_menu.custom_settings_dialog) {
         const auto CONFIG_PATH{ emuenv.config_path / "config" };
-        const auto CUSTOM_CONFIG_PATH{ CONFIG_PATH / fmt::format("config_{}.xml", emuenv.app_path) };
+        const auto CUSTOM_CONFIG_PATH{ CONFIG_PATH / fmt::format("config_{}.xml", fs::path(emuenv.app_path).stem().string()) };
         fs::create_directories(CONFIG_PATH);
 
         pugi::xml_document custom_config_xml;
@@ -459,6 +519,12 @@ static void save_config(GuiState &gui, EmuEnvState &emuenv) {
         app::update_viewport(emuenv);
 
     bgm_player::set_bgm_volume(emuenv.cfg.bgm_volume);
+
+    if (emuenv.cfg.firmware_apps != current_fw_apps) {
+        emuenv.cfg.firmware_apps = current_fw_apps;
+        init_fw_apps(gui, emuenv);
+    }
+
     config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
 }
 
@@ -627,7 +693,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
     ImGui::Begin("##settings", &show_settings_dialog, flags);
     ImGui::PopStyleVar();
 
-    constexpr auto BG_PATH = "NPXS10015";
+    constexpr auto BG_PATH = "vs0:app/NPXS10015";
     const auto draw_list = ImGui::GetWindowDrawList();
     const ImVec2 BG_POS_MAX(VIEWPORT_POS.x + VIEWPORT_SIZE.x, VIEWPORT_POS.y + VIEWPORT_SIZE.y);
     if (gui.apps_background.contains(BG_PATH))
@@ -1211,6 +1277,27 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Checkbox(lang.system["demo_mode"].c_str(), &emuenv.cfg.demo_mode);
         SetTooltipEx(lang.system["demo_mode_description"].c_str());
 
+        // Firmware Apps
+        ImGui::Spacing();
+        ImGui::TextColored(GUI_COLOR_TEXT, "%s", "Select Your Preferred Firmware App");
+        ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.5f);
+        if (ImGui::BeginListBox("##fw_apps_list", { 0.0f, ImGui::GetTextLineHeightWithSpacing() * 8.25f + ImGui::GetStyle().FramePadding.y * 2.0f })) {
+            for (const auto &[path, title] : fw_apps) {
+                const auto it = std::find(current_fw_apps.begin(), current_fw_apps.end(), path);
+                const bool exists = (it != current_fw_apps.end());
+                if (ImGui::Selectable(title.c_str(), exists)) {
+                    if (exists)
+                        current_fw_apps.erase(it);
+                    else
+                        current_fw_apps.push_back(path);
+                }
+
+                ImGui::ScrollWhenDragging();
+            }
+            ImGui::EndListBox();
+            ImGui::PopItemWidth();
+        }
+
         break;
     }
 
@@ -1389,7 +1476,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
                 gui.users[emuenv.io.user_id].start_type = "default";
                 save_user(gui, emuenv, emuenv.io.user_id);
                 init_theme_start_background(gui, emuenv, "default");
-                init_apps_icon(gui, emuenv, gui.app_selector.sys_apps);
+                init_apps_icon(gui, emuenv, gui.app_selector.emu_apps);
             }
             ImGui::SameLine();
         }

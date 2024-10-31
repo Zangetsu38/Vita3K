@@ -17,6 +17,9 @@
 
 #include "private.h"
 
+#include <v3kn/account.h>
+#include <v3kn/state.h>
+
 #include <config/state.h>
 
 #include <dialog/state.h>
@@ -30,12 +33,11 @@
 #include <util/log.h>
 #include <util/safe_time.h>
 
-#include <v3kn/account.h>
-#include <v3kn/state.h>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <mutex>
+#include <optional>
 
 #include <stb_image.h>
 #include <stb_image_write.h>
@@ -49,6 +51,29 @@ struct PanelUploadState {
     std::string *result_message;
     bool *upload_success;
     bool *is_uploading;
+};
+
+enum class V3knPendingAction {
+    NONE,
+    CREATE,
+    LOGIN,
+    REFRESH_QUOTA,
+    DELETE_ACCOUNT,
+    CHANGE_ONLINE_ID,
+    CHANGE_PASSWORD,
+    CHANGE_ABOUT_ME,
+};
+
+struct V3knPendingResult {
+    V3knPendingAction action = V3knPendingAction::NONE;
+    net_utils::WebResponse response;
+    std::string online_id;
+    std::string password;
+    std::string token;
+    std::string message;
+    uint64_t quota_used = 0;
+    uint64_t quota_total = 0;
+    bool has_quota = false;
 };
 
 void upload_v3kn_panel(GuiState *gui, EmuEnvState *emuenv, UserInfo *user_info, std::vector<unsigned char> panel_source,
@@ -109,8 +134,14 @@ void upload_v3kn_panel(GuiState *gui, EmuEnvState *emuenv, UserInfo *user_info, 
         int w = 0;
         int h = 0;
         auto *data = stbi_load_from_memory(reinterpret_cast<const stbi_uc *>(png_data.data()), static_cast<int>(png_data.size()), &w, &h, nullptr, 4);
-        if (data)
-            gui->v3kn_panel = ImGui_Texture(gui->imgui_state.get(), data, w, h);
+        if (data) {
+            gui::IconData panel_data;
+            panel_data.width = w;
+            panel_data.height = h;
+            panel_data.data.reset(data);
+            std::lock_guard<std::mutex> lock(gui->friends_avatar_mutex);
+            gui->pending_v3kn_panel = std::move(panel_data);
+        }
         *state.upload_success = true;
         *state.result_message = "Panel uploaded successfully.";
     } else {
@@ -122,6 +153,12 @@ void upload_v3kn_panel(GuiState *gui, EmuEnvState *emuenv, UserInfo *user_info, 
 namespace gui {
 
 void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
+    static std::mutex result_mutex;
+    static std::optional<V3knPendingResult> pending_result;
+    static std::atomic_bool is_result_ready{ false };
+    static std::atomic_bool is_waiting_result{ false };
+    static bool open_result_popup = false;
+
     const ImVec2 VIEWPORT_POS(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y);
     const ImVec2 VIEWPORT_SIZE(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
     const auto RES_SCALE = ImVec2(emuenv.gui_scale.x, emuenv.gui_scale.y);
@@ -162,17 +199,101 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
     auto &account_state = emuenv.v3kn.account_state;
     auto &user_info = account_state.user_info;
 
+    if (is_result_ready.exchange(false)) {
+        std::optional<V3knPendingResult> result;
+        {
+            std::lock_guard<std::mutex> lock(result_mutex);
+            result = std::move(pending_result);
+            pending_result.reset();
+        }
+
+        if (result) {
+            v3kn::handle_v3kn_status(emuenv, result->response);
+
+            switch (result->action) {
+            case V3knPendingAction::CREATE:
+                if (result->response.body.starts_with("OK:") && !result->token.empty()) {
+                    user_info.online_id = result->online_id;
+                    user_info.password = result->password;
+                    user_info.token = result->token;
+                    v3kn::save_v3kn_user_info(emuenv);
+                    std::thread([&gui, &emuenv]() {
+                        v3kn::init_v3kn_user_info(gui, emuenv);
+                    }).detach();
+                }
+                break;
+            case V3knPendingAction::LOGIN:
+                if (result->response.body.starts_with("OK:") && !result->token.empty()) {
+                    user_info.online_id = result->online_id;
+                    user_info.password = result->password;
+                    user_info.token = result->token;
+                    v3kn::save_v3kn_user_info(emuenv);
+                    std::thread([&gui, &emuenv]() {
+                        v3kn::init_v3kn_user_info(gui, emuenv);
+                    }).detach();
+                }
+                break;
+            case V3knPendingAction::REFRESH_QUOTA:
+                if (result->has_quota) {
+                    user_info.quota_used = result->quota_used;
+                    user_info.quota_total = result->quota_total;
+                }
+                break;
+            case V3knPendingAction::DELETE_ACCOUNT:
+                if (result->response.body.starts_with("OK:")) {
+                    user_info = {};
+                    v3kn::save_v3kn_user_info(emuenv);
+                    std::thread([&gui, &emuenv]() {
+                        v3kn::init_v3kn_user_info(gui, emuenv);
+                    }).detach();
+                }
+                break;
+            case V3knPendingAction::CHANGE_ONLINE_ID:
+                if (result->response.body.starts_with("OK:")) {
+                    user_info.online_id = result->online_id;
+                    v3kn::save_v3kn_user_info(emuenv);
+                }
+                break;
+            case V3knPendingAction::CHANGE_PASSWORD:
+                if (result->response.body.starts_with("OK:") && !result->token.empty()) {
+                    user_info.password = result->password;
+                    user_info.token = result->token;
+                    v3kn::save_v3kn_user_info(emuenv);
+                }
+                break;
+            case V3knPendingAction::CHANGE_ABOUT_ME:
+            case V3knPendingAction::NONE:
+                break;
+            }
+
+            result_message = result->message;
+            is_waiting_result = false;
+        }
+    }
+
+    if (open_result_popup) {
+        ImGui::OpenPopup("Result");
+        open_result_popup = false;
+    }
+
     const std::string OK_STR = common_lang["ok"];
     const std::string CANCEL_STR = common_lang["cancel"];
 
     const auto popup_flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
 
-    static auto result_popup = [&]() {
-        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    static const auto result_popup = [&]() {
+        const ImVec2 POPUP_SIZE(620.f * SCALE.x, 200.f * SCALE.y);
+        const ImVec2 POPUP_POS((VIEWPORT_SIZE.x - POPUP_SIZE.x) / 2.f, (VIEWPORT_SIZE.y - POPUP_SIZE.y) / 2.f);
+        ImGui::SetNextWindowSize(POPUP_SIZE, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(POPUP_POS, ImGuiCond_Always);
         if (ImGui::BeginPopupModal("Result", nullptr, popup_flags)) {
             const auto popup_width_size = ImGui::GetWindowWidth();
-            ImGui::Text("%s", result_message.c_str());
-            ImGui::SetCursorPosX((popup_width_size - SMALL_BUTTON_SIZE.x) / 2.f);
+            const auto text = result_message.empty() ? emuenv.common_dialog.lang.common["please_wait"] : result_message;
+            const auto text_size = ImGui::CalcTextSize(text.c_str());
+            ImGui::SetCursorPosY(((POPUP_SIZE.y - text_size.y) / 2.f) - SMALL_BUTTON_SIZE.y);
+            TextColoredCentered(GUI_COLOR_TEXT, text.c_str(), 20.f * SCALE.x);
+            ImGui::SetCursorPos(ImVec2((popup_width_size - SMALL_BUTTON_SIZE.x) / 2.f, POPUP_SIZE.y - SMALL_BUTTON_SIZE.y - (16.f * SCALE.y)));
+            ImGui::BeginDisabled(is_waiting_result);
             if (ImGui::Button("OK", SMALL_BUTTON_SIZE)) {
                 ImGui::CloseCurrentPopup();
                 if (result_message.find("successfully") != std::string::npos) {
@@ -184,6 +305,7 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
                 } else
                     result_message.clear();
             }
+            ImGui::EndDisabled();
             ImGui::EndPopup();
         }
     };
@@ -296,37 +418,45 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
         const std::string username_str(username);
         const std::string password_str(password);
         const std::string confirm_str(confirm);
-        ImGui::BeginDisabled(username_str.empty() || (username_str.size() < 3) || password_str.empty() || confirm_str.empty() || (password_str.size() < 8));
+        ImGui::BeginDisabled(is_waiting_result || username_str.empty() || (username_str.size() < 3) || password_str.empty() || confirm_str.empty() || (password_str.size() < 8));
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() / 2.f) - SMALL_BUTTON_SIZE.x - (20.f * SCALE.x));
         if (ImGui::Button(OK_STR.c_str(), SMALL_BUTTON_SIZE) || res) {
             if (std::string(password) != std::string(confirm)) {
                 result_message = "Password and confirmation do not match.";
+                ImGui::OpenPopup("Result");
             } else {
                 const std::string derived_password = derive_password(password);
                 const std::string base64_password = base64_encode(derived_password);
-                const auto res = v3kn::v3kn_create(user_info, username, base64_password);
-
-                v3kn::handle_v3kn_status(emuenv, res);
-                if (res.body.starts_with("OK:")) {
-                    std::smatch match;
-                    std::regex regex_pattern(R"(OK:([^:]+))");
-                    if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 2)) {
-                        user_info.online_id = username;
-                        user_info.password = base64_password;
-                        user_info.token = match[1];
-                        result_message = fmt::format("Account created successfully for user {}", user_info.online_id);
-                        v3kn::save_v3kn_user_info(emuenv);
-                        std::thread([&gui, &emuenv]() {
-                            v3kn::init_v3kn_user_info(gui, emuenv);
-                        }).detach();
+                const std::string requested_username = username;
+                const UserInfo current_user_info = user_info;
+                is_waiting_result = true;
+                open_result_popup = true;
+                std::thread([&emuenv, requested_username, base64_password, current_user_info]() {
+                    const auto res = v3kn::v3kn_create(current_user_info, requested_username, base64_password);
+                    V3knPendingResult result;
+                    result.action = V3knPendingAction::CREATE;
+                    result.response = res;
+                    result.online_id = requested_username;
+                    result.password = base64_password;
+                    if (res.body.starts_with("OK:")) {
+                        std::smatch match;
+                        std::regex regex_pattern(R"(OK:([^:]+))");
+                        if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 2)) {
+                            result.token = match[1];
+                            result.message = fmt::format("Account created successfully for user {}", requested_username);
+                        } else {
+                            result.message = fmt::format("Unexpected response format from server: {}", res.body);
+                        }
                     } else {
-                        result_message = fmt::format("Unexpected response format from server: {}", res.body);
+                        result.message = v3kn::get_v3kn_error_message(emuenv, res);
                     }
-                } else {
-                    result_message = v3kn::get_v3kn_error_message(emuenv, res);
-                }
+                    {
+                        std::lock_guard<std::mutex> lock(result_mutex);
+                        pending_result = std::move(result);
+                    }
+                    is_result_ready = true;
+                }).detach();
             }
-            ImGui::OpenPopup("Result");
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 40.f * SCALE.x);
@@ -358,36 +488,40 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::InputText("Username", username, sizeof(username));
         auto res = ImGui::InputText("Password", password, sizeof(password), ImGuiInputTextFlags_Password | ImGuiInputTextFlags_EnterReturnsTrue);
 
-        ImGui::BeginDisabled(std::string(password).empty() || std::string(username).empty());
+        ImGui::BeginDisabled(is_waiting_result || std::string(password).empty() || std::string(username).empty());
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() / 2.f) - SMALL_BUTTON_SIZE.x - (20.f * SCALE.x));
         if (ImGui::Button(OK_STR.c_str(), SMALL_BUTTON_SIZE) || res) {
             const std::string derived_password = derive_password(password);
             const std::string base64_password = base64_encode(derived_password);
-            const auto res = v3kn::v3kn_login(user_info, username, base64_password);
-
-            v3kn::handle_v3kn_status(emuenv, res);
-
-            if (res.body.starts_with("OK:")) {
-                std::smatch match;
-
-                // Format expected is OK:online_id:token
-                std::regex regex_pattern(R"(OK:([^:]+):([^:]+))");
-                if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 3)) {
-                    user_info.online_id = match[1];
-                    user_info.password = base64_password;
-                    user_info.token = match[2];
-                    result_message = "Login on V3KN successfully for user " + user_info.online_id;
-                    v3kn::save_v3kn_user_info(emuenv);
-                    std::thread([&gui, &emuenv]() {
-                        v3kn::init_v3kn_user_info(gui, emuenv);
-                    }).detach();
+            const std::string requested_username = username;
+            const UserInfo current_user_info = user_info;
+            is_waiting_result = true;
+            open_result_popup = true;
+            std::thread([&emuenv, requested_username, base64_password, current_user_info]() {
+                const auto res = v3kn::v3kn_login(current_user_info, requested_username, base64_password);
+                V3knPendingResult result;
+                result.action = V3knPendingAction::LOGIN;
+                result.response = res;
+                result.password = base64_password;
+                if (res.body.starts_with("OK:")) {
+                    std::smatch match;
+                    std::regex regex_pattern(R"(OK:([^:]+):([^:]+))");
+                    if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 3)) {
+                        result.online_id = match[1];
+                        result.token = match[2];
+                        result.message = "Login on V3KN successfully for user " + result.online_id;
+                    } else {
+                        result.message = v3kn::get_v3kn_error_message(emuenv, res);
+                    }
                 } else {
-                    result_message = v3kn::get_v3kn_error_message(emuenv, res);
+                    result.message = v3kn::get_v3kn_error_message(emuenv, res);
                 }
-            } else {
-                result_message = v3kn::get_v3kn_error_message(emuenv, res);
-            }
-            ImGui::OpenPopup("Result");
+                {
+                    std::lock_guard<std::mutex> lock(result_mutex);
+                    pending_result = std::move(result);
+                }
+                is_result_ready = true;
+            }).detach();
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 40.f * SCALE.x);
@@ -408,7 +542,7 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
     if (!v3kn::is_v3kn_logged_in() && !user_info.token.empty()) {
         ImGui::SetCursorPosX((WINDOW_SIZE.x / 2.f) - BUTTON_SIZE.x - (20.f * SCALE.x));
         static bool is_testing_connection = false;
-        ImGui::BeginDisabled(is_testing_connection);
+        ImGui::BeginDisabled(is_waiting_result || is_testing_connection);
         if (ImGui::Button(is_testing_connection ? "Testing..." : "Test Connection", BUTTON_SIZE)) {
             is_testing_connection = true;
             std::thread([&gui, &emuenv]() {
@@ -424,38 +558,41 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
 
     // Refresh quota button
     ImGui::SetCursorPosX((WINDOW_SIZE.x / 2.f) - BUTTON_SIZE.x - (20.f * SCALE.x));
+    ImGui::BeginDisabled(is_waiting_result);
     if (ImGui::Button("Refresh Quota", BUTTON_SIZE)) {
-        const std::string url = v3kn::get_v3kn_server_url(user_info.host, "v3kn/quota");
-        const auto res = net_utils::get_web_response_ex(url, user_info.token);
-
-        v3kn::handle_v3kn_status(emuenv, res);
-
-        if (res.body.starts_with("OK:")) {
-            std::smatch match;
-            std::regex regex_pattern(R"(OK:([^:]+):([^:]+))");
-            if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 3)) {
-                user_info.quota_used = std::strtoull(match[1].str().c_str(), nullptr, 10);
-                user_info.quota_total = std::strtoull(match[2].str().c_str(), nullptr, 10);
-                result_message = fmt::format("Quota refreshed: {} / {}", get_unit_size(user_info.quota_used), get_unit_size(user_info.quota_total));
+        const UserInfo current_user_info = user_info;
+        is_waiting_result = true;
+        open_result_popup = true;
+        std::thread([&emuenv, current_user_info]() {
+            const std::string url = v3kn::get_v3kn_server_url(current_user_info.host, "v3kn/quota");
+            const auto res = net_utils::get_web_response_ex(url, current_user_info.token);
+            V3knPendingResult result;
+            result.action = V3knPendingAction::REFRESH_QUOTA;
+            result.response = res;
+            if (res.body.starts_with("OK:")) {
+                std::smatch match;
+                std::regex regex_pattern(R"(OK:([^:]+):([^:]+))");
+                if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 3)) {
+                    result.quota_used = std::strtoull(match[1].str().c_str(), nullptr, 10);
+                    result.quota_total = std::strtoull(match[2].str().c_str(), nullptr, 10);
+                    result.has_quota = true;
+                    result.message = fmt::format("Quota refreshed: {} / {}", get_unit_size(result.quota_used), get_unit_size(result.quota_total));
+                } else {
+                    result.message = v3kn::get_v3kn_error_message(emuenv, res);
+                }
             } else {
-                result_message = v3kn::get_v3kn_error_message(emuenv, res);
+                result.message = v3kn::get_v3kn_error_message(emuenv, res);
             }
-        } else {
-            result_message = v3kn::get_v3kn_error_message(emuenv, res);
-        }
-        ImGui::OpenPopup("Result Quota");
+            {
+                std::lock_guard<std::mutex> lock(result_mutex);
+                pending_result = std::move(result);
+            }
+            is_result_ready = true;
+        }).detach();
     }
+    ImGui::EndDisabled();
     SetTooltipEx("Refresh quota");
-
-    if (ImGui::BeginPopupModal("Result Quota", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
-        ImGui::Text("%s", result_message.c_str());
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - SMALL_BUTTON_SIZE.x) / 2.f);
-        if (ImGui::Button("OK", SMALL_BUTTON_SIZE)) {
-            ImGui::CloseCurrentPopup();
-            result_message.clear();
-        }
-        ImGui::EndPopup();
-    }
+    result_popup();
 
     // Delete account button
     ImGui::SetCursorPosX((WINDOW_SIZE.x / 2.f) - BUTTON_SIZE.x - (20.f * SCALE.x));
@@ -469,26 +606,30 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Separator();
 
         ImGui::InputText("Password", password, sizeof(password), ImGuiInputTextFlags_Password);
-        ImGui::BeginDisabled(std::string(password).empty());
+        ImGui::BeginDisabled(is_waiting_result || std::string(password).empty());
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() / 2.f) - SMALL_BUTTON_SIZE.x - (20.f * SCALE.x));
         if (ImGui::Button(OK_STR.c_str(), SMALL_BUTTON_SIZE)) {
             const std::string derived_password = derive_password(password);
             const std::string base64_password = base64_encode(derived_password);
-            const auto res = v3kn::v3kn_delete(user_info, base64_password);
-
-            v3kn::handle_v3kn_status(emuenv, res);
-
-            if (res.body.starts_with("OK:")) {
-                result_message = "Account V3KN deleted successfully for user " + user_info.online_id;
-                user_info = {};
-                v3kn::save_v3kn_user_info(emuenv);
-                std::thread([&gui, &emuenv]() {
-                    v3kn::init_v3kn_user_info(gui, emuenv);
-                }).detach();
-            } else {
-                result_message = v3kn::get_v3kn_error_message(emuenv, res);
-            }
-            ImGui::OpenPopup("Result");
+            const UserInfo current_user_info = user_info;
+            const std::string current_online_id = user_info.online_id;
+            is_waiting_result = true;
+            open_result_popup = true;
+            std::thread([&emuenv, current_online_id, base64_password, current_user_info]() {
+                const auto res = v3kn::v3kn_delete(current_user_info, base64_password);
+                V3knPendingResult result;
+                result.action = V3knPendingAction::DELETE_ACCOUNT;
+                result.response = res;
+                if (res.body.starts_with("OK:"))
+                    result.message = "Account V3KN deleted successfully for user " + current_online_id;
+                else
+                    result.message = v3kn::get_v3kn_error_message(emuenv, res);
+                {
+                    std::lock_guard<std::mutex> lock(result_mutex);
+                    pending_result = std::move(result);
+                }
+                is_result_ready = true;
+            }).detach();
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 40.f * SCALE.x);
@@ -519,6 +660,7 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
             v3kn::set_v3kn_logged_in(false);
             v3kn::save_v3kn_user_info(emuenv);
             gui.v3kn_avatar = {};
+            gui.friends_avatar.clear();
             std::thread([&gui, &emuenv]() {
                 v3kn::init_v3kn_user_info(gui, emuenv);
             }).detach();
@@ -545,21 +687,29 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Separator();
 
         ImGui::InputText("New Username", username, sizeof(username), ImGuiInputTextFlags_CharsNoBlank);
-        ImGui::BeginDisabled(std::string(username).empty());
+        ImGui::BeginDisabled(is_waiting_result || std::string(username).empty());
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() / 2.f) - SMALL_BUTTON_SIZE.x - (20.f * SCALE.x));
         if (ImGui::Button(OK_STR.c_str(), SMALL_BUTTON_SIZE)) {
-            const auto res = v3kn::v3kn_change_online_id(user_info, username);
-
-            v3kn::handle_v3kn_status(emuenv, res);
-
-            if (res.body.starts_with("OK:")) {
-                user_info.online_id = username;
-                v3kn::save_v3kn_user_info(emuenv);
-                result_message = "Online ID successfully changed to " + user_info.online_id;
-            } else {
-                result_message = v3kn::get_v3kn_error_message(emuenv, res);
-            }
-            ImGui::OpenPopup("Result");
+            const std::string new_online_id = username;
+            const UserInfo current_user_info = user_info;
+            is_waiting_result = true;
+            open_result_popup = true;
+            std::thread([&emuenv, new_online_id, current_user_info]() {
+                const auto res = v3kn::v3kn_change_online_id(current_user_info, new_online_id);
+                V3knPendingResult result;
+                result.action = V3knPendingAction::CHANGE_ONLINE_ID;
+                result.response = res;
+                result.online_id = new_online_id;
+                if (res.body.starts_with("OK:"))
+                    result.message = "Online ID successfully changed to " + new_online_id;
+                else
+                    result.message = v3kn::get_v3kn_error_message(emuenv, res);
+                {
+                    std::lock_guard<std::mutex> lock(result_mutex);
+                    pending_result = std::move(result);
+                }
+                is_result_ready = true;
+            }).detach();
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 40.f * SCALE.x);
@@ -587,36 +737,45 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
 
         ImGui::InputText("Current Password", password, sizeof(password), ImGuiInputTextFlags_Password);
         ImGui::InputText("New Password", confirm, sizeof(confirm), ImGuiInputTextFlags_Password);
-        ImGui::BeginDisabled(std::string(password).empty() || std::string(confirm).empty());
+        ImGui::BeginDisabled(is_waiting_result || std::string(password).empty() || std::string(confirm).empty());
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() / 2.f) - SMALL_BUTTON_SIZE.x - (20.f * SCALE.x));
         if (ImGui::Button(OK_STR.c_str(), SMALL_BUTTON_SIZE)) {
             const std::string derived_current_password = derive_password(password);
             const std::string base64_current_password = base64_encode(derived_current_password);
             if (base64_current_password != user_info.password) {
                 result_message = "Current password is incorrect.";
+                ImGui::OpenPopup("Result");
             } else {
                 const std::string derived_new_password = derive_password(confirm);
                 const std::string base64_new_password = base64_encode(derived_new_password);
-                const auto res = v3kn::v3kn_change_password(user_info, base64_current_password, base64_new_password);
-
-                v3kn::handle_v3kn_status(emuenv, res);
-
-                if (res.body.starts_with("OK:")) {
-                    std::smatch match;
-                    std::regex regex_pattern(R"(OK:([^:]+))");
-                    if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 2)) {
-                        user_info.password = base64_new_password;
-                        user_info.token = match[1];
-                        v3kn::save_v3kn_user_info(emuenv);
-                        result_message = "Password changed successfully for user " + user_info.online_id;
+                const UserInfo current_user_info = user_info;
+                is_waiting_result = true;
+                open_result_popup = true;
+                std::thread([&emuenv, base64_current_password, base64_new_password, current_user_info]() {
+                    const auto res = v3kn::v3kn_change_password(current_user_info, base64_current_password, base64_new_password);
+                    V3knPendingResult result;
+                    result.action = V3knPendingAction::CHANGE_PASSWORD;
+                    result.response = res;
+                    result.password = base64_new_password;
+                    if (res.body.starts_with("OK:")) {
+                        std::smatch match;
+                        std::regex regex_pattern(R"(OK:([^:]+))");
+                        if (std::regex_search(res.body, match, regex_pattern) && (match.size() == 2)) {
+                            result.token = match[1];
+                            result.message = "Password changed successfully for user " + current_user_info.online_id;
+                        } else {
+                            result.message = v3kn::get_v3kn_error_message(emuenv, res);
+                        }
                     } else {
-                        result_message = v3kn::get_v3kn_error_message(emuenv, res);
+                        result.message = v3kn::get_v3kn_error_message(emuenv, res);
                     }
-                } else {
-                    result_message = v3kn::get_v3kn_error_message(emuenv, res);
-                }
+                    {
+                        std::lock_guard<std::mutex> lock(result_mutex);
+                        pending_result = std::move(result);
+                    }
+                    is_result_ready = true;
+                }).detach();
             }
-            ImGui::OpenPopup("Result");
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 40.f * SCALE.x);
@@ -646,17 +805,27 @@ void draw_v3kn_dialog(GuiState &gui, EmuEnvState &emuenv) {
         const ImVec2 BOX_TEXT_SIZE = ImVec2(368.f * SCALE.x, 50.f * SCALE.y);
         ImGui::SetNextItemWidth(BOX_TEXT_SIZE.x);
         const auto res = ImGui::InputText("About Me", about_me, sizeof(about_me), ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::BeginDisabled(std::string(about_me).empty());
+        ImGui::BeginDisabled(is_waiting_result || std::string(about_me).empty());
         if (ImGui::Button(OK_STR.c_str(), SMALL_BUTTON_SIZE) || res) {
             const std::string about_me_str(about_me);
-            const auto res = v3kn::v3kn_change_about_me(user_info, about_me_str);
-            v3kn::handle_v3kn_status(emuenv, res);
-            if (res.body.starts_with("OK:")) {
-                result_message = "About Me changed successfully for user " + user_info.online_id;
-            } else {
-                result_message = v3kn::get_v3kn_error_message(emuenv, res);
-            }
-            ImGui::OpenPopup("Result");
+            const UserInfo current_user_info = user_info;
+            is_waiting_result = true;
+            open_result_popup = true;
+            std::thread([&emuenv, about_me_str, current_user_info]() {
+                const auto res = v3kn::v3kn_change_about_me(current_user_info, about_me_str);
+                V3knPendingResult result;
+                result.action = V3knPendingAction::CHANGE_ABOUT_ME;
+                result.response = res;
+                if (res.body.starts_with("OK:"))
+                    result.message = "About Me changed successfully for user " + current_user_info.online_id;
+                else
+                    result.message = v3kn::get_v3kn_error_message(emuenv, res);
+                {
+                    std::lock_guard<std::mutex> lock(result_mutex);
+                    pending_result = std::move(result);
+                }
+                is_result_ready = true;
+            }).detach();
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 40.f * SCALE.x);

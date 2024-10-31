@@ -101,6 +101,8 @@ Result open_file(fs::path &resulting_path, const std::vector<FileFilter> &file_f
  */
 Result pick_folder(fs::path &resulting_path, const fs::path &default_path = "");
 
+bool is_system_dialog_active();
+
 /**
  * @brief Get a string describing the last dialog error
  *

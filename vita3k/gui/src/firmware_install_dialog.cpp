@@ -36,7 +36,7 @@ void draw_firmware_install_dialog(GuiState &gui, EmuEnvState &emuenv) {
 
     static std::mutex install_mutex;
     static bool draw_file_dialog = true;
-    static bool finished_installing = false;
+    static std::atomic<bool> finished_installing{ false };
     static std::atomic<uint32_t> progress(0);
     static const auto progress_callback = [&](uint32_t updated_progress) {
         progress = updated_progress;
@@ -57,16 +57,18 @@ void draw_firmware_install_dialog(GuiState &gui, EmuEnvState &emuenv) {
     if (draw_file_dialog) {
         auto result = host::dialog::filesystem::open_file(pup_path, { { "PlayStation Vita Firmware Package", { "PUP" } } });
         draw_file_dialog = false;
-        finished_installing = false;
+        finished_installing.store(false);
+        progress = 0;
 
         if (result == host::dialog::filesystem::Result::SUCCESS) {
             std::thread installation([&emuenv]() {
                 fw_version = install_pup(emuenv.pref_path, pup_path, progress_callback);
                 std::lock_guard<std::mutex> lock(install_mutex);
-                finished_installing = true;
+                finished_installing.store(true);
             });
             installation.detach();
         } else if (result == host::dialog::filesystem::Result::CANCEL) {
+            LOG_INFO("Firmware install dialog: file picker cancelled");
             gui.file_menu.firmware_install_dialog = false;
             draw_file_dialog = true;
         } else {
@@ -76,7 +78,7 @@ void draw_firmware_install_dialog(GuiState &gui, EmuEnvState &emuenv) {
         }
     }
 
-    if (!finished_installing) {
+    if (!finished_installing.load()) {
         ImGui::OpenPopup("firmware_installation");
         if (ImGui::BeginPopupModal("firmware_installation", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration)) {
             ImGui::SetWindowFontScale(RES_SCALE.x);
@@ -127,15 +129,16 @@ void draw_firmware_install_dialog(GuiState &gui, EmuEnvState &emuenv) {
                     fs::remove(pup_path);
                     delete_pup_file = false;
                 }
-                get_modules_list(gui, emuenv);
-                if (emuenv.cfg.initial_setup)
+                if (emuenv.cfg.initial_setup) {
+                    get_modules_list(gui, emuenv);
+                    get_sys_apps_title(gui, emuenv);
                     init_theme(gui, emuenv, gui.users[emuenv.cfg.user_id].theme_id);
-                else {
+                } else {
                     if (bgm_player::init_bgm(gui, emuenv))
                         bgm_player::switch_bgm_state(false);
                 }
                 fw_version.clear();
-                pup_path = "";
+                pup_path.clear();
                 gui.file_menu.firmware_install_dialog = false;
                 draw_file_dialog = true;
             }

@@ -28,6 +28,7 @@
 #include <io/vfs.h>
 #include <kernel/load_self.h>
 #include <kernel/state.h>
+#include <util/vector_utils.h>
 #include <module/load_module.h>
 #include <nids/functions.h>
 #include <packages/license.h>
@@ -204,10 +205,9 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
 
     LOG_INFO("Loading module \"{}\"", module_path);
     vfs::FileBuffer module_buffer;
-    bool res;
     VitaIoDevice device = device::get_device(module_path);
     auto device_for_icase = device;
-    fs::path translated_module_path = translate_path(module_path.c_str(), device, emuenv.io.device_paths);
+    fs::path translated_module_path = translate_path(module_path.c_str(), device, emuenv.io);
     auto system_path = device::construct_emulated_path(device, translated_module_path, emuenv.pref_path, emuenv.io.redirect_stdio);
 
     if (emuenv.io.case_isens_find_enabled && !fs::exists(system_path)) {
@@ -231,11 +231,7 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
         }
     }
 
-    if (device == VitaIoDevice::app0)
-        res = vfs::read_app_file(module_buffer, emuenv.pref_path, emuenv.io.app_path, translated_module_path);
-    else
-        res = vfs::read_file(device, module_buffer, emuenv.pref_path, translated_module_path);
-    if (!res) {
+    if (!vfs::read_file(device, module_buffer, emuenv.pref_path, translated_module_path)) {
         LOG_ERROR("Failed to read module file {}", module_path);
         return SCE_ERROR_ERRNO_ENOENT;
     }
@@ -245,6 +241,12 @@ SceUID load_module(EmuEnvState &emuenv, const std::string &module_path) {
     if (module_buffer.empty()) {
         LOG_ERROR("Failed to decrypt module file {}", module_path);
         return SCE_ERROR_ERRNO_ENOENT;
+    } else {
+        /*auto output_path = fmt::format("cache/{}/{}.elf", emuenv.io.title_id, fs::path(module_path).filename().string());
+        fs::create_directories("cache/" + emuenv.io.title_id);
+        std::ofstream out(output_path, std::ios::binary);
+        out.write(reinterpret_cast<const char *>(module_buffer.data()), module_buffer.size());
+        out.close();*/
     }
 
     const std::vector<Patch> patches = get_patches(emuenv.patch_path, emuenv.io.title_id, module_path);
@@ -406,8 +408,59 @@ bool load_sys_module_internal_with_arg(EmuEnvState &emuenv, SceUID thread_id, Sc
         if (retcode)
             *retcode = static_cast<int>(ret);
     }
-    emuenv.kernel.loaded_internal_sysmodules.push_back(module_id);
+    {
+        std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
+        emuenv.kernel.loaded_internal_sysmodules.push_back(module_id);
+    }
     return true;
+}
+
+int unload_sys_module_internal_with_arg(EmuEnvState &emuenv, SceSysmoduleInternalModuleId module_id, SceSize args, Ptr<void> argp, int *retcode) {
+    const char *export_name = __FUNCTION__;
+
+    if (!sysmodule_internal_paths.contains(module_id))
+        return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
+
+    {
+        std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
+        const auto it = std::find(emuenv.kernel.loaded_internal_sysmodules.begin(), emuenv.kernel.loaded_internal_sysmodules.end(), module_id);
+        if (it == emuenv.kernel.loaded_internal_sysmodules.end())
+            return RET_ERROR(SCE_SYSMODULE_ERROR_UNLOADED);
+
+        emuenv.kernel.loaded_internal_sysmodules.erase(it);
+    }
+
+    const auto &module_paths = sysmodule_internal_paths.at(module_id);
+    for (auto module_it = module_paths.rbegin(); module_it != module_paths.rend(); ++module_it) {
+        const std::string module_path = fmt::format("vs0:sys/external/{}.suprx", *module_it);
+
+        SceUID loaded_module_uid = -1;
+        {
+            const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
+            const auto &loaded_modules = emuenv.kernel.loaded_modules;
+            const auto module_iter = std::find_if(loaded_modules.begin(), loaded_modules.end(), [&](const auto &p) {
+                return module_path == p.second->info.path;
+            });
+
+            if (module_iter == loaded_modules.end())
+                return RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
+
+            loaded_module_uid = module_iter->first;
+        }
+
+        const auto module = lock_and_find(loaded_module_uid, emuenv.kernel.loaded_modules, emuenv.kernel.mutex);
+        if (!module)
+            return RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
+
+        const auto ret = stop_module(emuenv, module->info, args, argp);
+        if (retcode)
+            *retcode = static_cast<int>(ret);
+
+        if (unload_module(emuenv, loaded_module_uid) < 0)
+            return RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
+    }
+
+    return 0;
 }
 
 void init_libraries(EmuEnvState &emuenv) {

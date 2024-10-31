@@ -65,6 +65,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>ha conseguido un trofeo platino en "{}".</has_earned_platinum_trophy>
+		<has_earned_trophy>ha conseguido un trofeo en "{}".</has_earned_trophy>
+		<like>Me gusta</like>
+		<likes_this>A {} le gusta esto.</likes_this>
+		<and_like_this>A {} y {} les gusta esto.</and_like_this>
+		<people_like_this>A {} personas les gusta esto.</people_like_this>
+		<first_time_playing>juega a "{}" por primera vez.</first_time_playing>
 		<an_error_occurred>Ha ocurrido un error.
 Código del error: {}</an_error_occurred>
 		<cancel>Cancelar</cancel>
@@ -193,7 +200,18 @@ Código del error: {}</an_error_occurred>
 		<silver>Plata</silver>
 		<hours_ago>Hace {} horas</hours_ago>
 		<minutes_ago>Hace {} minutos</minutes_ago>
+		<write_comment>Escribir comentario</write_comment>
 	</common>
+
+	<contacts_pa>
+		<activities_of>Actividades de {}</activities_of>
+		<anyone>Cualquiera</anyone>
+		<no_one>Nadie</no_one>
+		<cannot_display>No se pueden mostrar más páginas.</cannot_display>
+		<friends_of_friends>Amigos de amigos</friends_of_friends>
+		<friends_only>Solo amigos</friends_only>
+		<share_range>Compartiendo con:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Gestor de contenido">
 		<application name="Aplicaciones">

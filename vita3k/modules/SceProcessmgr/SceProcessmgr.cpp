@@ -17,6 +17,7 @@
 
 #include "SceProcessmgr.h"
 
+#include <cpu/functions.h>
 #include <io/functions.h>
 #include <kernel/state.h>
 #include <rtc/rtc.h>
@@ -101,7 +102,30 @@ EXPORT(int, sceKernelCDialogSetLeaseLimit) {
 
 EXPORT(int, sceKernelCallAbortHandler, uint32_t param1, uint32_t param2) {
     TRACY_FUNC(sceKernelCallAbortHandler, param1, param2);
-    return UNIMPLEMENTED();
+    const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        return UNIMPLEMENTED();
+    }
+
+    const auto sp = read_sp(*thread->cpu);
+    uint32_t resume_pc = 0;
+
+    if (Ptr<uint32_t>(sp).valid(emuenv.mem)) {
+        resume_pc = *Ptr<uint32_t>(sp).get(emuenv.mem);
+    }
+
+    if (!resume_pc) {
+        resume_pc = read_lr(*thread->cpu);
+    }
+
+    if (!resume_pc) {
+        LOG_WARN("sceKernelCallAbortHandler: unable to recover a resume PC for thread {} ({})", thread->name, thread_id);
+        return UNIMPLEMENTED();
+    }
+
+    LOG_WARN("sceKernelCallAbortHandler: skipping abort for thread {} ({}), resuming at {}", thread->name, thread_id, log_hex(resume_pc));
+    write_pc(*thread->cpu, resume_pc);
+    return 0;
 }
 
 EXPORT(int, sceKernelGetCurrentProcess) {
@@ -111,7 +135,7 @@ EXPORT(int, sceKernelGetCurrentProcess) {
 
 EXPORT(int, sceKernelGetExtraTty) {
     TRACY_FUNC(sceKernelGetExtraTty);
-    return UNIMPLEMENTED();
+    return open_file(emuenv.io, "tty3:", SCE_O_WRONLY, emuenv.pref_path, export_name);
 }
 
 EXPORT(int, sceKernelGetProcessName, char *process_name, uint32_t len) {

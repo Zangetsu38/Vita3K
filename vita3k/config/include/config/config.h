@@ -224,7 +224,8 @@ enum ScreenshotFormat {
     code(std::vector<int>, "controller-led-color", std::vector<int>{}, controller_led_color)            \
     code(std::vector<std::string>, "lle-modules", std::vector<std::string>{}, lle_modules)              \
     code(std::vector<uint64_t>, "ime-langs", std::vector<uint64_t>{4}, ime_langs)                       \
-    code(std::vector<std::string>, "tracy-advanced-profiling-modules", std::vector<std::string>{}, tracy_advanced_profiling_modules)
+    code(std::vector<std::string>, "tracy-advanced-profiling-modules", std::vector<std::string>{}, tracy_advanced_profiling_modules) \
+    code(std::vector<std::string>, "firmware-apps", std::vector<std::string>{}, firmware_apps)
 
 // Parent macro for easier generation
 #define CONFIG_LIST(code)                                                                               \

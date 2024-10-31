@@ -83,6 +83,13 @@ dependendo de seu tamanho e hardware.</delete_app_description>
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>conquistou um troféu de platina no "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>conquistou um troféu no "{}"!</has_earned_trophy>
+		<like>Curtir</like>
+		<likes_this>{} curtiu isso.</likes_this>
+		<and_like_this>{} e {} curtiram isso.</and_like_this>
+		<people_like_this>{} pessoas curtiram isso.</people_like_this>
+		<first_time_playing>está jogando "{}" pela primeira vez.</first_time_playing>
 		<an_error_occurred>Ocorreu um erro.
 Código de erro: {}</an_error_occurred>
 		<cancel>Cancelar</cancel>
@@ -214,6 +221,7 @@ Código de erro: {}</an_error_occurred>
 		<silver>Prata</silver>
 		<hours_ago>{} horas atrás</hours_ago>
 		<minutes_ago>{} minutos atrás</minutes_ago>
+		<write_comment>Escrever comentário</write_comment>
 	</common>
 
 	<compatibility name="Compatibilidade">
@@ -228,6 +236,16 @@ Código de erro: {}</an_error_occurred>
 			<state id = "6">Jogável</state>
 		</states>
 	</compatibility>
+
+	<contacts_pa>
+		<activities_of>Atividades de {}</activities_of>
+		<anyone>Qualquer pessoa</anyone>
+		<no_one>Ninguém</no_one>
+		<cannot_display>Não é possível mostrar mais páginas.</cannot_display>
+		<friends_of_friends>Amigos de amigos</friends_of_friends>
+		<friends_only>Somente amigos</friends_only>
+		<share_range>Compartilhar com:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Gerenciador de conteúdo">
 		<application name="Aplicativos">

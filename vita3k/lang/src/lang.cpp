@@ -25,9 +25,501 @@
 #include <util/fs.h>
 #include <util/vector_utils.h>
 
+#include <cctype>
 #include <pugixml.hpp>
 
 namespace lang {
+void set_lang_string() {
+    std::vector<std::pair<std::string, std::string>> mapping = {
+        { "b036d3df", "activities_of" },
+        { "f040449e", "anyone" },
+        { "aee0b551", "no_one" },
+        { "5b08c8fb", "cannot_display" },
+        { "48e362b4", "friends_of_friends" },
+        { "73f2af03", "friends_only" },
+        { "10b08b96", "share_range" }
+    };
+
+    const std::string child_name = "contacts_pa";
+    const std::string child_open_tag = "<" + child_name + ">";
+    const std::string child_close_tag = "</" + child_name + ">";
+
+    const fs::path system_lang_path{ "I:/Git/Vita3K/shadow/lang/system" };
+    // const fs::path ps_common_lang_path{ "D:/Emulateurs/Vita3K/Tools/rco_dump/common_resource/xmls" };
+    const fs::path ps_lang_path{ "D:/Emulateurs/Vita3K/Tools/rco_dump/contacts_pa_plugin/xmls" };
+
+    std::map<std::string, std::map<std::string, std::string>> psn_values_by_lang;
+    std::vector<std::string> lang;
+
+    for (auto &entry : fs::directory_iterator(ps_lang_path)) {
+        if (entry.path().extension() != ".xml") {
+            LOG_ERROR("Skipping non-XML file in PSN common lang directory: '{}'", entry.path().string());
+            continue;
+        }
+
+        std::string raw;
+        {
+            fs::ifstream f(entry.path(), std::ios::binary);
+            raw.assign((std::istreambuf_iterator<char>(f)),
+                std::istreambuf_iterator<char>());
+        }
+
+        const auto fix_placeholders = [](std::string &raw) {
+            //
+            // ÉTAPE 1 : remplacer %1, %2, %3 → {}
+            //
+            {
+                const std::vector<std::string> bare = { "%1", "%2", "%3" };
+                for (const auto &p : bare) {
+                    size_t pos = 0;
+                    while ((pos = raw.find(p, pos)) != std::string::npos) {
+                        raw.replace(pos, p.size(), "{}");
+                        pos += 2;
+                    }
+                }
+            }
+
+            {
+                const std::string src_pattern = "src=\"";
+                const auto is_attr_end_quote = [&](size_t quote_pos) {
+                    size_t next = quote_pos + 1;
+                    while (next < raw.size() && std::isspace(static_cast<unsigned char>(raw[next])))
+                        ++next;
+
+                    if (next >= raw.size())
+                        return true;
+
+                    if ((raw[next] == '/') || (raw[next] == '>'))
+                        return true;
+
+                    const auto is_name_start_char = [](unsigned char ch) {
+                        return std::isalpha(ch) || (ch == '_') || (ch == ':');
+                    };
+
+                    const auto is_name_char = [&](unsigned char ch) {
+                        return is_name_start_char(ch) || std::isdigit(ch) || (ch == '-') || (ch == '.');
+                    };
+
+                    if (!is_name_start_char(static_cast<unsigned char>(raw[next])))
+                        return false;
+
+                    size_t name_end = next + 1;
+                    while (name_end < raw.size() && is_name_char(static_cast<unsigned char>(raw[name_end])))
+                        ++name_end;
+
+                    return (name_end < raw.size()) && (raw[name_end] == '=');
+                };
+
+                size_t pos = 0;
+                while ((pos = raw.find(src_pattern, pos)) != std::string::npos) {
+                    const size_t value_start = pos + src_pattern.size();
+                    size_t value_end = value_start;
+
+                    while ((value_end = raw.find('"', value_end)) != std::string::npos) {
+                        if (is_attr_end_quote(value_end))
+                            break;
+
+                        ++value_end;
+                    }
+
+                    if (value_end == std::string::npos)
+                        break;
+
+                    std::string src_value = raw.substr(value_start, value_end - value_start);
+                    size_t quoted_placeholder_pos = 0;
+                    while ((quoted_placeholder_pos = src_value.find("\"{}\"", quoted_placeholder_pos)) != std::string::npos) {
+                        src_value.replace(quoted_placeholder_pos, 4, "&quot;{}&quot;");
+                        quoted_placeholder_pos += 13;
+                    }
+
+                    raw.replace(value_start, value_end - value_start, src_value);
+                    pos = value_start + src_value.size();
+                }
+            }
+        };
+
+        fix_placeholders(raw);
+
+        pugi::xml_document doc;
+        const auto result = doc.load_string(raw.c_str());
+        if (!result) {
+            LOG_ERROR("Error parsing lang file xml: {}", entry.path().string());
+            LOG_DEBUG("error: {} position: {}", result.description(), result.offset);
+            constexpr ptrdiff_t context_window = 20;
+            ptrdiff_t offset = static_cast<ptrdiff_t>(result.offset);
+            if (offset >= 0 && offset < static_cast<ptrdiff_t>(raw.size())) {
+                ptrdiff_t start = std::max<ptrdiff_t>(0, offset - context_window);
+                ptrdiff_t end = std::min<ptrdiff_t>(raw.size(), offset + context_window);
+
+                ptrdiff_t error_in_context = offset - start;
+
+                std::string error_context(reinterpret_cast<const char *>(raw.data() + start), end - start);
+                LOG_DEBUG("Error preview: [{}|{}]", error_context.substr(0, error_in_context), error_context.substr(error_in_context));
+            }
+            return;
+        }
+
+        const auto lang_file = entry.path().filename().string();
+        LOG_DEBUG("Processing PSN common lang file: '{}'", lang_file);
+
+        auto &psn_values = psn_values_by_lang[lang_file];
+
+        auto stringset_node = doc.child("stringset");
+        if (!stringset_node) {
+            LOG_ERROR("No 'stringset' node found in PSN common lang file '{}'", lang_file);
+            stringset_node = doc.first_child();
+            if (!stringset_node) {
+                LOG_ERROR("No root node found in PSN common lang file '{}'", lang_file);
+                continue;
+            }
+        }
+
+        lang.push_back(lang_file);
+
+        for (const auto &[hash, tag] : mapping) {
+            const auto string_node = stringset_node.find_child_by_attribute("string", "id", hash.c_str());
+            if (string_node) {
+                const auto src = string_node.attribute("src").as_string();
+                psn_values[tag] = src;
+                LOG_DEBUG("Loaded PSN value for tag '{}': '{}'", tag, src);
+            } else
+                LOG_ERROR("Tag '{}' with hash '{}' not found in PSN common lang file '{}'", tag, hash, lang_file);
+        }
+    }
+
+    for (const auto &language : lang) {
+        const auto dest_path = system_lang_path / language;
+        auto values_it = psn_values_by_lang.find(language);
+        if (values_it == psn_values_by_lang.end()) {
+            LOG_WARN("No PSN values found for system lang file '{}'", dest_path.string());
+            continue;
+        }
+
+        const auto &psn_values = values_it->second;
+
+        std::string raw;
+        {
+            fs::ifstream f(dest_path, std::ios::binary);
+            if (!f) {
+                LOG_ERROR("Failed to load system lang file: '{}'", dest_path.string());
+                continue;
+            }
+
+            raw.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        }
+
+        const size_t lang_start = raw.find("<lang>");
+        if (lang_start == std::string::npos) {
+            LOG_ERROR("No 'lang' node found in system lang file: '{}'", dest_path.string());
+            continue;
+        }
+
+        const size_t lang_content_start = lang_start + 6;
+        const size_t lang_close_pos = raw.find("</lang>", lang_content_start);
+        if (lang_close_pos == std::string::npos) {
+            LOG_ERROR("No closing 'lang' node found in system lang file: '{}'", dest_path.string());
+            continue;
+        }
+
+        const std::string newline = (raw.find("\r\n") != std::string::npos) ? "\r\n" : "\n";
+        const auto trim = [](const std::string &text) {
+            const size_t start = text.find_first_not_of(" \t\r\n");
+            if (start == std::string::npos)
+                return std::string{};
+
+            const size_t end = text.find_last_not_of(" \t\r\n");
+            return text.substr(start, end - start + 1);
+        };
+
+        const auto line_indent_at = [&](size_t pos) {
+            size_t line_start = raw.rfind('\n', pos);
+            line_start = (line_start == std::string::npos) ? 0 : (line_start + 1);
+
+            if ((line_start < raw.size()) && (raw[line_start] == '\r'))
+                ++line_start;
+
+            size_t line_end = line_start;
+            while (line_end < raw.size() && ((raw[line_end] == ' ') || (raw[line_end] == '\t')))
+                ++line_end;
+
+            return raw.substr(line_start, line_end - line_start);
+        };
+
+        std::string child_indent;
+        {
+            size_t scan = lang_content_start;
+            if (raw.compare(scan, 2, "\r\n") == 0)
+                scan += 2;
+            else if ((scan < raw.size()) && (raw[scan] == '\n'))
+                ++scan;
+
+            while (scan < lang_close_pos) {
+                size_t line_end = raw.find('\n', scan);
+                if ((line_end == std::string::npos) || (line_end > lang_close_pos))
+                    line_end = lang_close_pos;
+
+                std::string line = raw.substr(scan, line_end - scan);
+                const size_t first_non_ws = line.find_first_not_of(" \t\r");
+                if ((first_non_ws != std::string::npos) && (line[first_non_ws] == '<') && (line.compare(first_non_ws, 2, "</") != 0)) {
+                    child_indent = line.substr(0, first_non_ws);
+                    break;
+                }
+
+                if (line_end == lang_close_pos)
+                    break;
+
+                scan = line_end + 1;
+            }
+        }
+
+        if (child_indent.empty())
+            child_indent = line_indent_at(lang_close_pos) + "\t";
+
+        const auto compare_tag_names = [](const std::string &lhs, const std::string &rhs) {
+            const auto min_size = std::min(lhs.size(), rhs.size());
+            for (size_t i = 0; i < min_size; ++i) {
+                const auto lhs_char = static_cast<unsigned char>(lhs[i]);
+                const auto rhs_char = static_cast<unsigned char>(rhs[i]);
+                const auto lhs_lower = static_cast<char>(std::tolower(lhs_char));
+                const auto rhs_lower = static_cast<char>(std::tolower(rhs_char));
+                if (lhs_lower < rhs_lower)
+                    return -1;
+                if (lhs_lower > rhs_lower)
+                    return 1;
+            }
+
+            if (lhs.size() < rhs.size())
+                return -1;
+            if (lhs.size() > rhs.size())
+                return 1;
+
+            return 0;
+        };
+
+        bool modified = false;
+
+        const auto get_lang_close_pos = [&]() {
+            return raw.find("</lang>", lang_content_start);
+        };
+
+        const auto get_lang_close_line_start = [&]() {
+            const size_t close_pos = get_lang_close_pos();
+            if (close_pos == std::string::npos)
+                return std::string::npos;
+
+            const size_t line_start = raw.rfind('\n', close_pos);
+            return (line_start == std::string::npos) ? 0 : (line_start + 1);
+        };
+
+        const auto get_child_bounds = [&]() {
+            const size_t current_lang_close_pos = get_lang_close_pos();
+            const size_t current_child_start = raw.find(child_open_tag, lang_content_start);
+            if ((current_child_start == std::string::npos) || (current_child_start >= current_lang_close_pos))
+                return std::pair<std::size_t, std::size_t>{ std::string::npos, std::string::npos };
+
+            const size_t current_child_content_start = current_child_start + child_open_tag.size();
+            const size_t current_child_close_pos = raw.find(child_close_tag, current_child_content_start);
+            if ((current_child_close_pos == std::string::npos) || (current_child_close_pos >= current_lang_close_pos))
+                return std::pair<std::size_t, std::size_t>{ std::string::npos, std::string::npos };
+
+            return std::pair<std::size_t, std::size_t>{ current_child_content_start, current_child_close_pos };
+        };
+
+        const auto get_child_close_line_start = [&]() {
+            const auto [_, close_pos] = get_child_bounds();
+            if (close_pos == std::string::npos)
+                return std::string::npos;
+
+            const size_t line_start = raw.rfind('\n', close_pos);
+            return (line_start == std::string::npos) ? 0 : (line_start + 1);
+        };
+
+        const auto apply_child_entries = [&](const std::vector<std::pair<std::string, std::string>> &entries) {
+            std::string missing_block;
+
+            const auto [child_content_start, child_close_pos] = get_child_bounds();
+            if ((child_content_start == std::string::npos) || (child_close_pos == std::string::npos)) {
+                LOG_ERROR("No '{}' node found in system lang file: '{}'", child_name, dest_path.string());
+                return;
+            }
+
+            std::string entry_indent;
+            {
+                size_t scan = child_content_start;
+                if (raw.compare(scan, 2, "\r\n") == 0)
+                    scan += 2;
+                else if ((scan < raw.size()) && (raw[scan] == '\n'))
+                    ++scan;
+
+                while (scan < child_close_pos) {
+                    size_t line_end = raw.find('\n', scan);
+                    if ((line_end == std::string::npos) || (line_end > child_close_pos))
+                        line_end = child_close_pos;
+
+                    std::string line = raw.substr(scan, line_end - scan);
+                    const size_t first_non_ws = line.find_first_not_of(" \t\r");
+                    if ((first_non_ws != std::string::npos) && (line[first_non_ws] == '<') && (line.compare(first_non_ws, 2, "</") != 0)) {
+                        entry_indent = line.substr(0, first_non_ws);
+                        break;
+                    }
+
+                    if (line_end == child_close_pos)
+                        break;
+
+                    scan = line_end + 1;
+                }
+            }
+
+            if (entry_indent.empty())
+                entry_indent = child_indent + "\t";
+
+            for (const auto &[_, tag] : entries) {
+                const auto [current_child_content_start, current_child_close_pos] = get_child_bounds();
+                if (current_child_close_pos == std::string::npos) {
+                    LOG_ERROR("No closing '{}' node found in system lang file: '{}'", child_name, dest_path.string());
+                    return;
+                }
+
+                auto it = psn_values.find(tag);
+                if (it == psn_values.end()) {
+                    LOG_WARN("PSN value for tag '{}' not found in system lang file '{}'", tag, dest_path.string());
+                    continue;
+                }
+
+                const std::string &value = it->second;
+                LOG_DEBUG("Setting tag '{}' to value '{}' in system lang file '{}'", tag, value, dest_path.string());
+
+                const std::string open_tag = "<" + tag + ">";
+                const std::string close_tag = "</" + tag + ">";
+                const std::string self_closing_tag = "<" + tag + " />";
+                const std::string self_closing_tag_no_space = "<" + tag + "/>";
+
+                size_t node_pos = raw.find(open_tag, current_child_content_start);
+                if ((node_pos != std::string::npos) && (node_pos < current_child_close_pos)) {
+                    const size_t value_start = node_pos + open_tag.size();
+                    const size_t close_pos = raw.find(close_tag, value_start);
+                    if ((close_pos != std::string::npos) && (close_pos < current_child_close_pos)) {
+                        if (trim(raw.substr(value_start, close_pos - value_start)).empty()) {
+                            raw.replace(node_pos, (close_pos + close_tag.size()) - node_pos, open_tag + value + close_tag);
+                            modified = true;
+                        } else {
+                            LOG_DEBUG("Tag '{}' already has a value in system lang file '{}', skipping update", tag, dest_path.string());
+                        }
+
+                        continue;
+                    }
+                }
+
+                node_pos = raw.find(self_closing_tag, current_child_content_start);
+                size_t self_closing_len = self_closing_tag.size();
+                if ((node_pos == std::string::npos) || (node_pos >= current_child_close_pos)) {
+                    node_pos = raw.find(self_closing_tag_no_space, current_child_content_start);
+                    self_closing_len = self_closing_tag_no_space.size();
+                }
+
+                if ((node_pos != std::string::npos) && (node_pos < current_child_close_pos)) {
+                    raw.replace(node_pos, self_closing_len, open_tag + value + close_tag);
+                    modified = true;
+                    continue;
+                }
+
+                missing_block += entry_indent + open_tag + value + close_tag + newline;
+                modified = true;
+            }
+
+            if (missing_block.empty())
+                return;
+
+            const size_t current_child_close_line_start = get_child_close_line_start();
+            if (current_child_close_line_start == std::string::npos) {
+                LOG_ERROR("No closing '{}' node found in system lang file: '{}'", child_name, dest_path.string());
+                return;
+            }
+
+            raw.insert(current_child_close_line_start, missing_block);
+        };
+
+        const auto child_bounds = get_child_bounds();
+        if (child_bounds.first != std::string::npos) {
+            apply_child_entries(mapping);
+        } else {
+            std::vector<std::pair<std::size_t, std::string>> top_level_children;
+
+            size_t scan = lang_content_start;
+            if (raw.compare(scan, 2, "\r\n") == 0)
+                scan += 2;
+            else if ((scan < raw.size()) && (raw[scan] == '\n'))
+                ++scan;
+
+            while (scan < lang_close_pos) {
+                size_t line_end = raw.find('\n', scan);
+                if ((line_end == std::string::npos) || (line_end > lang_close_pos))
+                    line_end = lang_close_pos;
+
+                std::string line = raw.substr(scan, line_end - scan);
+                const size_t first_non_ws = line.find_first_not_of(" \t\r");
+                if ((first_non_ws != std::string::npos) && (line[first_non_ws] == '<') && (line.compare(first_non_ws, 2, "</") != 0)) {
+                    const std::string line_indent = line.substr(0, first_non_ws);
+                    if (line_indent == child_indent) {
+                        size_t name_end = first_non_ws + 1;
+                        while ((name_end < line.size()) && !std::isspace(static_cast<unsigned char>(line[name_end])) && (line[name_end] != '>') && (line[name_end] != '/'))
+                            ++name_end;
+
+                        top_level_children.emplace_back(scan, line.substr(first_non_ws + 1, name_end - (first_non_ws + 1)));
+                    }
+                }
+
+                if (line_end == lang_close_pos)
+                    break;
+
+                scan = line_end + 1;
+            }
+
+            std::string child_block;
+            const std::string entry_indent = child_indent + "\t";
+            for (const auto &[_, tag] : mapping) {
+                auto it = psn_values.find(tag);
+                if (it == psn_values.end()) {
+                    LOG_WARN("PSN value for tag '{}' not found in system lang file '{}'", tag, dest_path.string());
+                    continue;
+                }
+
+                child_block += entry_indent + "<" + tag + ">" + it->second + "</" + tag + ">" + newline;
+            }
+
+            if (!child_block.empty()) {
+                child_block = child_indent + child_open_tag + newline + child_block + child_indent + child_close_tag + newline;
+
+                size_t insert_pos = get_lang_close_line_start();
+                std::string insert_before_name;
+                for (const auto &[candidate_pos, candidate_name] : top_level_children) {
+                    if (compare_tag_names(candidate_name, child_name) <= 0)
+                        continue;
+
+                    if (insert_before_name.empty() || (compare_tag_names(candidate_name, insert_before_name) < 0)) {
+                        insert_pos = candidate_pos;
+                        insert_before_name = candidate_name;
+                    }
+                }
+
+                if (!top_level_children.empty() && (insert_pos == get_lang_close_line_start()))
+                    child_block = newline + child_block;
+
+                if (insert_pos != get_lang_close_line_start())
+                    child_block += newline;
+
+                raw.insert(insert_pos, child_block);
+                modified = true;
+            }
+        }
+
+        if (modified) {
+            fs::ofstream out(dest_path, std::ios::binary | std::ios::trunc);
+            out.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+            LOG_DEBUG("Saved modified system lang file: '{}'", dest_path.string());
+        }
+    }
+}
 
 static const std::vector<std::string> list_user_lang_static = {
     "id", "ms", "ua"
@@ -225,6 +717,9 @@ void init_lang(LangState &lang, EmuEnvState &emuenv) {
                 // Compile Shaders
                 set_lang_string(lang.compile_shaders, lang_child.child("compile_shaders"));
 
+                // Contacts Pa
+                set_lang_string(lang.contacts_pa, lang_child.child("contacts_pa"));
+
                 // Content Manager
                 const auto content_manager = lang_child.child("content_manager");
                 if (!content_manager.empty()) {
@@ -267,6 +762,12 @@ void init_lang(LangState &lang, EmuEnvState &emuenv) {
                         set_lang_string(lang_save_data.save, save_data.child("save"));
                     }
                 }
+
+                // Friend
+                set_lang_string(lang.friends, lang_child.child("friend"));
+
+                // Friend Profile
+                set_lang_string(lang.friend_profile, lang_child.child("friend_profile"));
 
                 // Game Data
                 set_lang_string(lang.game_data, lang_child.child("game_data"));
@@ -318,6 +819,9 @@ void init_lang(LangState &lang, EmuEnvState &emuenv) {
 
                 // Overlay
                 set_lang_string(lang.overlay, lang_child.child("overlay"));
+
+                // Patch Check
+                set_lang_string(lang.patch_check, lang_child.child("patch_check"));
 
                 // Performance Overlay
                 set_lang_string(lang.performance_overlay, lang_child.child("performance_overlay"));

@@ -101,13 +101,14 @@ struct IconAsyncLoader {
 };
 
 struct AppsSelector {
-    std::vector<App> sys_apps;
-    std::vector<App> user_apps;
+    std::mutex apps_mutex;
+    std::vector<App> emu_apps;
+    std::map<std::string, std::vector<App>> vita_apps;
     uint32_t apps_cache_lang;
     AppInfo app_info;
     std::optional<IconAsyncLoader> icon_async_loader;
-    std::map<std::string, ImGui_Texture> sys_apps_icon;
-    std::map<std::string, ImGui_Texture> user_apps_icon;
+    std::map<std::string, ImGui_Texture> emu_apps_icon;
+    std::map<std::string, ImGui_Texture> vita_apps_icon;
     bool is_app_list_sorted{ false };
     std::map<SortType, SortState> app_list_sorted;
 };
@@ -116,15 +117,21 @@ struct VitaAreaState {
     bool app_close = false;
     bool app_information = false;
     bool content_manager = false;
+    bool friends = false;
+    bool friend_profile = false;
+    bool friend_activity = false;
     bool home_screen = false;
+    bool indicator = false;
     bool information_bar = false;
-    bool live_area_screen = false;
     bool manual = false;
+    bool messages = false;
     bool online_storage = false;
     bool settings = false;
     bool start_screen = false;
     bool trophy_collection = false;
+    bool update_history_info = false;
     bool user_management = false;
+    bool pkg_install = false;
     bool connecting_please_wait = false;
     bool please_wait = false;
 };
@@ -203,7 +210,7 @@ struct User {
     std::string avatar = "default";
     gui::SortType sort_apps_type = gui::TITLE;
     gui::SortState sort_apps_state = gui::ASCENDANT;
-    bool system_music = false;
+    bool system_music = true;
     std::string theme_id = "default";
     bool use_theme_bg = true;
     std::string start_type = "default";
@@ -223,13 +230,50 @@ struct InfoBarColor {
     ImU32 notice_font = 0xFFFFFFFF;
 };
 
+struct Notification {
+    std::string app_id;
+    std::string title;
+    std::string message;
+
+    time_t start_time = 0;
+    bool active = false;
+};
+
 enum NoticeIcon {
     NO,
     NEW
 };
 
+enum PageIndicator {
+    BASE,
+    CUR,
+};
+
+struct UpdateInfo {
+    std::string titleid;
+    std::string version;
+    uint64_t size;
+    std::string url;
+    std::string content_id;
+    std::string title;
+};
+
+enum class UpdateState {
+    NONE,
+    DOWNLOADING,
+    WAITING_INSTALL,
+    INSTALLING,
+    SUCCESS,
+    FAILED
+};
+
+struct UpdateInstall {
+    std::string content_id;
+    fs::path pkg_path;
+    UpdateState state = UpdateState::NONE;
+};
+
 enum ThemePreviewType {
-    PACKAGE,
     HOME,
     LOCK,
 };
@@ -305,8 +349,25 @@ struct GuiState {
     std::map<std::string, ImGui_Texture> users_avatar;
     std::map<std::string, std::map<AvatarSize, AvatarInfo>> users_avatar_infos;
 
-    ImGui_Texture v3kn_avatar;
+    std::map<std::string, ImGui_Texture> friends_panel;
     ImGui_Texture v3kn_panel;
+    ImGui_Texture friend_profile_panel;
+    std::string friend_profile_panel_online_id;
+    std::optional<ImU32> friend_profile_panel_bg_color;
+
+    std::map<std::string, ImGui_Texture> friends_avatar;
+    ImGui_Texture v3kn_avatar;
+    ImGui_Texture friend_profile_avatar;
+    std::string friend_profile_avatar_online_id;
+    std::mutex friends_avatar_mutex;
+    std::unordered_map<std::string, gui::IconData> pending_friends_avatar;
+    std::unordered_map<std::string, gui::IconData> pending_friends_panel;
+    std::optional<gui::IconData> pending_v3kn_avatar;
+    std::optional<gui::IconData> pending_v3kn_panel;
+    std::optional<gui::IconData> pending_friend_profile_avatar;
+    std::string pending_friend_profile_avatar_online_id;
+    std::optional<gui::IconData> pending_friend_profile_panel;
+    std::string pending_friend_profile_panel_online_id;
 
     std::map<std::string, ImGui_Texture> vita_icons;
 
@@ -339,13 +400,26 @@ struct GuiState {
     std::vector<std::string> live_area_current_open_apps_list;
     int32_t live_area_app_current_open = -1;
 
+    std::map<std::string, UpdateInfo> new_update_infos;
+    std::map<std::string, bool> app_has_update;
+    std::map<std::string, UpdateInstall> updates_install;
+
+    std::mutex notifications_mutex;
+    std::vector<Notification> notifications;
+
     std::map<std::string, std::vector<TimeApp>> time_apps;
 
+    std::pair<std::string, std::string> current_path_bgm;
+    float bg_transition_alpha = 1.0f;
     std::uint64_t current_theme_bg = 0;
-    std::map<std::string, std::map<ThemePreviewType, ImGui_Texture>> themes_preview;
+    std::map<std::string, ImGui_Texture> themes_list;
+    std::vector<std::string> themes_package_async;
+
+    std::map<ThemePreviewType, ImGui_Texture> theme_preview;
     std::vector<ImGui_Texture> theme_backgrounds;
     std::vector<ImVec4> theme_backgrounds_font_color;
     std::map<NoticeIcon, ImGui_Texture> theme_information_bar_notice;
+    std::map<PageIndicator, ImGui_Texture> theme_page_indicator;
 
     std::map<time_t, ImGui_Texture> notice_info_icon;
 

@@ -170,7 +170,7 @@ EXPORT(int, sceSysmoduleIsLoaded, SceSysmoduleModuleId module_id) {
     TRACY_FUNC(sceSysmoduleIsLoaded, module_id);
     if (module_id > SYSMODULE_COUNT)
         return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
-
+    // LOG_INFO("Checking if module ID: {} is loaded", to_debug_str(emuenv.mem, module_id));
     if (is_module_loaded(emuenv.kernel, module_id))
         return SCE_SYSMODULE_LOADED;
     else
@@ -198,8 +198,11 @@ EXPORT(int, sceSysmoduleLoadModule, SceSysmoduleModuleId module_id) {
         return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
 
     LOG_INFO("Loading module ID: {}", to_debug_str(emuenv.mem, module_id));
-    if (is_module_loaded(emuenv.kernel, module_id))
-        return SCE_SYSMODULE_LOADED;
+    {
+        std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
+        if (emuenv.kernel.loaded_sysmodules.contains(module_id))
+            return SCE_SYSMODULE_LOADED;
+    }
     if (is_module_enabled(emuenv, module_id)) {
         if (load_sys_module(emuenv, module_id))
             return SCE_SYSMODULE_LOADED;
@@ -249,10 +252,16 @@ EXPORT(int, sceSysmoduleUnloadModule, SceSysmoduleModuleId module_id) {
 
 EXPORT(int, sceSysmoduleUnloadModuleInternal, SceSysmoduleInternalModuleId module_id) {
     TRACY_FUNC(sceSysmoduleUnloadModuleInternal, module_id);
-    return UNIMPLEMENTED();
+    if (static_cast<int>(module_id) >= 0)
+        return CALL_EXPORT(sceSysmoduleUnloadModule, static_cast<SceSysmoduleModuleId>(module_id));
+
+    return unload_sys_module_internal_with_arg(emuenv, module_id, 0, Ptr<void>(), nullptr);
 }
 
-EXPORT(int, sceSysmoduleUnloadModuleInternalWithArg, SceSysmoduleInternalModuleId module_id, SceSize args, void *argp, const SceSysmoduleOpt *option) {
+EXPORT(int, sceSysmoduleUnloadModuleInternalWithArg, SceSysmoduleInternalModuleId module_id, SceSize args, Ptr<void> argp, const SceSysmoduleOpt *option) {
     TRACY_FUNC(sceSysmoduleUnloadModuleInternalWithArg, module_id, args, argp, option);
-    return UNIMPLEMENTED();
+    if (static_cast<int>(module_id) >= 0)
+        return CALL_EXPORT(sceSysmoduleUnloadModule, static_cast<SceSysmoduleModuleId>(module_id));
+
+    return unload_sys_module_internal_with_arg(emuenv, module_id, args, argp, option ? option->result.get(emuenv.mem) : nullptr);
 }

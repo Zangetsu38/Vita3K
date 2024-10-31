@@ -119,38 +119,43 @@ bool Context::init_info_from_trp() {
     trophy_count = 0;
 
     // Get parental of all
-    for (auto trop : conf_file_doc.child("trophyconf")) {
-        if (trop.name() == std::string("group") && trop.attribute("id").as_uint())
+    const auto parent = conf_file_doc.child("trophyconf");
+
+    // Get group count
+    for (auto group : parent.children("group")) {
+        if (!group.attribute("id").empty())
             group_count++;
+    }
 
-        if (trop.name() == std::string("trophy")) {
-            // Get ID
-            const std::uint32_t id = trop.attribute("id").as_uint();
-            const std::uint32_t gid = trop.attribute("gid").as_uint();
-            const std::string hidden = trop.attribute("hidden").as_string();
-            const std::string type = trop.attribute("ttype").as_string();
+    // Get trophy count, availability and type
+    for (auto trop : parent.children("trophy")) {
+        // Get ID
+        const std::uint32_t id = trop.attribute("id").as_uint();
+        const std::uint32_t gid = trop.attribute("gid").as_uint();
+        const std::string hidden = trop.attribute("hidden").as_string();
+        const std::string type = trop.attribute("ttype").as_string();
 
-            // Set the bit
-            if (hidden == "yes")
-                SET_TROPHY_BIT(trophy_availability, id);
+        // Set the bit
+        if (hidden == "yes")
+            SET_TROPHY_BIT(trophy_availability, id);
 
-            if (type == "P") {
-                trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_PLATINUM;
-                platinum_trophy_id = id;
-            }
-
-            if (type == "G")
-                trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_GOLD;
-
-            if (type == "S")
-                trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_SILVER;
-
-            if (type == "B")
-                trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_BRONZE;
-
-            trophy_count++;
-            trophy_count_by_group[gid]++;
+        // Set the type
+        if (type == "P") {
+            trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_PLATINUM;
+            platinum_trophy_id = id;
         }
+
+        if (type == "G")
+            trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_GOLD;
+
+        if (type == "S")
+            trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_SILVER;
+
+        if (type == "B")
+            trophy_kinds[id] = SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_BRONZE;
+
+        trophy_count++;
+        trophy_count_by_group[gid]++;
     }
 
     save_trophy_progress_file();

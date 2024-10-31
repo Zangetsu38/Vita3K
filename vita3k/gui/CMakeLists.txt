@@ -13,18 +13,22 @@ set(GUI_SOURCES
 	src/content_manager.cpp
 	src/eventflags_dialog.cpp
 	src/firmware_install_dialog.cpp
+	src/friend.cpp
+	src/friend_profile.cpp
 	src/gui.cpp
 	src/home_screen.cpp
 	src/ime.cpp
 	src/imgui_impl_sdl_gl3.cpp
 	src/imgui_impl_sdl_vulkan.cpp
 	src/imgui_impl_sdl.cpp
+	src/indicator.cpp
 	src/information_bar.cpp
 	src/initial_setup.cpp
 	src/license_install_dialog.cpp
 	src/live_area.cpp
 	src/main_menubar.cpp
 	src/manual.cpp
+	src/messages.cpp
 	src/mutexes_dialog.cpp
 	src/online_storage.cpp
 	src/perf_overlay.cpp

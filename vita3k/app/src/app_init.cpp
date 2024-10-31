@@ -417,7 +417,7 @@ bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
 bool late_init(EmuEnvState &state) {
     // note: mem is not initialized yet but that's not an issue
     // the renderer is not using it yet, just storing it for later uses
-    state.renderer->late_init(state.cfg, state.app_path, state.mem);
+    state.renderer->late_init(state.cfg, state.io.title_id, state.mem);
 
     const bool need_page_table = state.renderer->mapping_method == MappingMethod::PageTable || state.renderer->mapping_method == MappingMethod::NativeBuffer;
     if (!init(state.mem, need_page_table)) {

@@ -112,6 +112,8 @@ struct KernelState {
     CondvarPtrs lwcondvars;
     MutexPtrs mutexes;
     MutexPtrs lwmutexes; // also Mutexes for now
+    std::map<SceUID, SceUID> opened_mutexes;
+    std::map<SceUID, uint32_t> opened_mutex_ref_counts;
     RWLockPtrs rwlocks;
     EventFlagPtrs eventflags;
     MsgPipePtrs msgpipes;

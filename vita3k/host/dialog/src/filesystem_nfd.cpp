@@ -35,6 +35,10 @@
 
 #include <nfd.hpp>
 
+bool is_system_file_dialog_active() {
+    return false;
+}
+
 /**
  * @brief Format the file extension list of a certain file filter to match the
  * format expected by the underlying file browser dialog implementation
@@ -192,6 +196,10 @@ Result pick_folder(fs::path &resulting_path, const fs::path &default_path) {
     default:
         return Result::ERROR;
     }
+}
+
+bool is_system_dialog_active() {
+    return is_system_file_dialog_active();
 }
 
 std::string get_error() {

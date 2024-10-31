@@ -68,21 +68,23 @@ void draw_perf_overlay(GuiState &gui, EmuEnvState &emuenv) {
     ImGui::SetNextWindowPos(WINDOW_POS);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
     ImGui::Begin("##performance", nullptr, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, PERF_OVERLAY_BG_COLOR);
-    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 5.f * SCALE.x);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0.6f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.1f, 0.45f, 1.0f, 0.9f)); // Vita blue
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.f * SCALE.x);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 2.f * SCALE.x);
     ImGui::BeginChild("#perf_stats", WINDOW_SIZE, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
 
     ImGui::SetWindowFontScale(0.7f * RES_SCALE.y);
 
     ImGui::Text("%s", FPS_TEXT.c_str());
-    if (emuenv.cfg.performance_overlay_detail >= PerformanceOverlayDetail::MEDIUM) {
+    if (emuenv.cfg.performance_overlay_detail >= MEDIUM) {
         ImGui::Separator();
         ImGui::Text("%s", MIN_MAX_FPS_TEXT.c_str());
     }
     ImGui::EndChild();
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor();
-    if (emuenv.cfg.performance_overlay_detail == PerformanceOverlayDetail::MAXIMUM) {
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(2);
+    if (emuenv.cfg.performance_overlay_detail == MAXIMUM) {
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() - ImGui::GetStyle().ItemSpacing.y);
         ImGui::PlotLines("##fps_graphic", emuenv.fps_values, IM_ARRAYSIZE(emuenv.fps_values), emuenv.current_fps_offset, nullptr, 0.f, static_cast<float>(emuenv.max_fps), WINDOW_SIZE);
     }

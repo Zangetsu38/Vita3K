@@ -16,6 +16,8 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <v3kn/account.h>
+#include <v3kn/friend.h>
+#include <v3kn/messages.h>
 #include <v3kn/state.h>
 
 #include <config/state.h>
@@ -259,8 +261,23 @@ void save_v3kn_user_info(EmuEnvState &emuenv) {
 }
 
 void init_v3kn_user_info(GuiState &gui, EmuEnvState &emuenv) {
+    auto &friends_state = emuenv.v3kn.friends_state;
+    stop_friend_polling(friends_state);
+
+    auto &messages_state = emuenv.v3kn.messages_state;
+    stop_messages_polling(messages_state);
+
+    // waits handled in stop_friends_polling and stop_messages_polling
+
+    cleanup_friend_state(friends_state);
+    cleanup_messages_state(messages_state);
+
     gui.v3kn_avatar = {};
+    gui.friends_avatar.clear();
     gui.v3kn_panel = {};
+    gui.friends_panel.clear();
+    friends_state.self_panel_bg_color.reset();
+    friends_state.friends_panel_bg_color.clear();
 
     auto &account_state = emuenv.v3kn.account_state;
     auto &user_info = account_state.user_info;
@@ -346,6 +363,11 @@ void init_v3kn_user_info(GuiState &gui, EmuEnvState &emuenv) {
 
     set_v3kn_logged_in(true);
 
+    load_activity_cache(emuenv);
+    flush_activity_cache(emuenv);
+    start_friend_polling(gui, emuenv);
+    start_friend_presence(gui, emuenv);
+    start_messages_polling(gui, emuenv);
     start_trophy_auto_sync(gui, emuenv);
     set_v3kn_login_init_completed(true);
     LOG_INFO("V3KN user info: successfully logged in as {}", user_info.online_id);

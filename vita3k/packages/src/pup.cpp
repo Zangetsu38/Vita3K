@@ -113,62 +113,125 @@ static void extract_pup_files(const fs::path &pup, const fs::path &output) {
         return;
     }
 
-    char header[SCEUF_HEADER_SIZE];
-    fread(header, SCEUF_HEADER_SIZE, 1, infile);
+    try {
+        fseek(infile, 0, SEEK_END);
+        const auto pup_size_raw = ftell(infile);
+        if (pup_size_raw < SCEUF_HEADER_SIZE) {
+            LOG_ERROR("PUP file is too small: {}", fs_utils::path_to_utf8(pup));
+            fclose(infile);
+            return;
+        }
+        const uint64_t pup_size = static_cast<uint64_t>(pup_size_raw);
+        fseek(infile, 0, SEEK_SET);
 
-    if (strncmp(header, "SCEUF", 5) != 0) {
-        LOG_ERROR("Invalid PUP");
-        fclose(infile);
-        return;
-    }
-
-    uint32_t cnt = 0;
-    uint32_t pup_version = 0;
-    uint32_t firmware_version = 0;
-    uint32_t build_number = 0;
-    memcpy(&cnt, &header[0x18], 4);
-    memcpy(&pup_version, &header[8], 4);
-    memcpy(&firmware_version, &header[0x10], 4);
-    memcpy(&build_number, &header[0x14], 4);
-
-    LOG_INFO("PUP Version: 0x{:0}", pup_version);
-    LOG_INFO("Firmware Version: 0x{:X}", firmware_version);
-    LOG_INFO("Build Number: {:0}", build_number);
-    LOG_INFO("Number Of Files: {}", cnt);
-
-    for (uint32_t x = 0; x < cnt; x++) {
-        fseek(infile, SCEUF_HEADER_SIZE + x * SCEUF_FILEREC_SIZE, SEEK_SET);
-        char rec[SCEUF_FILEREC_SIZE];
-        fread(rec, SCEUF_FILEREC_SIZE, 1, infile);
-
-        uint64_t filetype = 0;
-        uint64_t offset = 0;
-        uint64_t length = 0;
-        uint64_t flags = 0;
-
-        memcpy(&filetype, &rec[0], 8);
-        memcpy(&offset, &rec[8], 8);
-        memcpy(&length, &rec[16], 8);
-        memcpy(&flags, &rec[24], 8);
-
-        std::string filename = "";
-        if (PUP_TYPES.contains(filetype)) {
-            filename = PUP_TYPES.at(filetype);
-        } else {
-            fseek(infile, offset, SEEK_SET);
-            char hdr[HEADER_LENGTH];
-            fread(hdr, HEADER_LENGTH, 1, infile);
-            filename = make_filename((unsigned char *)hdr, filetype);
+        char header[SCEUF_HEADER_SIZE];
+        if (fread(header, SCEUF_HEADER_SIZE, 1, infile) != 1) {
+            LOG_ERROR("Failed to read PUP header: {}", fs_utils::path_to_utf8(pup));
+            fclose(infile);
+            return;
         }
 
-        fs::ofstream outfile(output / filename, std::ios::binary);
-        fseek(infile, offset, SEEK_SET);
-        std::vector<char> buffer(length);
-        fread(buffer.data(), length, 1, infile);
-        outfile.write(&buffer[0], length);
+        if (strncmp(header, "SCEUF", 5) != 0) {
+            LOG_ERROR("Invalid PUP");
+            fclose(infile);
+            return;
+        }
 
-        outfile.close();
+        uint32_t cnt = 0;
+        uint32_t pup_version = 0;
+        uint32_t firmware_version = 0;
+        uint32_t build_number = 0;
+        memcpy(&cnt, &header[0x18], 4);
+        memcpy(&pup_version, &header[8], 4);
+        memcpy(&firmware_version, &header[0x10], 4);
+        memcpy(&build_number, &header[0x14], 4);
+
+        LOG_INFO("PUP Version: 0x{:0}", pup_version);
+        LOG_INFO("Firmware Version: 0x{:X}", firmware_version);
+        LOG_INFO("Build Number: {:0}", build_number);
+        LOG_INFO("Number Of Files: {}", cnt);
+
+        const uint64_t records_end = SCEUF_HEADER_SIZE + (static_cast<uint64_t>(cnt) * SCEUF_FILEREC_SIZE);
+        if (records_end > pup_size) {
+            LOG_ERROR("Invalid PUP record table: cnt={}, records_end={}, file size={}", cnt, records_end, pup_size);
+            fclose(infile);
+            return;
+        }
+
+        for (uint32_t x = 0; x < cnt; x++) {
+            fseek(infile, SCEUF_HEADER_SIZE + x * SCEUF_FILEREC_SIZE, SEEK_SET);
+            char rec[SCEUF_FILEREC_SIZE];
+            if (fread(rec, SCEUF_FILEREC_SIZE, 1, infile) != 1) {
+                LOG_ERROR("Failed to read PUP file record {}", x);
+                break;
+            }
+
+            uint64_t filetype = 0;
+            uint64_t offset = 0;
+            uint64_t length = 0;
+            uint64_t flags = 0;
+
+            memcpy(&filetype, &rec[0], 8);
+            memcpy(&offset, &rec[8], 8);
+            memcpy(&length, &rec[16], 8);
+            memcpy(&flags, &rec[24], 8);
+
+            if ((offset > pup_size) || (length > (pup_size - offset))) {
+                LOG_ERROR("Invalid PUP entry {}: offset={}, length={}, file size={}", x, offset, length, pup_size);
+                continue;
+            }
+
+            std::string filename = "";
+            if (PUP_TYPES.contains(filetype)) {
+                filename = PUP_TYPES.at(filetype);
+            } else {
+                if (HEADER_LENGTH <= length) {
+                    fseek(infile, static_cast<long>(offset), SEEK_SET);
+                    char hdr[HEADER_LENGTH];
+                    if (fread(hdr, HEADER_LENGTH, 1, infile) == 1)
+                        filename = make_filename(reinterpret_cast<unsigned char *>(hdr), filetype);
+                }
+
+                if (filename.empty())
+                    filename = fmt::format("unknown-0x{:X}.pkg", filetype);
+            }
+
+            fs::ofstream outfile(output / filename, std::ios::binary);
+            if (!outfile.is_open()) {
+                LOG_ERROR("Failed to create extracted PUP file: {}", fs_utils::path_to_utf8(output / filename));
+                continue;
+            }
+
+            fseek(infile, static_cast<long>(offset), SEEK_SET);
+            std::vector<char> buffer(1024 * 1024);
+            uint64_t remaining = length;
+            uint64_t copied = 0;
+            uint32_t chunk_index = 0;
+            while (remaining > 0) {
+                ++chunk_index;
+                const auto chunk_size = static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size()));
+                const auto read_count = fread(buffer.data(), 1, chunk_size, infile);
+                if (read_count != chunk_size) {
+                    LOG_ERROR("Failed to extract PUP entry {} ('{}'): expected {} bytes, got {}", x, filename, chunk_size, read_count);
+                    break;
+                }
+
+                outfile.write(buffer.data(), static_cast<std::streamsize>(read_count));
+                if (!outfile) {
+                    LOG_ERROR("Failed writing extracted PUP entry {} to {}", x, fs_utils::path_to_utf8(output / filename));
+                    break;
+                }
+
+                remaining -= read_count;
+            }
+            outfile.close();
+        }
+    } catch (const fs::filesystem_error &e) {
+        LOG_ERROR("extract_pup_files filesystem exception: {}", e.what());
+    } catch (const std::exception &e) {
+        LOG_ERROR("extract_pup_files exception: {}", e.what());
     }
+
     fclose(infile);
 }
 
@@ -269,8 +332,6 @@ std::string install_pup(const fs::path &pref_path, const fs::path &pup_path, con
             progress_callback(progress);
     };
 
-    LOG_INFO("Extracting {} to {}", pup_path, pup_dec_root);
-
     fs::create_directory(pup_dec_root);
     const auto pup_dest = pup_dec_root / "PUP";
     fs::create_directory(pup_dest);
@@ -289,13 +350,17 @@ std::string install_pup(const fs::path &pref_path, const fs::path &pup_path, con
     decrypt_pup_packages(pup_dest, pup_dec, SCE_KEYS);
 
     update_progress(70);
-    if (fs::file_size(pup_dec / "os0.img") > 0)
+    const auto has_non_empty_file = [](const fs::path &path) {
+        return fs::exists(path) && (fs::file_size(path) > 0);
+    };
+
+    if (has_non_empty_file(pup_dec / "os0.img"))
         extract_fat(pup_dec, "os0.img", pref_path);
-    if (fs::file_size(pup_dec / "pd0.img") > 0)
+    if (has_non_empty_file(pup_dec / "pd0.img"))
         exfat::extract_exfat(pup_dec, "pd0.img", pref_path);
-    if (fs::file_size(pup_dec / "sa0.img") > 0)
+    if (has_non_empty_file(pup_dec / "sa0.img"))
         extract_fat(pup_dec, "sa0.img", pref_path);
-    if (fs::file_size(pup_dec / "vs0.img") > 0)
+    if (has_non_empty_file(pup_dec / "vs0.img"))
         extract_fat(pup_dec, "vs0.img", pref_path);
     update_progress(100);
 

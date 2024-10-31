@@ -122,6 +122,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>在"{}"獲得了白金獎盃！</has_earned_platinum_trophy>
+		<has_earned_trophy>在"{}"獲得了獎盃！</has_earned_trophy>
+		<like>喜歡</like>
+		<likes_this>{}說喜歡。</likes_this>
+		<and_like_this>{}和{}都說喜歡。</and_like_this>
+		<people_like_this>有{}人說喜歡。</people_like_this>
+		<first_time_playing>第一次遊玩"{}"。</first_time_playing>
 		<an_error_occurred>發生錯誤。
 錯誤編號：{}</an_error_occurred>
 		<cancel>取消</cancel>
@@ -253,6 +260,7 @@
 		<silver>Silver（銀）</silver>
 		<hours_ago>{}小時前</hours_ago>
 		<minutes_ago>{}分鐘前</minutes_ago>
+		<write_comment>撰寫留言</write_comment>
 	</common>
 
 	<compatibility name="相容性">
@@ -288,6 +296,16 @@
 		<pipelines_compiled>已編譯{}個管線</pipelines_compiled>
 		<shaders_compiled>已編譯{}個著色器</shaders_compiled>
 	</compile_shaders>
+
+	<contacts_pa>
+		<activities_of>{}的行動</activities_of>
+		<anyone>任何人</anyone>
+		<no_one>不公開</no_one>
+		<cannot_display>無法顯示更多網頁。</cannot_display>
+		<friends_of_friends>好友的好友為止</friends_of_friends>
+		<friends_only>好友為止</friends_only>
+		<share_range>公開範圍：</share_range>
+	</contacts_pa>
 
 	<content_manager name="內容管理">
 		<application name="應用程式">

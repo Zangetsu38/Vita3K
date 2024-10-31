@@ -111,6 +111,11 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
         };
     }
 
+    if (lookup_result->layout == vkutil::ImageLayout::Undefined) {
+        LOG_WARN_ONCE("Skipping descriptor update for texture with undefined Vulkan layout");
+        return;
+    }
+
     const vk::ImageLayout layout = vkutil::get_underlying_layout(lookup_result->layout);
     const vk::Sampler sampler = context.state.texture_cache.get_retrieved_sampler();
 
@@ -348,7 +353,7 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
 
     const vk::ComponentMapping swizzle = texture::translate_swizzle(format);
 
-    const bool is_cube = (gxm_texture.texture_type() == SCE_GXM_TEXTURE_CUBE || gxm_texture.texture_type() == SCE_GXM_TEXTURE_CUBE_ARBITRARY);
+    const bool requested_cube = (gxm_texture.texture_type() == SCE_GXM_TEXTURE_CUBE || gxm_texture.texture_type() == SCE_GXM_TEXTURE_CUBE_ARBITRARY);
 
     uint32_t width = gxm::get_width(gxm_texture);
     uint32_t height = gxm::get_height(gxm_texture);
@@ -361,6 +366,10 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
         vk_format = bcn_to_rgba8(vk_format);
     if (gxm_texture.gamma_mode)
         vk_format = linear_to_srgb(vk_format);
+
+    const bool is_cube = requested_cube && (width == height);
+    if (requested_cube && !is_cube)
+        LOG_WARN_ONCE("Falling back to 2D Vulkan texture for invalid cube dimensions {}x{}", width, height);
 
     current_texture->mip_count = mip_count;
     current_texture->is_cube = is_cube;
@@ -423,7 +432,7 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     image.view = state.device.createImageView(view_info);
 
     if (!gxm_texture.normalize_mode)
-        LOG_ERROR("Unhandled unnormalized texture, please report it to the developers");
+        LOG_WARN_ONCE("Using normalized Vulkan fallback for unnormalized texture coordinates.");
 
     prepare_staging_buffer(true);
 }
@@ -544,8 +553,11 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
     // Note: I don't know what to do with the MIPMAP version of SceGxmTextureFilter
     SceGxmTextureFilter mag_filter = static_cast<SceGxmTextureFilter>(texture.mag_filter);
     SceGxmTextureFilter min_filter = is_linear_strided ? mag_filter : static_cast<SceGxmTextureFilter>(texture.min_filter);
+    const vk::Format texture_format = current_texture ? current_texture->texture.format : vk::Format::eUndefined;
+    const vk::FormatProperties format_properties = (texture_format != vk::Format::eUndefined) ? state.physical_device.getFormatProperties(texture_format) : vk::FormatProperties{};
+    const bool supports_linear_filter = static_cast<bool>(format_properties.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
 
-    if (no_linear) {
+    if (no_linear || !supports_linear_filter) {
         min_filter = SCE_GXM_TEXTURE_FILTER_POINT;
         mag_filter = SCE_GXM_TEXTURE_FILTER_POINT;
     }
@@ -554,9 +566,9 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
     vk::SamplerCreateInfo sampler_info{
         .magFilter = texture::translate_filter(mag_filter),
         .minFilter = texture::translate_filter(min_filter),
-        .mipmapMode = texture.mip_filter ? vk::SamplerMipmapMode::eLinear : vk::SamplerMipmapMode::eNearest,
-        .addressModeU = texture::translate_address_mode(uaddr),
-        .addressModeV = texture::translate_address_mode(vaddr),
+        .mipmapMode = (texture.mip_filter && supports_linear_filter) ? vk::SamplerMipmapMode::eLinear : vk::SamplerMipmapMode::eNearest,
+        .addressModeU = texture::translate_address_mode(uaddr, state.support_sampler_mirror_clamp_to_edge),
+        .addressModeV = texture::translate_address_mode(vaddr, state.support_sampler_mirror_clamp_to_edge),
         .addressModeW = vk::SamplerAddressMode::eRepeat,
         .mipLodBias = (static_cast<float>(texture.lod_bias) - 31.f) / 8.f,
         .maxAnisotropy = static_cast<float>(anisotropic_filtering),
@@ -565,6 +577,10 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
         .maxLod = VK_LOD_CLAMP_NONE,
         .unnormalizedCoordinates = VK_FALSE,
     };
+
+    if (!texture.normalize_mode) {
+        LOG_WARN_ONCE("Approximating unnormalized texture coordinates with normalized Vulkan sampling.");
+    }
 
     // when using nearest filter, disable anisotropy as the pixels can contain data other than color
     sampler_info.anisotropyEnable = (anisotropic_filtering > 1) && (sampler_info.magFilter != vk::Filter::eNearest || sampler_info.minFilter != vk::Filter::eNearest);

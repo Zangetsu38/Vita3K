@@ -48,6 +48,13 @@
 	</app_context>
 	
 	<common>
+		<has_earned_platinum_trophy>har opnået et platinum trophy i "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>har opnået et trophy i "{}"!</has_earned_trophy>
+		<like>Synes om</like>
+		<likes_this>{} synes om dette.</likes_this>
+		<and_like_this>{} og {} synes om dette.</and_like_this>
+		<people_like_this>{} personer synes om dette.</people_like_this>
+		<first_time_playing>er ved at spille "{}" for første gang.</first_time_playing>
 		<an_error_occurred>Der er opstået en fejl.
 Fejlkode: {}</an_error_occurred>
 		<cancel>Afbryd</cancel>
@@ -177,8 +184,19 @@ Fejlkode: {}</an_error_occurred>
 		<silver>Silver</silver>
 		<hours_ago>{} timer siden</hours_ago>
 		<minutes_ago>{} minutter siden</minutes_ago>
+		<write_comment>Skriv kommentar</write_comment>
 	</common>
 	
+	<contacts_pa>
+		<activities_of>{}s aktiviteter</activities_of>
+		<anyone>Alle</anyone>
+		<no_one>Ingen</no_one>
+		<cannot_display>Kan ikke vise flere sider.</cannot_display>
+		<friends_of_friends>Venners venner</friends_of_friends>
+		<friends_only>Kun venner</friends_only>
+		<share_range>Dele-omfang:</share_range>
+	</contacts_pa>
+
 	<content_manager name="Indholdsadministrator">
 		<application name="Programmer">
 			<delete>De valgte programmer og alle relaterede data, herunder gemte data, vil blive slettet.</delete>

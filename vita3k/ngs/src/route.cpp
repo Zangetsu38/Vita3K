@@ -17,6 +17,7 @@
 
 #include <ngs/system.h>
 
+#include <util/log.h>
 #include <util/vector_utils.h>
 
 namespace ngs {
@@ -32,8 +33,15 @@ bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue, 
         if (!patch || patch->output_sub_index == -1)
             continue;
 
-        if (!vector_utils::contains(voice_queue, patch->dest))
+        /*        if (!patch->dest || !patch->dest->rack || patch->dest->rack->is_released) {
+                    continue;
+                }
+        */
+
+        if (!vector_utils::contains(voice_queue, patch->dest)) {
+            LOG_WARN_ONCE("Skipping NGS patch delivery because the destination voice is not scheduled");
             continue;
+        }
 
         const std::lock_guard<std::mutex> guard(*patch->dest->voice_mutex);
         patch->dest->inputs.receive(patch, data_to_deliver);

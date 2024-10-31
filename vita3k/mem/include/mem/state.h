@@ -41,6 +41,7 @@ typedef std::map<int, std::string> PageNameMap;
 struct ProtectBlockInfo {
     uint32_t size = 0;
     ProtectCallback callback;
+    const char *origin = nullptr;
 };
 
 struct ProtectSegmentInfo {

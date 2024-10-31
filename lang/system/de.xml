@@ -54,6 +54,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>hat in "{}" eine Platin-Trophäe erhalten!</has_earned_platinum_trophy>
+		<has_earned_trophy>hat in "{}" eine Trophäe erhalten!</has_earned_trophy>
+		<like>Gefällt mir</like>
+		<likes_this>{} gefällt dies.</likes_this>
+		<and_like_this>{} und {} gefällt dies.</and_like_this>
+		<people_like_this>{} Personen gefällt dies.</people_like_this>
+		<first_time_playing>spielt "{}" zum ersten Mal.</first_time_playing>
 		<an_error_occurred>Ein Fehle ist aufgetreten.
 Fehlercode: {}</an_error_occurred>
 		<cancel>Abbrechen</cancel>
@@ -183,7 +190,18 @@ Fehlercode: {}</an_error_occurred>
 		<silver>Silber</silver>
 		<hours_ago>Vor {} Stunden</hours_ago>
 		<minutes_ago>Vor {} Minuten</minutes_ago>
+		<write_comment>Kommentar schreiben</write_comment>
 	</common>
+
+	<contacts_pa>
+		<activities_of>Aktivitäten von {}</activities_of>
+		<anyone>Jedem</anyone>
+		<no_one>Niemandem</no_one>
+		<cannot_display>Es können keine weiteren Seiten angezeigt werden.</cannot_display>
+		<friends_of_friends>Freunden von Freunden</friends_of_friends>
+		<friends_only>Nur Freunden</friends_only>
+		<share_range>Freigeben für:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Inhaltsmanager">
 		<application name="Anwendungen">

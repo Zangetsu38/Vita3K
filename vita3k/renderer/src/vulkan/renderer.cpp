@@ -627,6 +627,7 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             { vk::KHRBufferDeviceAddressExtensionName, &support_buffer_device_address },
             // needed for uniform uvec2 arrays not to take twice the size
             { vk::KHRUniformBufferStandardLayoutExtensionName, &support_standard_layout },
+            { vk::KHRSamplerMirrorClampToEdgeExtensionName, &support_sampler_mirror_clamp_to_edge },
             // needed for FSR
             { vk::KHRShaderFloat16Int8ExtensionName, &support_fsr },
             // used for accurate programmable blending on desktop GPUs

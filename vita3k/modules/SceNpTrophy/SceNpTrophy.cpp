@@ -17,11 +17,16 @@
 
 #include <module/module.h>
 
+#include <io/state.h>
 #include <np/functions.h>
 #include <np/state.h>
 #include <np/trophy/context.h>
 #include <rtc/rtc.h>
 #include <util/log.h>
+
+#include <v3kn/activity.h>
+#include <v3kn/state.h>
+#include <v3kn/storage.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceNpTrophy);
@@ -538,6 +543,47 @@ static int do_trophy_callback(EmuEnvState &emuenv, np::trophy::Context *context,
         context->copy_file_data_from_trophy_file(trophy_icon_filename.c_str(), &callback_data.icon_buf[0], &buf_size);
 
         emuenv.np.trophy_state.trophy_unlock_callback(callback_data);
+    }
+
+    v3kn::add_pending_trophy_sync(emuenv, callback_data.np_com_id);
+    if (!emuenv.v3kn.account_state.user_info.online_id.empty()) {
+        std::string status_type = "trophy_acquisition";
+        const auto is_trophy_hidden = context->is_trophy_hidden(trophy_id);
+        if (is_trophy_hidden)
+            status_type += "_hidden";
+        else if (context->platinum_trophy_id == trophy_id)
+            status_type += "_platinum";
+
+        std::string grade;
+        switch (callback_data.trophy_kind) {
+        case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_PLATINUM:
+            grade = "platinum";
+            break;
+        case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_GOLD:
+            grade = "gold";
+            break;
+        case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_SILVER:
+            grade = "silver";
+            break;
+        case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_BRONZE:
+            grade = "bronze";
+        default:
+            break;
+        }
+
+        ActivityPostStatus status{
+            .type = status_type,
+            .title_id = emuenv.io.title_id,
+            .created_at = v3kn::get_current_activity_time_ms(emuenv),
+            .trophy_activity = {
+                .npcomm_id = callback_data.np_com_id,
+                .id = callback_data.trophy_id,
+                .grade = grade,
+                .name = callback_data.trophy_name,
+            },
+        };
+
+        v3kn::create_and_post_activity_status(emuenv, status);
     }
 
     return 0;

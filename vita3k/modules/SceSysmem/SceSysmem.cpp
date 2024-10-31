@@ -92,11 +92,32 @@ EXPORT(SceUID, sceKernelAllocMemBlock, const char *pName, SceKernelMemBlockType 
     assert(type != 0);
 
     if (!pName || !size) {
+        LOG_ERROR("sceKernelAllocMemBlock: invalid arguments pName={} size={}", fmt::ptr(pName), size);
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
     }
 
+    auto normalized_type = type;
+    const auto type_masked = static_cast<uint32_t>(type) & 0x00FFFFFF;
+    if (type_masked == (static_cast<uint32_t>(SCE_KERNEL_MEMBLOCK_TYPE_USER_RX) & 0x00FFFFFF)) {
+        normalized_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_RX;
+    } else if (type_masked == (static_cast<uint32_t>(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW) & 0x00FFFFFF)) {
+        normalized_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_RW;
+    } else if (type_masked == (static_cast<uint32_t>(SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE) & 0x00FFFFFF)) {
+        normalized_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE;
+    } else if (type_masked == (static_cast<uint32_t>(SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW) & 0x00FFFFFF)) {
+        normalized_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW;
+    } else if (type_masked == (static_cast<uint32_t>(SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW) & 0x00FFFFFF)) {
+        normalized_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW;
+    } else if (type_masked == (static_cast<uint32_t>(SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) & 0x00FFFFFF)) {
+        normalized_type = SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW;
+    }
+
+    if (normalized_type != type) {
+        LOG_WARN("sceKernelAllocMemBlock: normalizing memblock type {} to {} for '{}'", log_hex(type), to_debug_str(emuenv.mem, normalized_type), pName);
+    }
+
     int min_alignment;
-    switch (type) {
+    switch (normalized_type) {
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RX:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
@@ -110,6 +131,7 @@ EXPORT(SceUID, sceKernelAllocMemBlock, const char *pName, SceKernelMemBlockType 
         min_alignment = 0x100000;
         break;
     default:
+        LOG_ERROR("Invalid memblock type: {} ({})", static_cast<uint32_t>(type), log_hex(type));
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
     }
 
@@ -118,8 +140,10 @@ EXPORT(SceUID, sceKernelAllocMemBlock, const char *pName, SceKernelMemBlockType 
     SceSize alignment = min_alignment;
     if (optp && (optp->attr & SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT)) {
         // alignment must be a power of 2
-        if (optp->alignment & (optp->alignment - 1))
+        if (optp->alignment & (optp->alignment - 1)) {
+            LOG_ERROR("sceKernelAllocMemBlock: invalid alignment {} for type {} ('{}'), opt attr={} size={}", optp->alignment, log_hex(type), pName, log_hex(optp->attr), optp->size);
             return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
+        }
 
         alignment = std::max(alignment, optp->alignment);
     }
@@ -129,7 +153,7 @@ EXPORT(SceUID, sceKernelAllocMemBlock, const char *pName, SceKernelMemBlockType 
 
     // https://wiki.henkaku.xyz/vita/SceSysmem_Types#memtype_bit_value
     Address start_address;
-    switch (type) {
+    switch (normalized_type) {
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
         start_address = 0x70000000U;
@@ -155,14 +179,14 @@ EXPORT(SceUID, sceKernelAllocMemBlock, const char *pName, SceKernelMemBlockType 
     const SceUID uid = state->get_next_uid();
 
     const KernelMemBlockPtr sceKernelMemBlock = std::make_shared<KernelMemBlock>();
-    sceKernelMemBlock->type = type;
+    sceKernelMemBlock->type = normalized_type;
     sceKernelMemBlock->mappedBase = address;
     sceKernelMemBlock->mappedSize = size;
     sceKernelMemBlock->size = sizeof(SceKernelMemBlockInfo);
     std::strncpy(sceKernelMemBlock->name, pName, KERNELOBJECT_MAX_NAME_LENGTH);
     state->blocks.emplace(uid, sceKernelMemBlock);
 
-    switch (type) {
+    switch (normalized_type) {
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RX:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW:
     case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
@@ -309,15 +333,18 @@ EXPORT(int, sceKernelGetFreeMemorySize, SceKernelFreeMemorySizeInfo *info) {
     if (sfo::get_data_by_key(attribute2, emuenv.sfo_handle, "ATTRIBUTE2")) {
         // Convert the string to an unsigned 32-bit integer
         const uint32_t attr_val = string_utils::stoi_def(attribute2, 0, "memory expansion mode");
-
+        // LOG_DEBUG("val: {}.", attr_val);
         switch (attr_val & 0x0C) {
         case 0x4: // Check for the +29MiB mode
+            LOG_DEBUG("Is +29MiB mode.");
             max_user += MiB(29);
             break;
         case 0x8: // Check for the +77MiB mode
+            LOG_DEBUG("Is +77MiB mode.");
             max_user += MiB(77);
             break;
         case 0xC: // Check for the +109MiB mode
+            LOG_DEBUG("Is +109MiB mode.");
             max_user += MiB(109);
             break;
         default: break;
@@ -335,7 +362,7 @@ EXPORT(int, sceKernelGetFreeMemorySize, SceKernelFreeMemorySizeInfo *info) {
     info->size_cdram = std::max<int>(max_cdram - state->allocated_cdram, 0);
     info->size_user = std::max<int>(max_user - state->allocated_user, 0);
     info->size_phycont = std::max<int>(max_phycont - state->allocated_phycont, 0);
-
+    // LOG_DEBUG("Free memory size: user={} cdram={} phycont={}", info->size_user, info->size_cdram, info->size_phycont);
     return 0;
 }
 

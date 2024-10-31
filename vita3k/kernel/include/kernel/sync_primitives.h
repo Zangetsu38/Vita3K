@@ -25,8 +25,9 @@ struct KernelState;
 
 struct WaitingThreadData {
     ThreadStatePtr thread;
-    int32_t priority;
-    bool *was_canceled;
+    int32_t priority = 0;
+    bool *was_canceled = nullptr;
+    bool *was_deleted = nullptr;
 
     // additional fields for each primitive
     union {
@@ -224,6 +225,7 @@ SceInt32 timer_stop(KernelState &kernel, const char *export_name, SceUID thread_
 // Mutex
 SceUID mutex_create(SceUID *uid_out, KernelState &kernel, MemState &mem, const char *export_name, const char *name, SceUID thread_id, SceUInt attr, int init_count, Ptr<SceKernelLwMutexWork> workarea, SyncWeight weight);
 SceUID mutex_find(KernelState &kernel, const char *export_name, const char *pName);
+int mutex_close(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid);
 int mutex_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int lock_count, unsigned int *timeout, SyncWeight weight);
 int mutex_try_lock(KernelState &kernel, MemState &mem, const char *export_name, SceUID thread_id, SceUID mutexid, int lock_count, SyncWeight weight);
 int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, int unlock_count, SyncWeight weight);

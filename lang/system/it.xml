@@ -54,6 +54,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>ha guadagnato un trofeo di platino in "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>ha guadagnato un trofeo in "{}"!</has_earned_trophy>
+		<like>Mi piace</like>
+		<likes_this>Piace a {}.</likes_this>
+		<and_like_this>Piace a {} e {}.</and_like_this>
+		<people_like_this>Piace a {} persone.</people_like_this>
+		<first_time_playing>sta giocando a "{}" per la prima volta.</first_time_playing>
 		<an_error_occurred>Si è verificato un errore.
 Codice di errore: {}</an_error_occurred>
 		<cancel>Annulla</cancel>
@@ -182,6 +189,7 @@ Codice di errore: {}</an_error_occurred>
 		<silver>Argento</silver>
 		<hours_ago>{} ore fa</hours_ago>
 		<minutes_ago>{} minuti fa</minutes_ago>
+		<write_comment>Scrivi commento</write_comment>
 	</common>
 
 	<compatibility name="Compatibilità">
@@ -196,6 +204,16 @@ Codice di errore: {}</an_error_occurred>
 			<state id = "6">Giocabile</state>
 		</states>
 	</compatibility>
+
+	<contacts_pa>
+		<activities_of>Attività di {}</activities_of>
+		<anyone>Chiunque</anyone>
+		<no_one>Nessuno</no_one>
+		<cannot_display>Impossibile visualizzare altre pagine.</cannot_display>
+		<friends_of_friends>Amici di amici</friends_of_friends>
+		<friends_only>Solo amici</friends_only>
+		<share_range>Ambito condivisione:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Gestione contenuto">
 		<application name="Applicazioni">

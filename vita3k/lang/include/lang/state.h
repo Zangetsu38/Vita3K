@@ -1,3 +1,4 @@
+
 // Vita3K emulator project
 // Copyright (C) 2026 Vita3K team
 //
@@ -31,9 +32,18 @@ enum TypeLang {
 
 struct DialogLangState {
     std::map<std::string, std::string> common = {
+        { "has_earned_platinum_trophy", "has earned a platinum trophy in \"{}\" !" },
+        { "has_earned_trophy", "has earned a trophy in \"{}\" !" },
+        { "hidden_trophy", "Hidden Trophy" },
+        { "bronze", "Bronze" },
+        { "gold", "Gold" },
+        { "platinum", "Platinum" },
+        { "silver", "Silver" },
+        { "first_time_playing", "is playing \"{}\" for the first time." },
         { "an_error_occurred", "An error occurred.\nError code: {}" },
         { "cancel", "Cancel" },
         { "connecting_please_wait", "Connecting...\nPlease wait." },
+        { "download", "Download" },
         { "close", "Close" },
         { "could_not_load", "Could not load the file." },
         { "could_not_save", "Could not save the file." },
@@ -47,12 +57,16 @@ struct DialogLangState {
         { "search", "Search" },
         { "select_all", "Select All" },
         { "select", "Select" },
+        { "send", "Send" },
+        { "sending", "Sending..." },
         { "submit", "Submit" },
-        { "yes", "Yes" },
         { "could_not_connect_server", "Could not connect to the server." },
+        { "download_failed", "Could not download." },
         { "must_sign_in_vita3k_network", "You must sign in to Vita3K Network to use this feature." },
         { "could_not_connect_internet", "Could not connect to the Internet." },
-        { "vita3k_network_connection_lost", "The connection to Vita3K Network has been lost." }
+        { "vita3k_network_connection_lost", "The connection to Vita3K Network has been lost." },
+        { "yes", "Yes" },
+        { "is_now_friends_with", "is now Friends with {}" }
     };
     std::map<std::string, std::string> message = { { "load_app_failed", "Failed to load \"{}\".\nCheck vita3k.log to see console output for details.\n1. Have you installed the firmware?\n2. Re-dump your own PS Vita app/game and install it on Vita3K.\n3. If you want to install or boot Vitamin, it is not supported." } };
     std::map<std::string, std::string> trophy = { { "preparing_start_app", "Preparing to start the application..." } };
@@ -280,6 +294,15 @@ struct LangState {
             { "no_saved_data", "There is no saved data." }
         };
     };
+    std::map<std::string, std::string> contacts_pa = {
+        { "activities_of", "{}'s Activities" },
+        { "anyone", "Anyone" },
+        { "no_one", "No One" },
+        { "cannot_display", "Cannot display any more pages." },
+        { "friends_of_friends", "Friends of Friends" },
+        { "friends_only", "Friends Only" },
+        { "share_range", "Share Range : " },
+    };
     ContentManager content_manager;
     std::map<std::string, std::string> controllers = {
         { "title", "Controllers" },
@@ -343,9 +366,53 @@ struct LangState {
         { "error_duplicate_key", "The key is used for other bindings or it is reserved." },
         { "reset_controls_binding", "Reset Controls Binding" }
     };
+    std::map<std::string, std::string> friends = {
+        { "accept", "Accept" },
+        { "players_blocked", "Players Blocked" },
+        { "friend_request_already_canceled", "This Friend request has already been canceled." },
+        { "search_for_player", "Search for a Vita3K Network player and view the player's profile, or send a Friend request." },
+        { "friend_requests", "Friend Requests" },
+        { "friends", "Friends" },
+        { "could_not_find_online_id", "Could not find the online ID." },
+        { "there_are_no_players", "There are no players." },
+        { "no_players_found", "No players found." },
+        { "online_id", "Online ID" },
+        { "enter_from_3_to_16_characters", "Enter from 3 to 16 characters." },
+        { "online_status", "Online Status" },
+        { "received", "Received" },
+        { "search", "Search" },
+        { "sent", "Sent" },
+        { "waiting_for_friend_response", "Waiting for Friend response." }
+    };
+    std::map<std::string, std::string> friend_profile = {
+        { "about_me", "About Me" },
+        { "accept", "Accept" },
+        { "activity", "Activity" },
+        { "warn_block_player", "If you block this player, you will no longer be able to receive messages from this player.\nDo you want to continue?" },
+        { "warn_block_friend", "If you block this player, the player will be removed from Friends. You will no longer be able to receive messages from this player.\nDo you want to continue?" },
+        { "block", "Block" },
+        { "blocked", "Blocked." },
+        { "cancel_friend_request", "Cancel Friend Request" },
+        { "friend_request_canceled", "The Friend request will be canceled." },
+        { "delete_request", "Delete Request" },
+        { "edit_profile", "Edit Profile" },
+        { "friend_request_already_canceled", "This Friend request has already been canceled." },
+        { "friends", "Friends" },
+        { "level", "Level" },
+        { "not_a_friend_yet", "Not a Friend yet." },
+        { "remove_from_friends", "Remove from Friends" },
+        { "player_removed_from_friends", "This player will be removed from Friends." },
+        { "send_friend_request", "Send Friend Request" },
+        { "trophies", "Trophies" },
+        { "unblock", "Unblock" },
+        { "unblock_player", "Unblock this player." },
+        { "waiting_friend_response", "Waiting for Friend response." },
+        { "friend_request_from_player", "You have a Friend request from this player." },
+        { "you_have_friend_requests", "You have Friend requests." }
+    };
     std::map<std::string, std::string> game_data = {
         { "app_close", "The following application will close." },
-        { "data_delete", "Data to be Deleted:" }
+        { "data_delete", "Data to be Deleted:" },
     };
     std::map<std::string, std::string> home_screen = {
         { "filter", "Filter" },
@@ -368,13 +435,31 @@ struct LangState {
     };
     std::map<std::string, std::string> indicator = {
         { "app_added_home", "The application has been added to the home screen." },
+        { "cancel_download", "Do you want to cancel this download ?" },
+        { "cancel_install", "Do you want to cancel this installation?\nIf you cancel, the files downloaded for this installation will also be deleted." },
         { "delete_all", "Delete All" },
         { "notif_deleted", "The notifications will be deleted." },
+        { "waiting_download", "Waiting to download..." },
+        { "downloading_complete", "Downloading complete." },
         { "install_failed", "Could not install." },
+        { "player_is_online", "{} is now online." },
+        { "waiting_install", "Waiting to install..." },
         { "install_complete", "Installation complete." },
         { "installing", "Installing..." },
+        { "minutes_left", "{} Minutes Left" },
         { "no_notif", "There are no notifications." },
-        { "trophy_earned", "You have earned a trophy!" }
+        { "commented_on_activity", "Someone commented on{}'s activity." },
+        { "commented_on_your_activity", "Someone commented on your activity." },
+        { "commented_and_likes_your_activity", "Someone commented on and likes your activity." },
+        { "likes_your_activity", "Someone likes your activity." },
+        { "pause_all", "Pause All" },
+        { "pause", "Pause" },
+        { "paused", "Paused" },
+        { "resume_all", "Resume All" },
+        { "resume", "Resume" },
+        { "seconds_left", "{} Seconds Left" },
+        { "trophy_earned", "You have earned a trophy!" },
+        { "friend_requests", "You have Friend requests." }
     };
     std::map<std::string, std::string> initial_setup = {
         { "back", "Back" },
@@ -510,6 +595,14 @@ struct LangState {
         { "avg", "Avg" },
         { "min", "Min" },
         { "max", "Max" }
+    };
+    std::map<std::string, std::string> patch_check = {
+        { "new_app_version_available", "A new version of the application is available." },
+        { "latest_version_installed", "The latest version of the application is already installed." },
+        { "downloading_app_update", "Downloading the application update file...\nYou can check the progress of the download in the notification list." },
+        { "download", "Download" },
+        { "not_enough_space", "Could not download.\nThere is not enough free space on the memory card.Create at least {} free space on the memory card, and then try to download again." },
+        { "version", "Version {}" }
     };
     struct Settings {
         std::map<std::string, std::string> main = { { "title", "Settings" } };
@@ -944,15 +1037,25 @@ struct LangState {
             "30", "31"
         };
         std::map<std::string, std::string> main = {
+            { "activities", "Activities" },
+            { "like", "Like" },
+            { "likes_this", "{} likes this." },
+            { "and_like_this", "{} and {} like this." },
+            { "people_like_this", "{} people like this." },
+            { "comments", "Comments {}" },
+            { "delete_activity", "This activity will be deleted." },
+            { "delete_comment", "This comment will be deleted." },
             { "hidden_trophy", "Hidden Trophy" },
             { "one_hour_ago", "1 Hour Ago" },
             { "one_minute_ago", "1 Minute Ago" },
+            { "unlike", "Unlike" },
             { "bronze", "Bronze" },
             { "gold", "Gold" },
             { "platinum", "Platinum" },
             { "silver", "Silver" },
             { "hours_ago", "{} Hours Ago" },
-            { "minutes_ago", "{} Minutes Ago" }
+            { "minutes_ago", "{} Minutes Ago" },
+            { "write_comment", "Write Comment" }
         };
     };
     Common common;

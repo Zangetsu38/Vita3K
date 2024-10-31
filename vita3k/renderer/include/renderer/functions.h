@@ -57,7 +57,7 @@ void reset_command_list(CommandList &command_list);
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list);
 bool is_cmd_ready(MemState &mem, CommandList &command_list);
 void process_batch(State &state, MemState &mem, Config &config, CommandList &command_list);
-void process_batches(State &state, const FeatureState &features, MemState &mem, Config &config);
+bool process_batches(State &state, const FeatureState &features, MemState &mem, Config &config, bool non_blocking = false);
 bool init(SDL_Window *window, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths);
 
 void set_depth_bias(State &state, Context *ctx, bool is_front, int factor, int units);

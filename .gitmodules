@@ -90,3 +90,6 @@
 [submodule "external/libadrenotools"]
 	path = external/libadrenotools
 	url = https://github.com/bylaws/libadrenotools
+[submodule "external/json"]
+	path = external/json
+	url = https://github.com/nlohmann/json.git

@@ -36,6 +36,7 @@
 #include <util/net_utils.h>
 
 #include <miniz.h>
+#include <nlohmann/json.hpp>
 #include <pugixml.hpp>
 
 #include <algorithm>
@@ -662,7 +663,7 @@ static bool get_savedata_info(GuiState &gui, EmuEnvState &emuenv, const std::str
             const auto file_size = fs::file_size(file.path());
             const auto last_updated = fs::last_write_time(file.path());
             SaveEntry entry{
-                .rel_path = fs::relative(file.path(), save_data_path).string(),
+                .rel_path = fs::relative(file.path(), save_data_path).generic_string(),
                 .last_updated = last_updated
             };
             save_data_info_local.files.push_back(entry);
@@ -735,7 +736,7 @@ static bool create_zip_from_directory(const fs::path &directory, const fs::path 
 
         if (!mz_zip_writer_add_file(
                 &zip,
-                rel_path.string().c_str(), // chemin dans le zip
+                rel_path.generic_string().c_str(), // chemin dans le zip
                 file_path.string().c_str(), // fichier source
                 nullptr,
                 0,
@@ -774,7 +775,7 @@ static bool extract_zip_to_directory(const fs::path &zip_path, const fs::path &o
             continue;
         }
 
-        fs::path out_path = output_dir / stat.m_filename;
+        const fs::path out_path = output_dir / fs::path(stat.m_filename);
 
         if (stat.m_is_directory) {
             fs::create_directories(out_path);
@@ -886,7 +887,7 @@ void download_savedata(GuiState &gui, EmuEnvState &emuenv, const std::string &ti
         savedata_info_local = savedata_info_cloud;
         uint64_t total_size_local = 0;
         for (auto &entry : savedata_info_cloud.files) {
-            const fs::path local_file_path = savedata_path / entry.rel_path;
+            const fs::path local_file_path = savedata_path / fs::path(entry.rel_path);
             total_size_local += fs::file_size(local_file_path);
             fs::last_write_time(local_file_path, entry.last_updated);
         }
@@ -997,6 +998,69 @@ void open_online_storage(GuiState &gui, EmuEnvState &emuenv, const std::string &
             gui.vita_area.home_screen = false;
         }
         gui.vita_area.connecting_please_wait = false;
+    }).detach();
+}
+
+void sync_game_stitle(EmuEnvState &emuenv) {
+    std::thread([&emuenv]() mutable {
+        if (!wait_for_v3kn_login(5000)) {
+            LOG_WARN("V3KN not logged in after waiting, skipping short title info sync");
+            return;
+        }
+
+        // Check if server already has the title info to avoid unnecessary SFO parsing and server request
+        const auto &user_info = emuenv.v3kn.account_state.user_info;
+        const auto url = get_v3kn_server_url(user_info.host, fmt::format("v3kn/check_stitle_info?titleid={}", emuenv.io.title_id));
+        net_utils::WebResponse response = net_utils::get_web_response_ex(url, user_info.token);
+        handle_v3kn_status(emuenv, response);
+        if (response.body.starts_with("ERR:")) {
+            LOG_WARN("V3KN get short title info: server error: {}", response.body);
+            return;
+        }
+
+        if (response.body.starts_with("OK:")) {
+            LOG_INFO("Short title info already exists on V3KN server, skipping SFO parsing");
+            return;
+        }
+
+        LOG_INFO("Short title info not found on V3KN server, parsing SFO and uploading title info");
+
+        // Get game title in different languages from SFO and send to server
+        nlohmann::json payload;
+        payload["titleid"] = emuenv.io.title_id;
+        nlohmann::json names;
+
+        const auto sanitize_short_title = [](std::string &title) {
+            std::replace(title.begin(), title.end(), '\n', ' ');
+            std::replace(title.begin(), title.end(), '\r', ' ');
+            boost::trim(title);
+        };
+
+        std::string default_title;
+        if (sfo::get_data_by_key(default_title, emuenv.sfo_handle, "STITLE")) {
+            sanitize_short_title(default_title);
+            names["default"] = default_title;
+        }
+
+        for (int i = 0; i < 20; i++) {
+            std::string key = fmt::format("STITLE_{:02}", i);
+            std::string value;
+
+            if (sfo::get_data_by_key(value, emuenv.sfo_handle, key)) {
+                sanitize_short_title(value);
+                std::string lang_code = fmt::format("{:02}", i);
+                names[lang_code] = value;
+            }
+        }
+
+        payload["names"] = std::move(names);
+
+        const auto stitle_info_url = get_v3kn_server_url(user_info.host, "v3kn/upload_stitle_info");
+        const auto upload_response = net_utils::get_web_response_ex(stitle_info_url, user_info.token, payload.dump());
+        handle_v3kn_status(emuenv, upload_response);
+        if (upload_response.body.starts_with("ERR:"))
+            LOG_WARN("Upload short title info: V3KN server error: {}", upload_response.body);
+        LOG_INFO("Short title info sync completed on V3KN server for titleid {}", emuenv.io.title_id);
     }).detach();
 }
 

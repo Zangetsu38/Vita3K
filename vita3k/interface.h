@@ -52,6 +52,7 @@ struct ContentInfo {
 };
 
 bool handle_events(EmuEnvState &emuenv, GuiState &gui);
+void start_event_watch_thread(EmuEnvState &emuenv, GuiState &gui);
 
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, GuiState *gui, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback = nullptr);
 uint32_t install_contents(EmuEnvState &emuenv, GuiState *gui, const fs::path &path);

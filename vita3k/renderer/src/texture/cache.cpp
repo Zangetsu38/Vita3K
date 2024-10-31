@@ -22,6 +22,7 @@
 
 #include <gxm/functions.h>
 #include <mem/ptr.h>
+#include <mem/state.h>
 #include <util/align.h>
 #include <util/bit_cast.h>
 #include <util/log.h>
@@ -43,6 +44,84 @@ static uint64_t hash_data(const void *data, size_t size) {
     return XXH3_64bits(data, size);
 }
 
+static bool should_log_invalid_texture_range_warning(const char *operation) {
+    static uint32_t upload_warning_count = 0;
+    static uint32_t hash_warning_count = 0;
+
+    uint32_t &warning_count = (strcmp(operation, "upload") == 0) ? upload_warning_count : hash_warning_count;
+    warning_count++;
+
+    if (warning_count <= 8)
+        return true;
+
+    if (warning_count == 9) {
+        LOG_WARN("Suppressing further repeated invalid texture {} range warnings.", operation);
+    }
+
+    return false;
+}
+
+static bool is_guest_page_backed(const MemState &mem, uint32_t page) {
+    if (mem.allocator.free_slot_count(page, page + 1) == 0)
+        return true;
+
+    return mem.use_page_table && mem.page_table[page] != mem.memory.get();
+}
+
+static uint32_t get_valid_guest_range_prefix_bytes(Address start, uint32_t size, const MemState &mem) {
+    uint32_t valid_size = 0;
+    while (valid_size < size) {
+        const Address current = start + valid_size;
+        const uint32_t page = current / mem.host_page_size;
+        if (!is_guest_page_backed(mem, page))
+            break;
+
+        const Address next_page = (page + 1) * mem.host_page_size;
+        valid_size += std::min<uint32_t>(size - valid_size, next_page - current);
+    }
+
+    return valid_size;
+}
+
+static void log_invalid_texture_range(const char *operation, Address start, Address end, const MemState &mem, uint32_t valid_prefix) {
+    if (end <= mem.host_page_size) {
+        return;
+    }
+
+    if (!should_log_invalid_texture_range_warning(operation))
+        return;
+
+    const uint32_t start_page = start / mem.host_page_size;
+    const uint32_t end_page = (end + mem.host_page_size - 1) / mem.host_page_size;
+
+    uint32_t first_invalid_page = start_page;
+    bool has_invalid_page = false;
+    bool first_invalid_page_is_externally_mapped = false;
+
+    for (uint32_t page = start_page; page < end_page; page++) {
+        if (mem.allocator.free_slot_count(page, page + 1) == 0)
+            continue;
+
+        has_invalid_page = true;
+        first_invalid_page = page;
+        first_invalid_page_is_externally_mapped = mem.use_page_table && mem.page_table[page] != mem.memory.get();
+        break;
+    }
+
+    const uint32_t total_size = end - start;
+    if (valid_prefix == 0) {
+        LOG_WARN("Texture {} skipped: guest range {:08X}-{:08X} is invalid or empty. startPage=0x{:X} endPage=0x{:X} firstInvalidPage=0x{:X} firstInvalidPageExternalMapping={} usePageTable={}",
+            operation, start, end, start_page, end_page, first_invalid_page, first_invalid_page_is_externally_mapped, mem.use_page_table);
+    } else {
+        LOG_WARN("Texture {} partial fallback: guest range {:08X}-{:08X}, valid data size=0x{:X}/0x{:X}. startPage=0x{:X} endPage=0x{:X} firstInvalidPage=0x{:X} firstInvalidPageExternalMapping={} usePageTable={}",
+            operation, start, end, valid_prefix, total_size, start_page, end_page, first_invalid_page, first_invalid_page_is_externally_mapped, mem.use_page_table);
+    }
+
+    if (!has_invalid_page) {
+        LOG_WARN("Texture {} range diagnostic found no individually free page in {:08X}-{:08X}; range validation failed at a higher level.", operation, start, end);
+    }
+}
+
 static uint64_t hash_palette_data(const SceGxmTexture &texture, size_t count, const MemState &mem) {
     const uint32_t *const palette_bytes = get_texture_palette(texture, mem);
     return hash_data(palette_bytes, count * sizeof(uint32_t));
@@ -55,7 +134,17 @@ uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, 
     uint64_t data_hash = 0;
 
     if (data.address()) {
-        data_hash = hash_data(data.get(mem), texture_size);
+        const uint32_t valid_prefix = get_valid_guest_range_prefix_bytes(data.address(), texture_size, mem);
+        if (valid_prefix >= texture_size) {
+            data_hash = hash_data(data.get(mem), texture_size);
+        } else {
+            log_invalid_texture_range("hash", data.address(), data.address() + texture_size, mem, valid_prefix);
+            if (valid_prefix == 0)
+                return 0;
+            std::vector<uint8_t> padded_data(texture_size, 0);
+            memcpy(padded_data.data(), data.get(mem), valid_prefix);
+            data_hash = hash_data(padded_data.data(), texture_size);
+        }
     }
 
     switch (base_format) {
@@ -169,6 +258,14 @@ uint64_t hash_texture_nostride(const SceGxmTexture &texture, const MemState &mem
 
     if (!data)
         return 0;
+
+    const uint32_t first_mip_size = gxm::texture_size_first_mip(texture);
+    const uint32_t valid_prefix = get_valid_guest_range_prefix_bytes(data.address(), first_mip_size, mem);
+    if (valid_prefix < first_mip_size) {
+        log_invalid_texture_range("hash", data.address(), data.address() + first_mip_size, mem, valid_prefix);
+        if (valid_prefix == 0)
+            return 0;
+    }
 
     uint32_t width = gxm::get_width(texture);
     uint32_t height = gxm::get_height(texture);
@@ -335,6 +432,7 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
     uint32_t height = gxm::get_height(gxm_texture);
 
     const Ptr<uint8_t> data(gxm_texture.data_addr << 2);
+    Address texture_data_addr = data.address();
     uint8_t *texture_data = data.get(mem);
 
     if (!texture_data) {
@@ -343,6 +441,7 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
 
     std::vector<uint8_t> texture_data_decompressed;
     std::vector<uint8_t> texture_pixels_lineared;
+    std::vector<uint8_t> texture_data_padded;
 
     const void *pixels = nullptr;
 
@@ -368,8 +467,13 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
     // > 0 means texture cube
     int upload_type = 0;
 
+    const bool requested_cube = (texture_type == SCE_GXM_TEXTURE_CUBE || texture_type == SCE_GXM_TEXTURE_CUBE_ARBITRARY);
+    const bool upload_as_cube = requested_cube && (width == height);
+    if (requested_cube && !upload_as_cube)
+        LOG_WARN_ONCE("Falling back to single-face upload for invalid cube texture dimensions {}x{}", width, height);
+
     face_total_count = 1;
-    if (texture_type == SCE_GXM_TEXTURE_CUBE || texture_type == SCE_GXM_TEXTURE_CUBE_ARBITRARY) {
+    if (upload_as_cube) {
         upload_type = 1;
         face_total_count = 6;
 
@@ -413,7 +517,20 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
     const uint32_t org_layout_height = layout_height;
 
     while (face_uploaded_count < face_total_count && org_width > 0 && org_height > 0) {
-        pixels = texture_data;
+        const uint32_t nb_pixels = align(layout_width, align_width) * align(layout_height, align_height);
+        const uint32_t mip_size = (nb_pixels >> block_shift) * block_size;
+        const uint32_t valid_prefix = get_valid_guest_range_prefix_bytes(texture_data_addr, mip_size, mem);
+        if (valid_prefix < mip_size) {
+            log_invalid_texture_range("upload", texture_data_addr, texture_data_addr + mip_size, mem, valid_prefix);
+            if (valid_prefix == 0)
+                return;
+            texture_data_padded.assign(mip_size, 0);
+            if (valid_prefix > 0)
+                memcpy(texture_data_padded.data(), texture_data, valid_prefix);
+            pixels = texture_data_padded.data();
+        } else {
+            pixels = texture_data;
+        }
 
         SceGxmTextureBaseFormat upload_format = base_format;
         uint32_t memory_height = height;
@@ -519,6 +636,18 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             }
             pixels = texture_data_decompressed.data();
             break;
+        case SCE_GXM_TEXTURE_BASE_FORMAT_S32:
+            if (is_vulkan) {
+                texture_data_decompressed.resize(pixels_per_stride * memory_height * 4);
+                const int32_t *src = static_cast<const int32_t *>(pixels);
+                float *dst = reinterpret_cast<float *>(texture_data_decompressed.data());
+                for (uint32_t i = 0; i < pixels_per_stride * memory_height; i++) {
+                    dst[i] = static_cast<float>(src[i]);
+                }
+                pixels = texture_data_decompressed.data();
+                upload_format = SCE_GXM_TEXTURE_BASE_FORMAT_F32;
+            }
+            break;
         case SCE_GXM_TEXTURE_BASE_FORMAT_F32M:
             // Convert F32M to F32
             texture_data_decompressed.resize(pixels_per_stride * memory_height * 4);
@@ -571,9 +700,8 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
         if (export_textures)
             export_texture_impl(upload_format, width, height, mip_index, pixels, upload_type, pixels_per_stride);
 
-        const uint32_t nb_pixels = align(layout_width, align_width) * align(layout_height, align_height);
-        const uint32_t mip_size = (nb_pixels >> block_shift) * block_size;
         texture_data += mip_size;
+        texture_data_addr += mip_size;
         total_source_so_far += mip_size;
 
         mip_index++;
@@ -609,6 +737,7 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
             total_source_so_far = align(total_source_so_far, face_align_bytes);
 
             texture_data += total_source_so_far - source_unaligned_size;
+            texture_data_addr += total_source_so_far - source_unaligned_size;
         }
     }
 }
@@ -753,6 +882,9 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             importing_texture = false;
             info->is_imported = false;
         }
+
+        if (!upload && backend == renderer::Backend::Vulkan)
+            upload_done();
     }
     if (upload) {
         if (export_textures && !importing_texture)
@@ -763,7 +895,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         else
             upload_texture(gxm_texture, mem);
 
-        if (!info->use_hash) {
+        if (!info->use_hash && range_protect_end > range_protect_begin && is_valid_addr_range(mem, range_protect_begin, range_protect_end)) {
             info->dirty = false;
             add_protect(mem, range_protect_begin, range_protect_end - range_protect_begin, MemPerm::ReadOnly, [info, texture_repr](Address, bool) {
                 if (memcmp(&info->texture, &texture_repr, sizeof(SceGxmTexture)) == 0) {
@@ -813,6 +945,7 @@ int TextureCache::cache_and_bind_sampler(const SceGxmTexture &gxm_texture, bool 
     // the depth part only matters if we can't apply linear filtering to it
     is_depth &= !support_depth_linear_filtering;
     compact_repr |= (static_cast<uint32_t>(is_depth) << 23);
+    compact_repr |= (static_cast<uint32_t>(!gxm_texture.normalize_mode) << 24);
 
     auto it = sampler_lookup.find(compact_repr);
     if (it != sampler_lookup.end()) {

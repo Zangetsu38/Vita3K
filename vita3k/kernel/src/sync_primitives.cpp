@@ -45,13 +45,24 @@ inline static MutexPtrs &get_mutexes(KernelState &kernel, SyncWeight weight) {
     return weight == SyncWeight::Light ? kernel.lwmutexes : kernel.mutexes;
 }
 
+inline static SceUID resolve_mutex_id(KernelState &kernel, SceUID mutexid, SyncWeight weight) {
+    if (weight == SyncWeight::Light)
+        return mutexid;
+
+    const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+    if (const auto opened_it = kernel.opened_mutexes.find(mutexid); opened_it != kernel.opened_mutexes.end())
+        return opened_it->second;
+
+    return mutexid;
+}
+
 inline static CondvarPtrs &get_condvars(KernelState &kernel, SyncWeight weight) {
     return weight == SyncWeight::Light ? kernel.lwcondvars : kernel.condvars;
 }
 
 inline static int find_mutex(MutexPtr &mutex_out, MutexPtrs **mutexes_out, KernelState &kernel, const char *export_name, SceUID mutexid, SyncWeight weight) {
     MutexPtrs &mutexes = get_mutexes(kernel, weight);
-    mutex_out = lock_and_find(mutexid, mutexes, kernel.mutex);
+    mutex_out = lock_and_find(resolve_mutex_id(kernel, mutexid, weight), mutexes, kernel.mutex);
     if (!mutex_out) {
         return unknown_mutex_id(export_name, weight);
     }
@@ -60,6 +71,30 @@ inline static int find_mutex(MutexPtr &mutex_out, MutexPtrs **mutexes_out, Kerne
         *mutexes_out = &mutexes;
 
     return SCE_KERNEL_OK;
+}
+
+inline static void wake_waiting_threads_on_delete(WaitingThreadQueuePtr &queue) {
+    for (auto it = queue->begin(); it != queue->end();) {
+        auto current = it++;
+        const auto waiting_thread_data = *current;
+        if (waiting_thread_data.was_deleted)
+            *waiting_thread_data.was_deleted = true;
+
+        const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread_data.thread->mutex);
+        waiting_thread_data.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
+        queue->erase(current);
+    }
+}
+
+inline static void remove_opened_mutex_handles(KernelState &kernel, SceUID mutexid) {
+    for (auto it = kernel.opened_mutexes.begin(); it != kernel.opened_mutexes.end();) {
+        if (it->second == mutexid)
+            it = kernel.opened_mutexes.erase(it);
+        else
+            ++it;
+    }
+
+    kernel.opened_mutex_ref_counts.erase(mutexid);
 }
 
 inline static int find_condvar(CondvarPtr &condvar_out, CondvarPtrs **condvars_out, KernelState &kernel, const char *export_name, SceUID condid, SyncWeight weight) {
@@ -605,8 +640,12 @@ SceUID mutex_find(KernelState &kernel, const char *export_name, const char *pNam
         return strncmp(mutex.second->name, pName, KERNELOBJECT_MAX_NAME_LENGTH) == 0;
     });
 
-    if (it != kernel.mutexes.end())
-        return it->first;
+    if (it != kernel.mutexes.end()) {
+        const auto opened_uid = kernel.get_next_uid();
+        kernel.opened_mutexes.emplace(opened_uid, it->first);
+        ++kernel.opened_mutex_ref_counts[it->first];
+        return opened_uid;
+    }
 
     return RET_ERROR(SCE_KERNEL_ERROR_UID_CANNOT_FIND_BY_NAME);
 }
@@ -658,11 +697,16 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         data.thread = thread;
         data.lock_count = lock_count;
         data.priority = thread->priority;
+        bool was_deleted = false;
+        data.was_deleted = &was_deleted;
 
         const auto data_it = mutex->waiting_threads->push(data);
         thread_lock.unlock();
 
         int res = handle_timeout(thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
+
+        if (was_deleted)
+            res = RET_ERROR(SCE_KERNEL_ERROR_WAIT_DELETE);
 
         if (weight == SyncWeight::Light) {
             mutex->workarea.get(mem)->lockCount = mutex->lock_count;
@@ -758,6 +802,36 @@ int mutex_unlock(KernelState &kernel, const char *export_name, SceUID thread_id,
     return mutex_unlock_impl(kernel, export_name, thread_id, unlock_count, mutex);
 }
 
+int mutex_close(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid) {
+    if (mutexid < 0)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
+
+    SceUID real_mutex_id = SCE_UID_INVALID_UID;
+    bool should_delete = false;
+
+    {
+        const std::lock_guard<std::mutex> kernel_lock(kernel.mutex);
+        const auto opened_it = kernel.opened_mutexes.find(mutexid);
+        if (opened_it == kernel.opened_mutexes.end())
+            return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_MUTEX_ID);
+
+        real_mutex_id = opened_it->second;
+        kernel.opened_mutexes.erase(opened_it);
+
+        if (const auto ref_it = kernel.opened_mutex_ref_counts.find(real_mutex_id); ref_it != kernel.opened_mutex_ref_counts.end()) {
+            if (--ref_it->second == 0) {
+                kernel.opened_mutex_ref_counts.erase(ref_it);
+                should_delete = true;
+            }
+        }
+    }
+
+    if (!should_delete)
+        return SCE_KERNEL_OK;
+
+    return mutex_delete(kernel, export_name, thread_id, real_mutex_id, SyncWeight::Heavy);
+}
+
 int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id, SceUID mutexid, SyncWeight weight) {
     assert(mutexid >= 0);
 
@@ -772,13 +846,16 @@ int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id,
             mutex->waiting_threads->size());
     }
 
-    if (mutex->waiting_threads->empty()) {
-        const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
-        mutexes->erase(mutexid);
-    } else {
-        // TODO:
-        LOG_WARN("Can't delete sync object, it has waiting threads.");
+    {
+        const std::lock_guard<std::mutex> mutex_guard(mutex->mutex);
+        if (!mutex->waiting_threads->empty())
+            wake_waiting_threads_on_delete(mutex->waiting_threads);
     }
+
+    const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
+    mutexes->erase(mutex->uid);
+    if (weight == SyncWeight::Heavy)
+        remove_opened_mutex_handles(kernel, mutex->uid);
 
     return SCE_KERNEL_OK;
 }

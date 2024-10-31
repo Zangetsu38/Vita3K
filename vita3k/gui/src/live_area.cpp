@@ -22,11 +22,14 @@
 #include <dialog/state.h>
 #include <gui/functions.h>
 
+#include <io/device.h>
+#include <io/functions.h>
 #include <io/state.h>
 
 #include <kernel/state.h>
 
 #include <packages/license.h>
+#include <packages/sce_types.h>
 
 #include <renderer/state.h>
 
@@ -34,13 +37,20 @@
 #include <io/vfs.h>
 
 #include <util/log.h>
+#include <util/net_utils.h>
 
+#include <v3kn/friend.h>
+#include <v3kn/state.h>
 #include <v3kn/storage.h>
+
+#include <boost/algorithm/string/trim.hpp>
 
 #include <pugixml.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <imgui_internal.h>
+#include <numbers>
 #include <stb_image.h>
 
 void GateAnimation::start(GateAnimationState anim_state) {
@@ -68,7 +78,7 @@ void GateAnimation::update() {
 namespace gui {
 
 bool get_sys_apps_state(GuiState &gui) {
-    return !gui.vita_area.content_manager && !gui.vita_area.online_storage && !gui.vita_area.settings && !gui.vita_area.trophy_collection && !gui.vita_area.manual;
+    return !gui.vita_area.content_manager && !gui.vita_area.friends && !gui.vita_area.friend_profile && !gui.vita_area.friend_activity && !gui.vita_area.messages && !gui.vita_area.online_storage && !gui.vita_area.settings && !gui.vita_area.trophy_collection && !gui.vita_area.manual;
 }
 
 struct FRAME {
@@ -179,13 +189,366 @@ static std::map<std::string, Items> items_styles = {
 };
 // clang-format on
 
+enum class HeadingLevel {
+    None = 0,
+    H1,
+    H2,
+    H3,
+    H4,
+    H5,
+    H6
+};
+
+struct UpdateLine {
+    ImVec4 font_color;
+    uint32_t font_size;
+    HeadingLevel heading_level;
+    bool in_list;
+    bool is_bullet;
+    std::string text;
+};
+
+static std::map<std::string, std::vector<UpdateLine>> update_history_infos;
+
+static const std::string bullet = "\u30FB"; // Unicode character for bullet (U+30FB)
+static bool is_new_version;
+bool get_update_history_infos(const std::string &update_story, const std::string &ver) {
+    update_history_infos.clear();
+
+    is_new_version = ver != "0";
+
+    pugi::xml_document doc;
+    if (!doc.load_string(update_story.c_str())) {
+        LOG_ERROR("Failed to parse update history XML: \n{}", update_story);
+        return false;
+    }
+
+    const auto split_version = [](const std::string &version) {
+        uint32_t major, minor;
+        size_t pos = version.find('.');
+        if (pos != std::string::npos) {
+            major = std::stoi(version.substr(0, pos));
+            minor = std::stoi(version.substr(pos + 1));
+        }
+        return std::make_pair(major, minor);
+    };
+
+    const auto current_ver = split_version(ver);
+
+    static const std::map<std::string, std::string> entities = {
+        { R"(&lt;)", "<" },
+        { R"(&gt;)", ">" },
+        { R"(&quot;)", "\"" },
+        { R"(&apos;)", "'" },
+        { R"(&copy;)", "\xC2\xA9" },
+        { R"(&reg;)", "\xC2\xAE" },
+        { R"(&trade;)", "\xE2\x84\xA2" },
+        { R"(&hellip;)", "\xE2\x80\xA6" },
+        { R"(&mdash;)", "\xE2\x80\x94" },
+        { R"(&ndash;)", "\xE2\x80\x93" },
+        { R"(&nbsp;)", "\xC2\xA0" },
+        { R"(&amp;)", "&" },
+    };
+
+    auto html_decode_regex = [&](std::string text) {
+        for (const auto &[key, value] : entities) {
+            text = std::regex_replace(text, std::regex(key), value);
+        }
+        return text;
+    };
+
+    for (const auto &info : doc.child("changeinfo")) {
+        std::string app_ver = info.attribute("app_ver").as_string();
+        // Split the version string to handle both major and minor versions
+        if (app_ver.empty()) {
+            LOG_ERROR("App version is empty in update history XML.");
+            continue;
+        }
+
+        // Remove leading zeros from the version string
+        if (app_ver[0] == '0')
+            app_ver.erase(app_ver.begin());
+
+        if (is_new_version) {
+            auto version = split_version(app_ver);
+            // Check if the version is greater than or equal to the current version
+            if (version.first < current_ver.first || ((version.first == current_ver.first) && (version.second <= current_ver.second))) {
+                // continue; // Skip versions that are less or equal than the current version
+            }
+        }
+
+        // Extract the text content from the XML node
+        std::string text = info.text().as_string();
+
+        // Normalize line endings to '\n'
+        text = std::regex_replace(text, std::regex(R"(\r\n?)"), "\n");
+
+        // Remove all to new line
+        text = std::regex_replace(text, std::regex(R"(\n\s*)"), " ");
+
+        // Replace specific HTML tags before removing all remaining tags
+        text = std::regex_replace(text, std::regex(R"(<li>)"), bullet); // Replace <li> with bullet
+
+        // Replace <br>, </li>, <p>, and </p> with newlines
+        text = std::regex_replace(text, std::regex(R"(<br\s*/?>|</li>|</?p>)"), "\n");
+
+        // Replace <hN> with a start token
+        std::regex h_start_regex(R"(<h([1-6])>)");
+        text = std::regex_replace(text, h_start_regex, "\n__H_START_$1__");
+
+        // Replace </hN> with an end token
+        std::regex h_end_regex(R"(</h[1-6]>)");
+        text = std::regex_replace(text, h_end_regex, "\n__H_END__");
+
+        // Replace <ul> and </ul> with unordered list tokens
+        const std::string ulstart_token = "__UL_START__";
+        const std::string ulend_token = "__UL_END__";
+        text = std::regex_replace(text, std::regex(R"(<ul>)"), "\n" + ulstart_token);
+        text = std::regex_replace(text, std::regex(R"(</ul>)"), ulend_token);
+
+        // Replace <font color="#RRGGBB" size="N"> with color and size tokens
+        std::regex font_regex(R"(<font\s*(?:color=["']#([0-9a-fA-F]{6})["'])?\s*(?:size=["']([1-7])["'])?\s*>)");
+        std::smatch match;
+        while (std::regex_search(text, match, font_regex)) {
+            std::string replacement;
+
+            if (match[1].matched)
+                replacement += "__COLOR_" + match[1].str() + "__";
+            if (match[2].matched)
+                replacement += "__SIZE_" + match[2].str() + "__";
+
+            text = std::regex_replace(text, font_regex, replacement, std::regex_constants::format_first_only);
+        }
+
+        // Remove all remaining HTML tags
+        text = std::regex_replace(text, std::regex(R"(<[^>]+>)"), "");
+
+        // Remove non-breaking spaces (C2 A0)
+        text = std::regex_replace(text, std::regex(R"(\xC2\xA0)"), "");
+
+        // Replace Right Single Quotation Mark (U+2019) with a regular apostrophe
+        text = std::regex_replace(text, std::regex(R"(\xE2\x80\x99)"), "'");
+
+        text = html_decode_regex(text);
+
+        std::istringstream stream(text);
+        std::string line;
+        std::vector<UpdateLine> update_lines;
+
+        auto hl = HeadingLevel::None;
+        bool is_list = false;
+
+        while (std::getline(stream, line)) {
+            bool is_bullet = false;
+
+            bool is_start_list = false;
+            bool is_end_list = false;
+            ImVec4 font_color = GUI_COLOR_TEXT;
+            uint32_t font_size = 3;
+
+            std::smatch match;
+            // Check for heading start tokens
+            if (std::regex_search(line, match, std::regex(R"(__H_START_(\d)__)", std::regex_constants::icase))) {
+                int level = std::stoi(match[1].str());
+                if (level >= 1 && level <= 6) {
+                    hl = static_cast<HeadingLevel>(level);
+                    line = std::regex_replace(line, std::regex(R"(__H_START_\d__)"), "");
+                }
+            } else if (line.find("__H_END__") != std::string::npos) {
+                hl = HeadingLevel::None;
+                line = std::regex_replace(line, std::regex(R"(__H_END__)"), "");
+            }
+
+            if (std::regex_search(line, match, std::regex(R"(__COLOR_([0-9a-fA-F]{6})__)", std::regex_constants::icase))) {
+                std::string color_code = match[1].str();
+                uint32_t color = std::strtoul(color_code.c_str(), nullptr, 16);
+                font_color = ImVec4((float((color >> 16) & 0xFF)) / 255.f, (float((color >> 8) & 0xFF)) / 255.f, (float((color >> 0) & 0xFF)) / 255.f, 1.f);
+                line = std::regex_replace(line, std::regex(R"(__COLOR_[0-9a-fA-F]{6}__)"), "");
+            }
+
+            if (std::regex_search(line, match, std::regex(R"(__SIZE_([1-7])__)", std::regex_constants::icase))) {
+                font_size = std::stoi(match[1].str());
+                line = std::regex_replace(line, std::regex(R"(__SIZE_[1-7]__)"), "");
+            }
+
+            if (line.find(ulstart_token) != std::string::npos) {
+                is_start_list = true;
+                line = std::regex_replace(line, std::regex(ulstart_token), "");
+            }
+
+            if (line.find(ulend_token) != std::string::npos) {
+                is_end_list = true;
+                line = std::regex_replace(line, std::regex(ulend_token), "");
+            }
+
+            is_list = is_start_list || (is_list && !is_end_list);
+
+            if (line.find(bullet) != std::string::npos) {
+                is_bullet = true;
+                line = std::regex_replace(line, std::regex(bullet), ""); // Remove bullet characters at the start
+            } else
+                is_bullet = false;
+
+            boost::trim(line); // Trim leading whitespace
+
+            update_lines.push_back({ font_color, font_size, hl, is_list, is_bullet, line });
+            // LOG_DEBUG("Update line: {}, is_list: {}", line, is_list);
+        }
+
+        update_history_infos[app_ver] = update_lines;
+    }
+
+    return !update_history_infos.empty();
+}
+
+static std::map<HeadingLevel, float> heading_sizes = {
+    { HeadingLevel::H1, 30.0f },
+    { HeadingLevel::H2, 24.0f },
+    { HeadingLevel::H3, 20.0f },
+    { HeadingLevel::H4, 16.0f },
+    { HeadingLevel::H5, 14.0f },
+    { HeadingLevel::H6, 12.0f }
+};
+
+static std::map<int, float> font_size_px = {
+    { 1, 13.3f },
+    { 2, 16.7f },
+    { 3, 20.0f },
+    { 4, 23.3f },
+    { 5, 30.0f },
+    { 6, 40.0f },
+    { 7, 60.0f }
+};
+
+void draw_update_history_infos(GuiState &gui, EmuEnvState &emuenv) {
+    const ImVec2 VIEWPORT_SIZE(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
+    const auto RES_SCALE = ImVec2(emuenv.gui_scale.x, emuenv.gui_scale.y);
+
+    const auto SCALE = ImVec2(RES_SCALE.x * emuenv.manual_dpi_scale, RES_SCALE.y * emuenv.manual_dpi_scale);
+    const auto WINDOW_SIZE = ImVec2(756.0f * SCALE.x, 436.0f * SCALE.y);
+    const auto BUTTON_SIZE = ImVec2(320.f * SCALE.x, 46.f * SCALE.y);
+
+    ImGui::SetNextWindowPos(ImVec2(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(VIEWPORT_SIZE, ImGuiCond_Always);
+    ImGui::Begin("##update_history_infos", nullptr, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetNextWindowBgAlpha(0.999f * SCALE.y);
+    ImGui::SetNextWindowPos(ImVec2(emuenv.logical_viewport_pos.x + (VIEWPORT_SIZE.x / 2.f) - (WINDOW_SIZE.x / 2.f), emuenv.logical_viewport_pos.y + (VIEWPORT_SIZE.y / 2.f) - (WINDOW_SIZE.y / 2.f)), ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.f * SCALE.x);
+    ImGui::BeginChild("##update_history_infos_child", WINDOW_SIZE, ImGuiChildFlags_Borders, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.f * SCALE.x);
+
+    auto &lang = gui.lang.app_context;
+    auto &patch_check = gui.lang.patch_check;
+    auto &common = emuenv.common_dialog.lang.common;
+    const auto id = is_new_version ? fs::path(gui.live_area_current_open_apps_list[gui.live_area_app_current_open]).stem().string() : "";
+
+    const auto padding_list = ImVec2(24.f * SCALE.x, 56.f * SCALE.y);
+
+    // Update History
+    const auto UPDATE_LIST_SIZE = ImVec2(WINDOW_SIZE.x - (padding_list.x * 2.f), WINDOW_SIZE.y / 1.51f);
+    ImGui::SetNextWindowPos(ImVec2(ImGui::GetWindowPos().x + padding_list.x, ImGui::GetWindowPos().y + padding_list.y));
+    ImGui::BeginChild("##info_update_list", UPDATE_LIST_SIZE, ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(1.48f * RES_SCALE.y);
+    if (is_new_version) {
+        ImGui::TextWrapped("%s", patch_check["new_app_version_available"].c_str());
+        const auto update_infos = gui.new_update_infos[id];
+        auto size_str = get_unit_size(update_infos.size);
+        size_str = std::regex_replace(size_str, std::regex("\\s+"), "");
+        ImGui::NewLine();
+        ImGui::TextColored(GUI_COLOR_TEXT, "%s(%s)", fmt::format(fmt::runtime(patch_check["version"]), update_infos.version).c_str(), size_str.c_str());
+        ImGui::NewLine();
+    }
+
+    const auto wrap_width = UPDATE_LIST_SIZE.x - ImGui::GetStyle().ScrollbarSize;
+
+    // Reverse iterator to show the latest update first
+    for (auto it = update_history_infos.rbegin(); it != update_history_infos.rend(); ++it) {
+        ImGui::SetWindowFontScale(1.48f * RES_SCALE.y);
+        const auto version_str = is_new_version ? fmt::format("{}", it->first) : fmt::format(fmt::runtime(lang.main["history_version"]), it->first);
+        ImGui::TextColored(GUI_COLOR_TEXT, "%s", version_str.c_str());
+
+        for (const auto &line : it->second) {
+            const float font_scale = (line.heading_level != HeadingLevel::None ? heading_sizes[line.heading_level] : font_size_px[line.font_size]) / ImGui::GetFont()->FontSize;
+            ImGui::SetWindowFontScale(font_scale * RES_SCALE.y);
+
+            const auto bullet_size = ImGui::CalcTextSize(bullet.c_str());
+            if (line.in_list || line.is_bullet || line.text.find("*") != std::string::npos) {
+                const auto text_pos = ImGui::GetCursorPosY();
+                if (line.is_bullet)
+                    ImGui::TextUnformatted(bullet.c_str());
+
+                ImGui::SetCursorPos(ImVec2(bullet_size.x + ImGui::GetStyle().ItemSpacing.x, text_pos));
+            }
+
+            ImGui::PushTextWrapPos(wrap_width);
+            ImGui::PushStyleColor(ImGuiCol_Text, line.font_color);
+            ImGui::TextWrapped("%s", line.text.c_str());
+            ImGui::PopStyleColor();
+            ImGui::PopTextWrapPos();
+            ImGui::ScrollWhenDragging();
+        }
+
+        if (std::next(it) != update_history_infos.rend())
+            ImGui::NewLine();
+    }
+    ImGui::EndChild();
+    ImGui::SetWindowFontScale(1.25f * RES_SCALE.y);
+    if (is_new_version) {
+        ImGui::SetCursorPos(ImVec2((WINDOW_SIZE.x / 2.f) - BUTTON_SIZE.x - (10.f * SCALE.x), WINDOW_SIZE.y - BUTTON_SIZE.y - (22.f * SCALE.y)));
+        if (ImGui::Button(common["cancel"].c_str(), BUTTON_SIZE) || ImGui::IsKeyPressed(static_cast<ImGuiKey>(emuenv.cfg.keyboard_button_circle)))
+            gui.vita_area.update_history_info = false;
+        ImGui::SameLine(0, 20.f * SCALE.x);
+        if (ImGui::Button(patch_check["download"].c_str(), BUTTON_SIZE) || ImGui::IsKeyPressed(static_cast<ImGuiKey>(emuenv.cfg.keyboard_button_circle))) {
+            gui.vita_area.update_history_info = false;
+            update_notice_info(gui, emuenv, "downloading", id);
+        }
+    } else {
+        ImGui::SetCursorPos(ImVec2((WINDOW_SIZE.x / 2.f) - (BUTTON_SIZE.x / 2.f), WINDOW_SIZE.y - BUTTON_SIZE.y - (22.f * SCALE.y)));
+        if (ImGui::Button(common["ok"].c_str(), BUTTON_SIZE) || ImGui::IsKeyPressed(static_cast<ImGuiKey>(emuenv.cfg.keyboard_button_cross))) {
+            gui.vita_area.update_history_info = false;
+        }
+    }
+    ImGui::PopStyleVar();
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::End();
+}
+
+static bool check_has_patch(EmuEnvState &emuenv, const std::string &title_id, const std::string current_version) {
+    const auto ver_xml_path = emuenv.pref_path / "ux0/bgdl" / fmt::format("{}-ver.xml", title_id);
+
+    pugi::xml_document doc;
+    if (doc.load_file(ver_xml_path.string().c_str())) {
+        auto tag = doc.child("titlepatch").child("tag");
+        const auto last_package = tag.last_child();
+        if (last_package.empty() || (std::string(last_package.name()) != "package")) {
+            LOG_ERROR("No package found in the version XML for title ID: {}", title_id);
+            return false;
+        }
+
+        std::string latest_version = last_package.attribute("version").as_string();
+        if (latest_version[0] == '0')
+            latest_version.erase(latest_version.begin());
+        if (latest_version != current_version) {
+            LOG_INFO("New update {} is available", latest_version);
+            return true;
+        }
+        // return true; // For testing only - always indicate that an update is available
+    }
+
+    return false;
+}
+
 void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
     const auto &live_area_lang = gui.lang.user_lang[LIVE_AREA];
-    const auto is_sys_app = app_path.starts_with("NPXS") && (app_path != "NPXS10007");
-    const auto is_ps_app = app_path.starts_with("PCS") || (app_path == "NPXS10007");
-    const VitaIoDevice app_device = is_sys_app ? VitaIoDevice::vs0 : VitaIoDevice::ux0;
-    const auto APP_INDEX = get_app_index(gui, app_path);
+
+    const auto APP_INDEX = get_app_index(gui, app_path.find("shell") == std::string::npos ? app_path : "emu:vsh/shell");
     const auto TITLE_ID = APP_INDEX->title_id;
+
+    const auto is_com_app = APP_INDEX->title_id.starts_with("PCS");
+    const auto is_emu_app = app_path.starts_with("emu");
+    const auto is_fw_app = app_path.starts_with("vs0");
+    const auto is_ps_vita_os = app_path.find("shell") != std::string::npos;
 
     get_license(emuenv, APP_INDEX->title_id, APP_INDEX->content_id);
 
@@ -193,19 +556,20 @@ void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_p
         auto default_contents = false;
         const auto fw_path{ emuenv.pref_path / "vs0" };
         const auto default_fw_contents{ fw_path / "data/internal/livearea/default/sce_sys/livearea/contents/template.xml" };
-        const auto APP_PATH{ emuenv.pref_path / app_device._to_string() / "app" / app_path };
-        const auto live_area_path{ fs::path("sce_sys") / ((emuenv.license.rif[TITLE_ID].sku_flag == 3) && fs::exists(APP_PATH / "sce_sys/retail/livearea") ? "retail/livearea" : "livearea") };
-        auto template_xml{ APP_PATH / live_area_path / "contents/template.xml" };
+        const auto real_app_path = app_path.starts_with("emu") ? "vs0:app/" + fs::path(app_path).stem().string() : app_path;
+        const auto APP_PATH{ emuenv.pref_path / convert_path(real_app_path) };
+        const auto live_area_contents_path{ fs::path("sce_sys") / ((emuenv.license.rif[TITLE_ID].sku_flag == 3) && fs::exists(APP_PATH / "sce_sys/retail/livearea") ? "retail/livearea" : "livearea") / "contents" };
+        auto template_xml{ APP_PATH / live_area_contents_path / "template.xml" };
 
         pugi::xml_document doc;
 
         if (!doc.load_file(template_xml.c_str())) {
-            if (is_ps_app || is_sys_app)
+            if (!is_ps_vita_os && (is_com_app || is_fw_app || is_emu_app))
                 LOG_WARN("Live Area Contents is corrupted or missing for title: {} '{}' in path: {}.", APP_INDEX->title_id, APP_INDEX->title, template_xml);
             if (doc.load_file(default_fw_contents.c_str())) {
                 template_xml = default_fw_contents;
                 default_contents = true;
-                LOG_INFO("Using default firmware contents.");
+                LOG_INFO_IF(!is_ps_vita_os, "Using default firmware contents.");
             } else {
                 type[app_path] = "a1";
                 LOG_WARN("Default firmware contents is corrupted or missing, install firmware for fix it.");
@@ -282,13 +646,11 @@ void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_p
 
                 if (default_contents)
                     vfs::read_file(VitaIoDevice::vs0, buffer, emuenv.pref_path, "data/internal/livearea/default/sce_sys/livearea/contents/" + contents.second);
-                else if (app_device == VitaIoDevice::vs0)
-                    vfs::read_file(VitaIoDevice::vs0, buffer, emuenv.pref_path, "app/" + app_path + "/sce_sys/livearea/contents/" + contents.second);
                 else
-                    vfs::read_app_file(buffer, emuenv.pref_path, app_path, live_area_path / "contents" / contents.second);
+                    vfs::read_app_file(buffer, emuenv.pref_path, real_app_path, live_area_contents_path / contents.second);
 
                 if (buffer.empty()) {
-                    if (is_ps_app || is_sys_app)
+                    if (is_com_app || is_fw_app)
                         LOG_WARN("Contents {} '{}' Not found for title {} [{}].", contents.first, contents.second, app_path, APP_INDEX->title);
                     continue;
                 }
@@ -379,6 +741,8 @@ void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_p
                             liveitem[app_path][frame]["text"]["word-scroll"].second = livearea.child("liveitem").child("text").attribute("word-scroll").as_string();
                         if (!livearea.child("liveitem").child("text").attribute("ellipsis").empty())
                             liveitem[app_path][frame]["text"]["ellipsis"].second = livearea.child("liveitem").child("text").attribute("ellipsis").as_string();
+                        if (!livearea.child("liveitem").child("text").attribute("line-space").empty())
+                            liveitem[app_path][frame]["text"]["line-space"].second = livearea.child("liveitem").child("text").attribute("line-space").as_string();
                     }
 
                     for (const auto &frame_id : livearea) {
@@ -470,13 +834,10 @@ void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_p
                             int32_t height = 0;
                             vfs::FileBuffer buffer;
 
-                            if (app_device == VitaIoDevice::vs0)
-                                vfs::read_file(VitaIoDevice::vs0, buffer, emuenv.pref_path, fmt::format("app/{}/sce_sys/livearea/contents/{}", app_path, bg_name));
-                            else
-                                vfs::read_app_file(buffer, emuenv.pref_path, app_path, live_area_path / "contents" / bg_name);
+                            vfs::read_app_file(buffer, emuenv.pref_path, real_app_path, live_area_contents_path / bg_name);
 
                             if (buffer.empty()) {
-                                if (is_ps_app || is_sys_app)
+                                if (is_com_app || is_fw_app || is_emu_app)
                                     LOG_WARN("background, Id: {}, Name: '{}', Not found for title: {} [{}].", item.first, bg_name, app_path, APP_INDEX->title);
                                 continue;
                             }
@@ -502,13 +863,10 @@ void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_p
                             int32_t height = 0;
                             vfs::FileBuffer buffer;
 
-                            if (app_device == VitaIoDevice::vs0)
-                                vfs::read_file(VitaIoDevice::vs0, buffer, emuenv.pref_path, fmt::format("app/{}/sce_sys/livearea/contents/{}", app_path, img_name));
-                            else
-                                vfs::read_app_file(buffer, emuenv.pref_path, app_path, live_area_path / "contents" / img_name);
+                            vfs::read_app_file(buffer, emuenv.pref_path, real_app_path, live_area_contents_path / img_name);
 
                             if (buffer.empty()) {
-                                if (is_ps_app || is_sys_app)
+                                if (is_com_app || is_fw_app || is_emu_app)
                                     LOG_WARN("Image, Id: {} Name: '{}', Not found for title {} [{}].", item.first, img_name, app_path, APP_INDEX->title);
                                 continue;
                             }
@@ -527,6 +885,10 @@ void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_p
             }
         }
     }
+
+    if (check_has_patch(emuenv, APP_INDEX->title_id, APP_INDEX->app_ver))
+        gui.app_has_update[app_path] = true;
+
     if (type[app_path].empty() || !items_styles.contains(type[app_path])) {
         LOG_WARN("Type of style {} not found for: {}", type[app_path], app_path);
         type[app_path] = "a1";
@@ -545,38 +907,237 @@ void open_search(const std::string &title) {
     open_path(search_url);
 }
 
-void refresh_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
-    if (gui.live_area_contents.contains(app_path))
-        gui.live_area_contents.erase(app_path);
-    if (gui.live_items.contains(app_path))
-        gui.live_items.erase(app_path);
+bool get_remote_update_info(GuiState &gui, EmuEnvState &emuenv, const std::string &id) {
+    const auto &APP_INDEX = get_app_index(gui, fmt::format("ux0:app/{}", id));
+    if (!APP_INDEX) {
+        LOG_ERROR("App index not found for id: {}", id);
+        return false;
+    }
 
-    init_user_app(gui, emuenv, app_path);
-    save_apps_cache(gui, emuenv);
+    const auto TITLE_ID = APP_INDEX->title_id;
+    const auto ver_xml_path = emuenv.pref_path / "ux0/bgdl" / fmt::format("{}-ver.xml", TITLE_ID);
+    gui.new_update_infos[id] = {};
 
-    if (get_live_area_current_open_apps_list_index(gui, app_path) != gui.live_area_current_open_apps_list.end())
-        init_live_area(gui, emuenv, app_path);
+    pugi::xml_document doc;
+    if (!doc.load_file(ver_xml_path.string().c_str())) {
+        LOG_ERROR("Failed to load update info XML for title ID: {} from {}", TITLE_ID, ver_xml_path.string());
+        gui.new_update_infos.erase(id);
+        return false;
+    }
+
+    const auto titlepatch = doc.child("titlepatch");
+    const std::string titleid = titlepatch.attribute("titleid").as_string();
+
+    const auto tag_child = titlepatch.child("tag");
+    std::vector<std::string> package_updates_version;
+
+    for (const auto package : tag_child.children("package")) {
+        std::string version = package.attribute("version").as_string();
+        if (version.empty()) {
+            LOG_ERROR("Package version is empty for title ID: {}", titleid);
+            gui.new_update_infos.erase(id);
+            return false;
+        }
+        if (version[0] == '0') {
+            version.erase(version.begin());
+        }
+        LOG_DEBUG("package update info for title ID: {}, version: {}", titleid, version);
+        package_updates_version.emplace_back(version);
+    }
+
+    if (package_updates_version.empty()) {
+        LOG_ERROR("No package update versions found for title ID: {}", TITLE_ID);
+        gui.new_update_infos.erase(id);
+        return false;
+    }
+
+    size_t size = 0;
+    std::string url;
+    std::string content_id;
+    const std::string version = package_updates_version.back();
+
+    const auto last_package_child = tag_child.last_child();
+    const auto hybrid_package_child = last_package_child.child("hybrid_package");
+    if (((package_updates_version.size() >= 2) && (package_updates_version[package_updates_version.size() - 2] == APP_INDEX->app_ver))
+        || hybrid_package_child.empty()) {
+        size = last_package_child.attribute("size").as_uint();
+        url = last_package_child.attribute("url").as_string();
+        content_id = last_package_child.attribute("content_id").as_string();
+        LOG_INFO("Preview update is current version or hybrid package no exist: {}, new version: {}", APP_INDEX->app_ver, version);
+    } else {
+        size = hybrid_package_child.attribute("size").as_uint();
+        url = hybrid_package_child.attribute("url").as_string();
+        content_id = hybrid_package_child.attribute("content_id").as_string();
+        LOG_INFO("Found hybrid package update for title ID: {}, version: {}, size: {}, url: {}", TITLE_ID, version, size, url);
+    }
+
+    if (content_id.empty() || url.empty()) {
+        LOG_ERROR("Content ID or URL is empty for title ID: {}, version: {}", TITLE_ID, version);
+        gui.new_update_infos.erase(id);
+        return false;
+    }
+
+    const auto paramsfo_child = last_package_child.child("paramsfo");
+    if (paramsfo_child.empty()) {
+        LOG_ERROR("Paramsfo child is empty for title ID: {}", TITLE_ID);
+        gui.new_update_infos.erase(id);
+        return false;
+    }
+    const auto title_lang = fmt::format("title_{:02x}", emuenv.cfg.sys_lang);
+    const auto title = !paramsfo_child.child(title_lang).empty() ? title_lang : "title";
+    const std::string title_str = paramsfo_child.child(title).text().as_string();
+    if (title_str.empty()) {
+        LOG_ERROR("Title string is empty for title ID: {}", TITLE_ID);
+        gui.new_update_infos.erase(id);
+        return false;
+    }
+
+    // Final assignment of new update info
+    gui.new_update_infos[id] = { titleid, version, size, url, content_id, title_str };
+    return true;
+}
+
+static void get_remote_update_history(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
+    const auto &APP_INDEX = get_app_index(gui, app_path);
+    const auto TITLE_ID = APP_INDEX->title_id;
+
+    const auto id = fs::path(app_path).stem().string();
+    if (!gui.new_update_infos.contains(id))
+        get_remote_update_info(gui, emuenv, id);
+
+    const auto ver_xml_path = emuenv.pref_path / "ux0/bgdl" / fmt::format("{}-ver.xml", TITLE_ID);
+
+    pugi::xml_document doc;
+    if (doc.load_file(ver_xml_path.string().c_str())) {
+        const auto tag_child = doc.child("titlepatch").child("tag");
+        const auto last_package_child = tag_child.last_child();
+        const auto changeinfo_lang = fmt::format("changeinfo_{:02x}", emuenv.cfg.sys_lang);
+        const auto changeinfo = !last_package_child.child(changeinfo_lang).empty() ? changeinfo_lang : "changeinfo";
+        const std::string changeinfo_url = last_package_child.child(changeinfo).attribute("url").as_string();
+        if (changeinfo_url.empty()) {
+            LOG_ERROR("Change info URL is empty for title ID: {}", TITLE_ID);
+            return;
+        }
+        const auto changeinfo_str = net_utils::get_web_response(changeinfo_url);
+        if (changeinfo_str.empty()) {
+            LOG_ERROR("Failed to fetch change info for title ID: {}", TITLE_ID);
+            return;
+        }
+
+        if (get_update_history_infos(changeinfo_str, APP_INDEX->app_ver))
+            gui.vita_area.update_history_info = true;
+        else
+            LOG_ERROR("Failed to parse update history for title ID: {}", TITLE_ID);
+    }
+}
+
+std::mutex has_update_mutex;
+std::mutex refresh_animation_mutex;
+struct RefreshAnimationInfo {
+    std::chrono::steady_clock::time_point start_time;
+    bool stop_requested = false;
+    float stop_after_turns = 0.f;
+};
+
+std::map<std::string, RefreshAnimationInfo> refresh_animation_states;
+static std::string donwloading_update_msg;
+
+static void process_live_area_update(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
+    const auto id = fs::path(app_path).stem().string();
+    if (!gui.updates_install.contains(id) || (gui.updates_install[id].state == UpdateState::NONE)) {
+        if (!gui.new_update_infos.contains(id))
+            get_remote_update_info(gui, emuenv, id);
+        if ((gui.new_update_infos[id].size * 2) > fs::space(emuenv.pref_path).available) {
+            donwloading_update_msg = fmt::format(fmt::runtime(gui.lang.patch_check["not_enough_space"]), get_unit_size(gui.new_update_infos[id].size * 2));
+            ImGui::OpenPopup("downloading_update_popup");
+        } else {
+            get_remote_update_history(gui, emuenv, app_path);
+        }
+    } else if (gui.updates_install[id].state == UpdateState::DOWNLOADING) {
+        donwloading_update_msg = gui.lang.patch_check["downloading_app_update"];
+        ImGui::OpenPopup("downloading_update_popup");
+    } else if (gui.updates_install[id].state == UpdateState::WAITING_INSTALL) {
+        update_install(gui, emuenv, id);
+    }
+}
+
+void refresh_and_check_patch(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
+    gui.app_has_update.erase(app_path);
+    {
+        std::lock_guard<std::mutex> lock(refresh_animation_mutex);
+        refresh_animation_states[app_path] = { std::chrono::steady_clock::now(), false, 0.f };
+    }
+
+    LOG_DEBUG("Checking for updates for app at path: {}", app_path);
+    std::thread update_thread([&gui, &emuenv, app_path]() {
+        const auto stop_refresh_animation = [&]() {
+            std::lock_guard<std::mutex> lock(refresh_animation_mutex);
+            const auto refresh_it = refresh_animation_states.find(app_path);
+            if (refresh_it == refresh_animation_states.end())
+                return;
+
+            const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - refresh_it->second.start_time).count();
+            refresh_it->second.stop_requested = true;
+            refresh_it->second.stop_after_turns = std::max(1.f, std::ceil(elapsed));
+        };
+
+        const auto &APP_INDEX = get_app_index(gui, app_path);
+        const auto TITLE_ID = APP_INDEX->title_id;
+        const auto TITLE = APP_INDEX->title;
+
+        const auto resolved_ver_xml_url = resolve_ver_xml_url(TITLE_ID);
+        if (resolved_ver_xml_url.empty()) {
+            LOG_ERROR("Failed to resolve version XML URL for title ID: {} [{}]", TITLE, TITLE_ID);
+            stop_refresh_animation();
+            return;
+        }
+
+        const auto bgdl_path = emuenv.pref_path / "ux0/bgdl";
+        fs::create_directories(bgdl_path);
+        const auto ver_xml_path = bgdl_path / fs::path(resolved_ver_xml_url).filename();
+        fs::remove(ver_xml_path);
+
+        const auto has_downloaded = net_utils::download_file(resolved_ver_xml_url, ver_xml_path.string());
+        LOG_WARN_IF(!has_downloaded, "Failed to download or find ver.xml for title ID: {} [{}]", TITLE, TITLE_ID);
+
+        gui.app_has_update[app_path] = false;
+        if (has_downloaded && check_has_patch(emuenv, TITLE_ID, APP_INDEX->app_ver)) {
+            std::lock_guard<std::mutex> lock(has_update_mutex);
+            gui.app_has_update[app_path] = true;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(gui.notifications_mutex);
+            gui.notifications.insert(gui.notifications.begin(),
+                {
+                    fs::path(app_path).stem().string(),
+                    APP_INDEX->title,
+                    gui.app_has_update[app_path] ? gui.lang.patch_check["new_app_version_available"] : gui.lang.patch_check["latest_version_installed"],
+                });
+        }
+
+        stop_refresh_animation();
+    });
+    update_thread.detach();
 }
 
 void close_live_area_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
     if (app_path == emuenv.io.app_path) {
         update_time_app_used(gui, emuenv, app_path);
+        v3kn::stop_friend_polling(emuenv.v3kn.friends_state);
         emuenv.kernel.exit_delete_all_threads();
         emuenv.load_exec = true;
         // make sure we are not stuck waiting for a gpu command
         emuenv.renderer->should_display = true;
     } else {
         gui.live_area_current_open_apps_list.erase(get_live_area_current_open_apps_list_index(gui, app_path));
-        if (gui.live_area_app_current_open == 0) {
-            gui.vita_area.live_area_screen = false;
-            gui.vita_area.home_screen = true;
-        }
         --gui.live_area_app_current_open;
     }
 }
 
 enum LiveAreaType {
     GATE,
+    UPDATE,
     SEARCH,
     MANUAL,
     REFRESH,
@@ -594,8 +1155,21 @@ static LiveAreaType live_area_type_selected = GATE;
 
 void browse_live_area_apps_list(GuiState &gui, EmuEnvState &emuenv, const uint32_t button) {
     const auto &APP_PATH = gui.live_area_current_open_apps_list[gui.live_area_app_current_open];
-    const auto manual_path{ emuenv.pref_path / "ux0/app" / APP_PATH / "sce_sys/manual" };
+    const auto manual_path{ emuenv.pref_path / convert_path(APP_PATH) / "sce_sys/manual" };
     const auto manual_found = fs::exists(manual_path) && !fs::is_empty(manual_path);
+    const auto has_update = gui.app_has_update.contains(APP_PATH) && gui.app_has_update[APP_PATH];
+    const auto has_refresh = APP_PATH.find("PCS") != std::string::npos;
+    const auto has_cloud = APP_PATH.find("PCS") != std::string::npos;
+    std::vector<LiveAreaType> nav_widgets;
+    if (has_update)
+        nav_widgets.push_back(UPDATE);
+    nav_widgets.push_back(SEARCH);
+    if (manual_found)
+        nav_widgets.push_back(MANUAL);
+    if (has_refresh)
+        nav_widgets.push_back(REFRESH);
+    if (has_cloud)
+        nav_widgets.push_back(CLOUD);
 
     if (!gui.is_nav_button) {
         if ((live_area_type_selected == MANUAL) && !manual_found)
@@ -623,6 +1197,15 @@ void browse_live_area_apps_list(GuiState &gui, EmuEnvState &emuenv, const uint32
         case MANUAL:
             open_manual(gui, emuenv, APP_PATH);
             break;
+        case UPDATE:
+            process_live_area_update(gui, emuenv, APP_PATH);
+            break;
+        case REFRESH:
+            refresh_and_check_patch(gui, emuenv, APP_PATH);
+            break;
+        case CLOUD:
+            v3kn::open_online_storage(gui, emuenv, get_app_index(gui, APP_PATH)->title_id);
+            break;
         default:
             break;
         }
@@ -639,20 +1222,28 @@ void browse_live_area_apps_list(GuiState &gui, EmuEnvState &emuenv, const uint32
         break;
     case SCE_CTRL_LEFT:
     case SCE_CTRL_L1:
-        if ((button & SCE_CTRL_LEFT) && live_area_type_selected == MANUAL)
-            live_area_type_selected = SEARCH;
-        else {
+        if (button & SCE_CTRL_LEFT) {
+            const auto current = std::find(nav_widgets.begin(), nav_widgets.end(), live_area_type_selected);
+            if ((current != nav_widgets.end()) && (current != nav_widgets.begin())) {
+                live_area_type_selected = *std::prev(current);
+                break;
+            }
+        }
+        {
             gui.live_area_app_current_open = std::max(gui.live_area_app_current_open - 1, -1);
-            gui.vita_area.live_area_screen = gui.live_area_app_current_open >= 0;
-            gui.vita_area.home_screen = !gui.vita_area.live_area_screen;
             live_area_type_selected = GATE;
         }
         break;
     case SCE_CTRL_RIGHT:
     case SCE_CTRL_R1:
-        if ((button & SCE_CTRL_RIGHT) && live_area_type_selected == SEARCH)
-            live_area_type_selected = MANUAL;
-        else if (gui.live_area_app_current_open < live_area_current_open_apps_list_size) {
+        if (button & SCE_CTRL_RIGHT) {
+            const auto current = std::find(nav_widgets.begin(), nav_widgets.end(), live_area_type_selected);
+            if ((current != nav_widgets.end()) && (std::next(current) != nav_widgets.end())) {
+                live_area_type_selected = *std::next(current);
+                break;
+            }
+        }
+        if (gui.live_area_app_current_open < live_area_current_open_apps_list_size) {
             ++gui.live_area_app_current_open;
             live_area_type_selected = GATE;
         }
@@ -674,38 +1265,58 @@ void browse_live_area_apps_list(GuiState &gui, EmuEnvState &emuenv, const uint32
     }
 }
 
-void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
+void refresh_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
+    const auto id = fs::path(app_path).stem().string();
+    if (gui.live_items.contains(app_path)) {
+        gui.live_area_contents.erase(app_path);
+        gui.live_items.erase(app_path);
+        init_live_area(gui, emuenv, app_path);
+    }
+    gui.updates_install.erase(id);
+    gui.app_has_update.erase(app_path);
+}
+
+void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv, const uint32_t app_index) {
     const ImVec2 VIEWPORT_SIZE(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
     const ImVec2 VIEWPORT_POS(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y);
     const auto RES_SCALE = ImVec2(emuenv.gui_scale.x, emuenv.gui_scale.y);
     const auto SCALE = ImVec2(RES_SCALE.x * emuenv.manual_dpi_scale, RES_SCALE.y * emuenv.manual_dpi_scale);
 
-    const auto &app_path = gui.live_area_current_open_apps_list[gui.live_area_app_current_open];
-    const VitaIoDevice app_device = app_path.starts_with("NPXS") ? VitaIoDevice::vs0 : VitaIoDevice::ux0;
+    const auto &app_path = gui.live_area_current_open_apps_list[app_index];
+    const VitaIoDevice app_device = device::get_device(app_path);
 
     const auto INFO_BAR_HEIGHT = 32.f * SCALE.y;
 
     const ImVec2 WINDOW_SIZE(VIEWPORT_SIZE.x, VIEWPORT_SIZE.y - INFO_BAR_HEIGHT);
-    const ImVec2 WINDOW_POS(VIEWPORT_POS.x, VIEWPORT_POS.y + INFO_BAR_HEIGHT);
-    ImGui::SetNextWindowPos(WINDOW_POS, ImGuiCond_Always);
-    ImGui::SetNextWindowSize(WINDOW_SIZE, ImGuiCond_Always);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+
+    const auto id = fs::path(app_path).stem().string();
+    if (gui.updates_install.contains(id) && (gui.updates_install[id].state == UpdateState::SUCCESS))
+        refresh_live_area(gui, emuenv, app_path);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
     auto flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings;
     if (gui.is_nav_button)
         flags |= ImGuiWindowFlags_NoMouseInputs;
-    ImGui::Begin("##live_area", &gui.vita_area.live_area_screen, flags);
+    ImGui::BeginChild(fmt::format("##live_area_{}", app_index).c_str(), WINDOW_SIZE, 1, flags);
+    ImGui::PopStyleVar(3);
     const auto SCREEN_POS = ImGui::GetCursorScreenPos();
 
-    // Draw background
-    draw_background(gui, emuenv);
+    const auto is_current_app = (app_path == emuenv.io.app_path);
+    const bool is_current_app_visible = (gui.live_area_app_current_open == app_index);
 
     const auto &app_type = type[app_path];
 
     const auto gate_pos = items_styles[app_type].gate_pos;
 
     const auto GATE_SIZE = ImVec2(280.0f * SCALE.x, 158.0f * SCALE.y);
+    const ImVec2 GATE_FRAME_RECT_SIZE(290.0f * SCALE.x, 168.0f * SCALE.y);
+    const ImVec2 GATE_FRAME_VISIBLE_MARGIN((GATE_FRAME_RECT_SIZE.x - GATE_SIZE.x) / 2.f, (GATE_FRAME_RECT_SIZE.y - GATE_SIZE.y) / 2.f);
+    constexpr float GATE_FRAME_ALPHA_MARGIN_LEFT = 6.0f;
+    constexpr float GATE_FRAME_ALPHA_MARGIN_RIGHT = 6.0f;
+    constexpr float GATE_FRAME_ALPHA_MARGIN_TOP = 10.0f;
+    constexpr float GATE_FRAME_ALPHA_MARGIN_BOTTOM = 10.0f;
     const auto GATE_POS = ImVec2(WINDOW_SIZE.x - (gate_pos.x * SCALE.x), WINDOW_SIZE.y - (gate_pos.y * SCALE.y));
     const ImVec2 GATE_POS_MIN(SCREEN_POS.x + GATE_POS.x, SCREEN_POS.y + GATE_POS.y);
     const ImVec2 GATE_POS_MAX(GATE_POS_MIN.x + GATE_SIZE.x, GATE_POS_MIN.y + GATE_SIZE.y);
@@ -719,11 +1330,12 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
 
     const auto &FG_DRAW_LIST = ImGui::GetForegroundDrawList();
 
+    const auto is_current_app_visible_animated = is_current_app_visible && (gui.gate_animation.state != GateAnimationState::None);
+
     const ImVec2 VIEWPORT_MIN(VIEWPORT_POS);
     const ImVec2 VIEWPORT_MAX(VIEWPORT_MIN.x + VIEWPORT_SIZE.x, VIEWPORT_MIN.y + VIEWPORT_SIZE.y);
 
-    const auto is_current_animated = gui.gate_animation.state != GateAnimationState::None;
-    if (is_current_animated) {
+    if (is_current_app_visible_animated) {
         gui.gate_animation.update();
 
         switch (gui.gate_animation.state) {
@@ -748,11 +1360,18 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
         frame_alpha = std::clamp(frame_alpha, 0.f, 1.f);
     }
 
-    const auto is_zoom_animation = (gui.gate_animation.state == GateAnimationState::EnterApp) || (gui.gate_animation.state == GateAnimationState::PreRunApp);
+    const auto is_zoom_animation = is_current_app_visible && ((gui.gate_animation.state == GateAnimationState::EnterApp) || (gui.gate_animation.state == GateAnimationState::PreRunApp));
 
     const ImVec2 gate_size = ImVec2(gate_screen_pos_max.x - gate_screen_pos_min.x, gate_screen_pos_max.y - gate_screen_pos_min.y);
     const ImVec2 ZOOM_RATIO = is_zoom_animation ? ImVec2(gate_size.x / GATE_SIZE.x, gate_size.y / GATE_SIZE.y) : ImVec2(1.f, 1.f);
     const ImVec2 GATE_ORIGIN = is_zoom_animation ? gate_screen_pos_min : GATE_POS_MIN;
+    const ImVec2 gate_frame_visible_margin(GATE_FRAME_VISIBLE_MARGIN.x * ZOOM_RATIO.x, GATE_FRAME_VISIBLE_MARGIN.y * ZOOM_RATIO.y);
+    const ImVec2 gate_frame_alpha_margin_min(GATE_FRAME_ALPHA_MARGIN_LEFT * SCALE.x * ZOOM_RATIO.x, GATE_FRAME_ALPHA_MARGIN_TOP * SCALE.y * ZOOM_RATIO.y);
+    const ImVec2 gate_frame_alpha_margin_max(GATE_FRAME_ALPHA_MARGIN_RIGHT * SCALE.x * ZOOM_RATIO.x, GATE_FRAME_ALPHA_MARGIN_BOTTOM * SCALE.y * ZOOM_RATIO.y);
+    const ImVec2 gate_frame_rect_pos_min(gate_screen_pos_min.x - gate_frame_visible_margin.x, gate_screen_pos_min.y - gate_frame_visible_margin.y);
+    const ImVec2 gate_frame_rect_size(gate_size.x + (gate_frame_visible_margin.x * 2.f), gate_size.y + (gate_frame_visible_margin.y * 2.f));
+    const ImVec2 gate_frame_pos_min(gate_frame_rect_pos_min.x - gate_frame_alpha_margin_min.x, gate_frame_rect_pos_min.y - gate_frame_alpha_margin_min.y);
+    const ImVec2 gate_frame_size(gate_frame_rect_size.x + gate_frame_alpha_margin_min.x + gate_frame_alpha_margin_max.x, gate_frame_rect_size.y + gate_frame_alpha_margin_min.y + gate_frame_alpha_margin_max.y);
 
     const auto set_screen_pos = [&](const ImVec2 &offset) -> ImVec2 {
         ImVec2 local(SCREEN_POS.x + offset.x - GATE_POS_MIN.x, SCREEN_POS.y + offset.y - GATE_POS_MIN.y);
@@ -1004,9 +1623,10 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
                         calc_text_size = ImGui::CalcTextSize(str_tag.text.c_str());
                 }
 
-                /*if (liveitem[app_path][frame.id]["text"]["ellipsis"].second == "on") {
-                    // TODO ellipsis
-                }*/
+                if (liveitem[app_path][frame.id]["text"]["ellipsis"].second == "on") {
+                    // LOG_DEBUG("Ellipsis on");
+                    //  TODO ellipsis
+                }
 
                 ImVec2 str_pos_init;
 
@@ -1149,10 +1769,23 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
                     }
                 }
                 ImGui::SetCursorPos(pos_str);
-                if (frame.autoflip > 0)
-                    ImGui::TextColored(str_color[0], "%s", str[app_path][frame.id][current_item[app_path][frame.id]].text.c_str());
-                else
-                    ImGui::TextColored(str_color[0], "%s", str_tag.text.c_str());
+                if (liveitem[app_path][frame.id]["text"].contains("line-space") && !liveitem[app_path][frame.id]["text"]["line-space"].second.empty()) {
+                    std::vector<std::string> lines;
+                    std::istringstream iss(str[app_path][frame.id][current_item[app_path][frame.id]].text);
+                    std::string line;
+                    while (std::getline(iss, line)) {
+                        lines.push_back(line);
+                    }
+                    for (const auto &line : lines) {
+                        ImGui::TextColored(str_color[0], "%s", line.c_str());
+                        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (std::stoi(liveitem[app_path][frame.id]["text"]["line-space"].second) * SCALE.y));
+                    }
+                } else {
+                    if (frame.autoflip > 0)
+                        ImGui::TextColored(str_color[0], "%s", str[app_path][frame.id][current_item[app_path][frame.id]].text.c_str());
+                    else
+                        ImGui::TextColored(str_color[0], "%s", str_tag.text.c_str());
+                }
                 if (liveitem[app_path][frame.id]["text"]["word-wrap"].second != "off")
                     ImGui::PopTextWrapPos();
                 ImGui::EndChild();
@@ -1163,11 +1796,7 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
 
     ImGui::PushID(app_path.c_str());
 
-    const auto is_current_app = app_path == emuenv.io.app_path;
-
-    const auto &GATE_DRAW_LIST = is_current_animated ? FG_DRAW_LIST : WINDOW_DRAW_LIST;
-
-    const auto BUTTON_SIZE = ImVec2(72.f * SCALE.x, 30.f * SCALE.y);
+    const auto &GATE_DRAW_LIST = is_current_app_visible_animated ? FG_DRAW_LIST : WINDOW_DRAW_LIST;
 
     // Draw the gate content
     if (is_current_app && gui.live_area_last_app_frame)
@@ -1184,7 +1813,7 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
         const auto ICON_POS_MAX = ImVec2(ICON_POS_MIN.x + ICON_SIZE_SCALE, ICON_POS_MIN.y + ICON_SIZE_SCALE);
 
         // check if app icon exist
-        auto &APP_ICON_TYPE = app_path.starts_with("NPXS") && (app_path != "NPXS10007") ? gui.app_selector.sys_apps_icon : gui.app_selector.user_apps_icon;
+        auto &APP_ICON_TYPE = app_path.starts_with("emu") ? gui.app_selector.emu_apps_icon : gui.app_selector.vita_apps_icon;
         if (APP_ICON_TYPE.contains(app_path))
             GATE_DRAW_LIST->AddImageRounded(APP_ICON_TYPE[app_path], ICON_POS_MIN, ICON_POS_MAX, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, 75.f * SCALE.x, ImDrawFlags_RoundCornersAll);
         else
@@ -1192,10 +1821,28 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
     }
 
     const float FRAME_THICKNESS = (10.f * SCALE.x) * ZOOM_RATIO.x;
+    constexpr float GATE_FRAME_TEXTURE_WIDTH = 74.f;
+    constexpr float GATE_FRAME_TEXTURE_HEIGHT = 82.f;
+    constexpr float GATE_FRAME_SOURCE_Y = 0.f;
+    constexpr float GATE_FRAME_SOURCE_HEIGHT = 82.f;
+    constexpr float GATE_FRAME_LEFT_SLICE = 22.f;
+    constexpr float GATE_FRAME_RIGHT_SLICE = 22.f;
+    constexpr float GATE_FRAME_TOP_SLICE = 26.f;
+    constexpr float GATE_FRAME_BOTTOM_SLICE = 26.f;
 
     // Draw gate frame
-    if (gui.gate_animation.state != GateAnimationState::ReturnApp)
-        DRAW_LIST->AddRect(gate_screen_pos_min, gate_screen_pos_max, IM_COL32(192, 192, 192, static_cast<int>(255 * frame_alpha)), (10.f * SCALE.x) * ZOOM_RATIO.x, ImDrawFlags_RoundCornersAll, FRAME_THICKNESS);
+    if (gui.gate_animation.state != GateAnimationState::ReturnApp) {
+        if (gui.vita_icons.contains("gate")) {
+            draw_stretchable_9slice_image(DRAW_LIST, gui.vita_icons["gate"], gate_frame_pos_min, gate_frame_size, GATE_FRAME_TEXTURE_WIDTH, GATE_FRAME_TEXTURE_HEIGHT,
+                GATE_FRAME_LEFT_SLICE, GATE_FRAME_RIGHT_SLICE, GATE_FRAME_TOP_SLICE, GATE_FRAME_BOTTOM_SLICE,
+                IM_COL32(255, 255, 255, static_cast<int>(255 * frame_alpha)), 0.f, GATE_FRAME_SOURCE_Y, GATE_FRAME_TEXTURE_WIDTH, GATE_FRAME_SOURCE_HEIGHT,
+                GATE_FRAME_LEFT_SLICE * SCALE.x * ZOOM_RATIO.x, GATE_FRAME_RIGHT_SLICE * SCALE.x * ZOOM_RATIO.x,
+                GATE_FRAME_TOP_SLICE * SCALE.y * ZOOM_RATIO.y, GATE_FRAME_BOTTOM_SLICE * SCALE.y * ZOOM_RATIO.y);
+        } else {
+            const ImVec2 gate_frame_rect_pos_max(gate_frame_rect_pos_min.x + gate_frame_rect_size.x, gate_frame_rect_pos_min.y + gate_frame_rect_size.y);
+            DRAW_LIST->AddRect(gate_frame_rect_pos_min, gate_frame_rect_pos_max, IM_COL32(192, 192, 192, static_cast<int>(255 * frame_alpha)), (10.f * SCALE.x) * ZOOM_RATIO.x, ImDrawFlags_RoundCornersAll, FRAME_THICKNESS);
+        }
+    }
 
     ImGui::SetWindowFontScale(RES_SCALE.x);
     const std::string BUTTON_STR = is_current_app ? gui.lang.live_area.main["continue"] : gui.lang.live_area.main["start"];
@@ -1205,17 +1852,22 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
     // Interaction (button)
     const auto BUTTON_STR_SIZE = ImGui::CalcTextSize(BUTTON_STR.c_str());
     const auto START_SIZE = ImVec2(BUTTON_STR_SIZE.x * font_size_scale, BUTTON_STR_SIZE.y * font_size_scale);
-    const auto START_BUTTON_SIZE = ImVec2(START_SIZE.x + (26.0f * SCALE.x), START_SIZE.y + (5.0f * SCALE.y));
+    const auto START_BUTTON_SIZE = ImVec2(START_SIZE.x + (34.0f * SCALE.x), 36.0f * SCALE.y);
     const auto POS_BUTTON = ImVec2((GATE_POS.x + (GATE_SIZE.x - START_BUTTON_SIZE.x) / 2.0f), (GATE_POS.y + (GATE_SIZE.y - START_BUTTON_SIZE.y) / 1.08f));
     const auto POS_START = set_screen_pos(ImVec2(POS_BUTTON.x + (START_BUTTON_SIZE.x - START_SIZE.x) / 2.f, POS_BUTTON.y + (START_BUTTON_SIZE.y - START_SIZE.y) / 2.f));
     const ImVec2 BUTTON_POS_MIN = set_screen_pos(POS_BUTTON);
-    DRAW_LIST->AddRectFilled(BUTTON_POS_MIN, ImVec2(BUTTON_POS_MIN.x + (START_BUTTON_SIZE.x * ZOOM_RATIO.x), BUTTON_POS_MIN.y + (START_BUTTON_SIZE.y * ZOOM_RATIO.y)), IM_COL32(20, 168, 222, 255), (10.0f * SCALE.x) * ZOOM_RATIO.x, ImDrawFlags_RoundCornersAll);
+    const ImVec2 START_BUTTON_SCREEN_SIZE(START_BUTTON_SIZE.x * ZOOM_RATIO.x, START_BUTTON_SIZE.y * ZOOM_RATIO.y);
+    if (gui.vita_icons.contains("start")) {
+        draw_stretchable_horizontal_image(DRAW_LIST, gui.vita_icons["start"], BUTTON_POS_MIN, START_BUTTON_SCREEN_SIZE, 40.f, 36.f, 17.f, 17.f);
+    } else {
+        DRAW_LIST->AddRectFilled(BUTTON_POS_MIN, ImVec2(BUTTON_POS_MIN.x + START_BUTTON_SCREEN_SIZE.x, BUTTON_POS_MIN.y + START_BUTTON_SCREEN_SIZE.y), IM_COL32(20, 168, 222, 255), (10.0f * SCALE.x) * ZOOM_RATIO.x, ImDrawFlags_RoundCornersAll);
+    }
     DRAW_LIST->AddText(gui.vita_font[emuenv.current_font_level], default_font_scale * ZOOM_RATIO.y, POS_START, IM_COL32(255, 255, 255, 255), BUTTON_STR.c_str());
 
     // Invisible button for gate interaction (only when not animating)
-    if (!is_current_animated) {
-        ImGui::SetCursorPos(GATE_POS);
-        if (ImGui::InvisibleButton("##gate", GATE_SIZE)) {
+    if (!is_current_app_visible_animated) {
+        ImGui::SetCursorPos(ImVec2(GATE_POS.x - GATE_FRAME_VISIBLE_MARGIN.x, GATE_POS.y - GATE_FRAME_VISIBLE_MARGIN.y));
+        if (ImGui::InvisibleButton("##gate", GATE_FRAME_RECT_SIZE)) {
             if (emuenv.io.app_path.empty() || is_current_app)
                 gui.gate_animation.start(GateAnimationState::EnterApp);
             else
@@ -1229,8 +1881,9 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
     if (live_area_type_selected == GATE) {
         const auto SELECT_THICKNESS = FRAME_THICKNESS / 2.f;
         const auto HALF_SELECT_THICKNESS = SELECT_THICKNESS / 2.f;
-        const ImVec2 SELECT_POS_MIN(gate_screen_pos_min.x + HALF_SELECT_THICKNESS, gate_screen_pos_min.y + HALF_SELECT_THICKNESS);
-        const ImVec2 SELECT_POS_MAX(SELECT_POS_MIN.x + gate_size.x - SELECT_THICKNESS, SELECT_POS_MIN.y + gate_size.y - SELECT_THICKNESS);
+        const auto SELECT_FRAME_INSET = FRAME_THICKNESS / 2.f;
+        const ImVec2 SELECT_POS_MIN(gate_frame_rect_pos_min.x + SELECT_FRAME_INSET + HALF_SELECT_THICKNESS, gate_frame_rect_pos_min.y + SELECT_FRAME_INSET + HALF_SELECT_THICKNESS);
+        const ImVec2 SELECT_POS_MAX(gate_frame_rect_pos_min.x + gate_frame_rect_size.x - SELECT_FRAME_INSET - HALF_SELECT_THICKNESS, gate_frame_rect_pos_min.y + gate_frame_rect_size.y - SELECT_FRAME_INSET - HALF_SELECT_THICKNESS);
 
         DRAW_LIST->AddRect(SELECT_POS_MIN, SELECT_POS_MAX, COLOR_PULSE_BORDER, (10.f * SCALE.x) * ZOOM_RATIO.x, ImDrawFlags_RoundCornersAll, SELECT_THICKNESS);
     }
@@ -1245,17 +1898,19 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
         auto APP_INDEX = get_app_index(gui, app_path);
 
         const auto widget_scal_size = apply_zoom_size(ImVec2(70.0f * SCALE.x, 70.f * SCALE.y));
-        const auto manual_path{ emuenv.pref_path / "ux0/app" / app_path / "sce_sys/manual" };
+        const auto manual_path{ emuenv.pref_path / convert_path(app_path) / "sce_sys/manual/" };
         const auto scal_widget_font_size = (20.0f / ImGui::GetFontSize()) * ZOOM_RATIO.x;
         const auto widget_font_size = (20.f * SCALE.x) * ZOOM_RATIO.x;
         const auto manual_exist = fs::exists(manual_path) && !fs::is_empty(manual_path);
 
         std::vector<ButtonEntry> buttons;
+        if (gui.app_has_update[app_path])
+            buttons.emplace_back("Update", UPDATE, [&]() { process_live_area_update(gui, emuenv, app_path); });
         buttons.emplace_back("Search", SEARCH, [&]() { open_search(APP_INDEX->title); });
         if (manual_exist)
             buttons.emplace_back("Manual", MANUAL, [&]() { open_manual(gui, emuenv, app_path); });
-        buttons.emplace_back("Refresh", REFRESH, [&]() { refresh_app(gui, emuenv, app_path); });
         if (app_path.find("PCS") != std::string::npos) {
+            buttons.emplace_back("Refresh", REFRESH, [&]() { refresh_and_check_patch(gui, emuenv, app_path); });
             buttons.emplace_back("Cloud", CLOUD, [&]() { v3kn::open_online_storage(gui, emuenv, APP_INDEX->title_id); });
         }
         const auto BUTTONS_COUNT = static_cast<int>(buttons.size());
@@ -1265,6 +1920,9 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
 
         for (int i = 0; i < BUTTONS_COUNT; i++) {
             ImVec2 button_pos_scal = ImVec2(BUTTONS_POS.x + i * (widget_scal_size.x + spacing), BUTTONS_POS.y);
+            const ImVec2 widget_image_size((80.0f * SCALE.x) * ZOOM_RATIO.x, (80.0f * SCALE.y) * ZOOM_RATIO.y);
+            const ImVec2 refresh_icon_size((64.0f * SCALE.x) * ZOOM_RATIO.x, (64.0f * SCALE.y) * ZOOM_RATIO.y);
+            const float widget_image_offset_y = (6.0f * SCALE.y) * ZOOM_RATIO.y;
 
             const auto TITLE = buttons[i].title;
             const auto TYPE = buttons[i].type;
@@ -1276,15 +1934,80 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
                 WIDGET_POS_MIN.y + ((widget_scal_size.y / 2.f) - (WIDGET_STR_SCALE_SIZE.y / 2.f)));
 
             auto WIDGET_COLOR = IM_COL32(10, 169, 246, 255);
-            if (TYPE == MANUAL)
+            if (TYPE == UPDATE)
+                WIDGET_COLOR = IM_COL32(249, 165, 4, 255);
+            else if (TYPE == MANUAL)
                 WIDGET_COLOR = IM_COL32(202, 0, 106, 255);
-            else if (TYPE == CLOUD)
+            else if (TYPE == CLOUD) // Yellow
                 WIDGET_COLOR = IM_COL32(255, 255, 70, 255);
 
-            DRAW_LIST->AddRectFilled(WIDGET_POS_MIN, ImVec2(WIDGET_POS_MIN.x + widget_scal_size.x, WIDGET_POS_MIN.y + widget_scal_size.y), WIDGET_COLOR, 12.0f * SCALE.x, ImDrawFlags_RoundCornersAll);
-            DRAW_LIST->AddText(gui.vita_font[emuenv.current_font_level], widget_font_size, WIDGET_STR_POS, IM_COL32(255, 255, 255, 255), WIDGET_STR);
+            const auto draw_widget_fallback = [&]() {
+                DRAW_LIST->AddRectFilled(WIDGET_POS_MIN, ImVec2(WIDGET_POS_MIN.x + widget_scal_size.x, WIDGET_POS_MIN.y + widget_scal_size.y), WIDGET_COLOR, 12.0f * SCALE.x, ImDrawFlags_RoundCornersAll);
+                DRAW_LIST->AddText(gui.vita_font[emuenv.current_font_level], widget_font_size, WIDGET_STR_POS, IM_COL32(255, 255, 255, 255), WIDGET_STR);
+            };
+
+            const auto draw_rotated_refresh_icon = [&](ImTextureID texture) {
+                const ImVec2 widget_image_pos(WIDGET_POS_MIN.x + ((widget_scal_size.x - widget_image_size.x) / 2.f), WIDGET_POS_MIN.y + ((widget_scal_size.y - widget_image_size.y) / 2.f) + (widget_image_offset_y / 2.f));
+                const auto center = ImVec2(widget_image_pos.x + (widget_image_size.x / 2.f), widget_image_pos.y + (widget_image_size.y / 2.f));
+                const auto half_size = ImVec2(refresh_icon_size.x / 2.f, refresh_icon_size.y / 2.f);
+
+                float angle = 0.f;
+                {
+                    std::lock_guard<std::mutex> lock(refresh_animation_mutex);
+                    if (auto refresh_it = refresh_animation_states.find(app_path); refresh_it != refresh_animation_states.end()) {
+                        const float elapsed = std::chrono::duration<float>(std::chrono::steady_clock::now() - refresh_it->second.start_time).count();
+                        const float clamped_elapsed = refresh_it->second.stop_requested ? std::min(elapsed, refresh_it->second.stop_after_turns) : elapsed;
+                        angle = clamped_elapsed * (2.f * std::numbers::pi_v<float>);
+
+                        if (refresh_it->second.stop_requested && (elapsed >= refresh_it->second.stop_after_turns)) {
+                            angle = 0.f;
+                            refresh_animation_states.erase(refresh_it);
+                        }
+                    }
+                }
+
+                const auto rotate = [&](float x, float y) {
+                    const float cos_angle = std::cos(angle);
+                    const float sin_angle = std::sin(angle);
+                    return ImVec2(center.x + (x * cos_angle) - (y * sin_angle), center.y + (x * sin_angle) + (y * cos_angle));
+                };
+
+                DRAW_LIST->AddImageQuad(texture,
+                    rotate(-half_size.x, -half_size.y),
+                    rotate(half_size.x, -half_size.y),
+                    rotate(half_size.x, half_size.y),
+                    rotate(-half_size.x, half_size.y));
+            };
+
+            const auto draw_widget_image = [&](const char *icon_name) {
+                if (!gui.vita_icons.contains(icon_name)) {
+                    draw_widget_fallback();
+                    return;
+                }
+
+                const ImVec2 widget_image_pos(WIDGET_POS_MIN.x + ((widget_scal_size.x - widget_image_size.x) / 2.f), WIDGET_POS_MIN.y + ((widget_scal_size.y - widget_image_size.y) / 2.f) + widget_image_offset_y);
+                ImGui::SetCursorScreenPos(widget_image_pos);
+                ImGui::Image(gui.vita_icons[icon_name], widget_image_size);
+            };
+
+            if (TYPE == REFRESH && gui.vita_icons.contains("refresh_bg") && gui.vita_icons.contains("refresh")) {
+                const ImVec2 widget_image_pos(WIDGET_POS_MIN.x + ((widget_scal_size.x - widget_image_size.x) / 2.f), WIDGET_POS_MIN.y + ((widget_scal_size.y - widget_image_size.y) / 2.f) + widget_image_offset_y);
+                ImGui::SetCursorScreenPos(widget_image_pos);
+                ImGui::Image(gui.vita_icons["refresh_bg"], widget_image_size);
+                draw_rotated_refresh_icon(gui.vita_icons["refresh"]);
+            } else if (TYPE == UPDATE)
+                draw_widget_image("update");
+            else if (TYPE == SEARCH)
+                draw_widget_image("search");
+            else if (TYPE == MANUAL)
+                draw_widget_image("manual");
+            else if (TYPE == CLOUD)
+                draw_widget_image("cloud");
+            else
+                draw_widget_fallback();
+
             ImGui::SetCursorPos(button_pos_scal);
-            if (!is_current_animated) {
+            if (!is_current_app_visible_animated) {
                 if (ImGui::Selectable(("##" + TITLE).c_str(), gui.is_nav_button && (live_area_type_selected == TYPE), ImGuiSelectableFlags_None, widget_scal_size))
                     buttons[i].callback();
 
@@ -1292,6 +2015,31 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
                     live_area_type_selected = buttons[i].type;
             }
         }
+
+        // Draw Downloading Popup
+        const auto POPUP_SIZE = ImVec2(760.0f * SCALE.x, 436.0f * SCALE.y);
+        ImGui::SetNextWindowSize(POPUP_SIZE, ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(VIEWPORT_POS.x + (VIEWPORT_SIZE.x / 2.f) - (POPUP_SIZE.x / 2.f), VIEWPORT_POS.y + (VIEWPORT_SIZE.y / 2.f) - (POPUP_SIZE.y / 2.f)), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.f * SCALE.x);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 15.f * SCALE.x);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 8.f * SCALE.x);
+        if (ImGui::BeginPopupModal("downloading_update_popup", nullptr, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDecoration)) {
+            ImGui::SetWindowFontScale(1.34f * RES_SCALE.y);
+            const auto LARGE_BUTTON_SIZE = ImVec2(320.f * SCALE.x, 46.f * SCALE.y);
+            const auto str_size = ImGui::CalcTextSize(donwloading_update_msg.c_str(), 0, false, POPUP_SIZE.x - (172.f * SCALE.x));
+            ImGui::SetCursorPos(ImVec2((POPUP_SIZE.x / 2.f) - (str_size.x / 2.f), (POPUP_SIZE.y / 2.f) - (str_size.y / 2.f) - (LARGE_BUTTON_SIZE.y / 2.f) - (22.f * SCALE.y)));
+            ImGui::PushTextWrapPos(POPUP_SIZE.x - (86.f * SCALE.x));
+            ImGui::Text("%s", donwloading_update_msg.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::SetCursorPos(ImVec2((POPUP_SIZE.x / 2.f) - (LARGE_BUTTON_SIZE.x / 2.f), POPUP_SIZE.y - LARGE_BUTTON_SIZE.y - (22.0f * SCALE.y)));
+            ImGui::SetWindowFontScale(1.54f * RES_SCALE.y);
+            if (ImGui::Button(emuenv.common_dialog.lang.common["ok"].c_str(), LARGE_BUTTON_SIZE)) {
+                donwloading_update_msg.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(3);
     }
 
     ImGui::PopID();
@@ -1303,13 +2051,25 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
     auto &common = emuenv.common_dialog.lang.common;
 
     if (!gui.vita_area.content_manager && !gui.vita_area.manual) {
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f * SCALE.x);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f * SCALE.x);
+        const auto BUTTON_SIZE = ImVec2(62.f * SCALE.x, 62.f * SCALE.y);
         ImGui::SetCursorPos(ImVec2(WINDOW_SIZE.x - (60.0f * SCALE.x) - BUTTON_SIZE.x, 12.0f * SCALE.y));
-        if (ImGui::Button("Esc", BUTTON_SIZE))
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f * SCALE.x);
+        const ImVec4 close_button_color = ImVec4(0.8f, 0.8f, 0.8f, 0.3f);
+        const ImVec4 close_button_color_hover = ImVec4(0.96f, 0.96f, 0.96f, 0.9f);
+        const ImVec4 close_button_color_active = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, close_button_color);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, close_button_color_hover);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, close_button_color_active);
+        ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 255, 255, 255));
+        ImGui::PushStyleColor(ImGuiCol_Text, GUI_COLOR_TEXT);
+        if (ImGui::Button("X", BUTTON_SIZE))
             close_live_area_app(gui, emuenv, app_path);
         ImGui::SetCursorPos(ImVec2(60.f * SCALE.x, 12.0f * SCALE.y));
-        if (ImGui::Button("Help", BUTTON_SIZE))
+        if (ImGui::Button("?", BUTTON_SIZE))
             ImGui::OpenPopup("Live Area Help");
+        ImGui::PopStyleColor(5);
+        ImGui::PopStyleVar();
         ImGui::SetNextWindowPos(ImVec2(WINDOW_SIZE.x / 2.f, WINDOW_SIZE.y / 2.f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         if (ImGui::BeginPopupModal("Live Area Help", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings)) {
             TextColoredCentered(GUI_COLOR_TEXT_TITLE, gui.lang.main_menubar.help["title"].c_str());
@@ -1377,13 +2137,8 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
         ImVec2(ARROW_LEFT_CENTER.x - (16.f * SCALE.x), ARROW_LEFT_CENTER.y),
         ImVec2(ARROW_LEFT_CENTER.x + (16.f * SCALE.x), ARROW_LEFT_CENTER.y + (20.f * SCALE.y)), ARROW_COLOR);
     ImGui::SetCursorPos(ImVec2(ARROW_WIDTH_POS - (SELECTABLE_SIZE.x / 2.f), ARROW_SELECT_HEIGHT_POS));
-    if (ImGui::InvisibleButton("##left", SELECTABLE_SIZE)) {
-        if (gui.live_area_app_current_open == 0) {
-            gui.vita_area.live_area_screen = false;
-            gui.vita_area.home_screen = true;
-        }
+    if (ImGui::InvisibleButton("##left", SELECTABLE_SIZE))
         --gui.live_area_app_current_open;
-    }
 
     // Draw right arrow
     if (gui.live_area_app_current_open < gui.live_area_current_open_apps_list.size() - 1) {
@@ -1397,8 +2152,7 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
             ++gui.live_area_app_current_open;
     }
     ImGui::SetWindowFontScale(1.f);
-    ImGui::End();
-    ImGui::PopStyleVar(3);
+    ImGui::EndChild();
 }
 
 } // namespace gui

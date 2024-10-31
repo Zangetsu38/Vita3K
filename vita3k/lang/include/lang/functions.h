@@ -21,6 +21,7 @@
 
 namespace lang {
 
+void set_lang_string();
 void init_lang(LangState &lang, EmuEnvState &emuenv);
 
 } // namespace lang

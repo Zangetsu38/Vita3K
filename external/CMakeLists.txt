@@ -205,6 +205,8 @@ option(GLSLANG_TESTS "Enable glslang testing" OFF)
 option(ENABLE_OPT "Enables spirv-opt capability if present" OFF)
 add_subdirectory(glslang)
 
+add_subdirectory(json)
+
 option(SPIRV_CROSS_CLI "Build the CLI binary. Requires SPIRV_CROSS_STATIC." OFF)
 option(SPIRV_CROSS_ENABLE_TESTS "Enable SPIRV-Cross tests." OFF)
 option(SPIRV_CROSS_ENABLE_HLSL "Enable HLSL target support." OFF)
