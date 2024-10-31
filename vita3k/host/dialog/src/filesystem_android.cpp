@@ -28,6 +28,8 @@
 
 #include <host/dialog/filesystem.h>
 
+#include <util/log.h>
+
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_system.h>
 #include <SDL3/SDL_timer.h>
@@ -35,6 +37,15 @@
 #include <jni.h>
 
 static std::atomic<bool> file_dialog_running = false;
+static std::atomic<uint64_t> file_dialog_last_closed_ticks = 0;
+
+bool is_system_file_dialog_active() {
+    if (file_dialog_running.load(std::memory_order_acquire))
+        return true;
+
+    const auto last_closed_ticks = file_dialog_last_closed_ticks.load(std::memory_order_acquire);
+    return last_closed_ticks && ((SDL_GetTicks() - last_closed_ticks) < 1000);
+}
 
 // the result from the dialog, this is an UTF-8 string
 static fs::path dialog_result_path{};
@@ -45,6 +56,7 @@ Java_org_vita3k_emulator_Emulator_filedialogReturn(JNIEnv *env, jobject thiz, js
     dialog_result_path = fs::path(result_ptr);
     env->ReleaseStringUTFChars(result_path, result_ptr);
 
+    file_dialog_last_closed_ticks.store(SDL_GetTicks(), std::memory_order_release);
     file_dialog_running.store(false, std::memory_order_release);
 }
 
@@ -116,6 +128,7 @@ static void call_dialog_java_function(const char *name, bool need_write) {
 
 namespace host::dialog::filesystem {
 Result open_file(fs::path &resulting_path, const std::vector<FileFilter> &file_filters, const fs::path &default_path) {
+    dialog_result_path.clear();
     call_dialog_java_function("showFileDialog", false);
 
     if (dialog_result_path.empty())
@@ -127,6 +140,7 @@ Result open_file(fs::path &resulting_path, const std::vector<FileFilter> &file_f
 };
 
 Result pick_folder(fs::path &resulting_path, const fs::path &default_path) {
+    dialog_result_path.clear();
     call_dialog_java_function("showFolderDialog", true);
 
     if (dialog_result_path.empty())
@@ -136,6 +150,10 @@ Result pick_folder(fs::path &resulting_path, const fs::path &default_path) {
 
     return Result::SUCCESS;
 };
+
+bool is_system_dialog_active() {
+    return is_system_file_dialog_active();
+}
 
 std::string get_error() {
     return "";

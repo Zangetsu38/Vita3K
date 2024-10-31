@@ -28,6 +28,7 @@
 #include <gui/state.h>
 #include <include/cpu.h>
 #include <include/environment.h>
+#include <io/device.h>
 #include <io/state.h>
 #include <kernel/state.h>
 #include <modules/module_parent.h>
@@ -41,6 +42,7 @@
 #include <shader/spirv_recompiler.h>
 #include <util/log.h>
 #include <util/string_utils.h>
+#include <v3kn/state.h>
 
 #if USE_DISCORD
 #include <app/discord.h>
@@ -67,6 +69,7 @@
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_timer.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -144,7 +147,6 @@ static void run_execv(char *argv[], EmuEnvState &emuenv) {
 
     // Execute the emulator again with some arguments
 #ifdef _WIN32
-    FreeConsole();
     _execv(argv[0], args);
 #elif defined(__unix__) || defined(__APPLE__) && defined(__MACH__)
     execv(argv[0], const_cast<char *const *>(args));
@@ -306,32 +308,29 @@ int main(int argc, char *argv[]) {
 
     GuiState gui;
 
-    std::chrono::system_clock::time_point present = std::chrono::system_clock::now();
-    std::chrono::system_clock::time_point later = std::chrono::system_clock::now();
     constexpr double frame_time = 1000.0 / 60.0;
+    const auto frame_time_duration = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double, std::milli>(frame_time));
+    auto next_frame = std::chrono::steady_clock::now();
 
     const auto wait_for_frame_done = [&]() {
-        // get the current time & get the time we worked for
-        present = std::chrono::system_clock::now();
-        std::chrono::duration<double, std::milli> work_time = present - later;
-        // check if we are running faster than ~60fps (16.67ms)
-        if (work_time.count() < frame_time) {
-            // sleep for delta time.
-            std::chrono::duration<double, std::milli> delta_ms(frame_time - work_time.count());
-            auto delta_ms_duration = std::chrono::duration_cast<std::chrono::milliseconds>(delta_ms);
-            std::this_thread::sleep_for(std::chrono::milliseconds(delta_ms_duration.count()));
+        next_frame += frame_time_duration;
+        const auto now = std::chrono::steady_clock::now();
+
+        if (now < next_frame) {
+            std::this_thread::sleep_until(next_frame);
+        } else {
+            next_frame = now;
         }
-        // save the later time
-        later = std::chrono::system_clock::now();
     };
 
     if (!cfg.console) {
         gui::pre_init(gui, emuenv);
         bgm_player::init_bgm_player(emuenv.cfg.bgm_volume);
+        start_event_watch_thread(emuenv, gui);
         if (!emuenv.cfg.initial_setup) {
-            emuenv.cfg.system_music.emplace(false);
+            emuenv.cfg.system_music.emplace(true);
             if (bgm_player::init_bgm(gui, emuenv))
-                bgm_player::switch_bgm_state(true);
+                bgm_player::switch_bgm_state(false);
             while (!emuenv.cfg.initial_setup) {
                 wait_for_frame_done();
                 if (handle_events(emuenv, gui)) {
@@ -383,13 +382,35 @@ int main(int argc, char *argv[]) {
     }
 
     if (run_type == app::AppRunType::Extracted) {
-        emuenv.io.app_path = cfg.run_app_path ? *cfg.run_app_path : emuenv.app_info.app_title_id;
-        gui::init_user_app(gui, emuenv, emuenv.io.app_path);
+        emuenv.io.app_path = cfg.run_app_path ? *cfg.run_app_path : "ux0:app/" + emuenv.app_info.app_title_id;
+        gui::init_vita_app(gui, emuenv, emuenv.io.app_path);
         if (emuenv.cfg.run_app_path.has_value())
             emuenv.cfg.run_app_path.reset();
         else if (emuenv.cfg.content_path.has_value())
             emuenv.cfg.content_path.reset();
+        emuenv.v3kn.friends_state.presence_status.store(PresenceStatus::Online);
+        emuenv.v3kn.friends_state.presence_cv.notify_all();
     }
+
+    const auto draw_app_background = [](GuiState &gui, EmuEnvState &emuenv) {
+        const ImVec2 VIEWPORT_SIZE(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
+        const auto pos_min = ImVec2(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y);
+        const auto pos_max = ImVec2(pos_min.x + emuenv.logical_viewport_size.x, pos_min.y + emuenv.logical_viewport_size.y);
+        ImGui::SetNextWindowPos(pos_min);
+        ImGui::SetNextWindowSize(VIEWPORT_SIZE);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::Begin("draw_background", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings);
+
+        if (gui.apps_background.contains(emuenv.io.app_path))
+            // Display application background
+            ImGui::GetBackgroundDrawList()->AddImage(gui.apps_background[emuenv.io.app_path], pos_min, pos_max);
+        // Application background not found
+        else
+            gui::draw_background(gui, emuenv);
+
+        ImGui::PopStyleVar();
+        ImGui::End();
+    };
 
     if (!cfg.console) {
 #if USE_DISCORD
@@ -423,9 +444,38 @@ int main(int argc, char *argv[]) {
             }
 
             if (!emuenv.io.app_path.empty()) {
-                run_type = app::AppRunType::Extracted;
                 gui.vita_area.home_screen = false;
-                gui.vita_area.live_area_screen = false;
+                const auto id = fs::path(emuenv.io.app_path).stem().string();
+                if (gui.updates_install.contains(id)) {
+                    auto &update_install = gui.updates_install[id];
+                    if (update_install.state == UpdateState::WAITING_INSTALL) {
+                        gui::init_app_background(gui, emuenv, emuenv.io.app_path);
+                        gui::update_install(gui, emuenv, id);
+                        if (update_install.state != UpdateState::INSTALLING)
+                            update_install.state = UpdateState::FAILED;
+                        while (update_install.state == UpdateState::INSTALLING) {
+                            handle_events(emuenv, gui);
+                            gui::draw_begin(gui, emuenv);
+                            draw_app_background(gui, emuenv);
+                            ImGui::PushFont(gui.vita_font[emuenv.current_font_level]);
+                            gui::draw_pkg_install(gui, emuenv);
+                            ImGui::PopFont();
+                            gui::draw_end(gui);
+                            emuenv.renderer->swap_window(emuenv.window.get());
+                        }
+                        if (update_install.state == UpdateState::FAILED) {
+                            gui.vita_area.home_screen = true;
+                            gui.gate_animation.start(GateAnimationState::ReturnApp);
+                            app::error_dialog(fmt::format("Failed to install update for {}.", emuenv.io.app_path), emuenv.window.get());
+                            update_install.state = UpdateState::WAITING_INSTALL;
+                            emuenv.io.app_path.clear();
+                            continue;
+                        }
+                        gui::refresh_live_area(gui, emuenv, emuenv.io.app_path);
+                    }
+                }
+
+                run_type = app::AppRunType::Extracted;
             }
         }
     }
@@ -443,7 +493,7 @@ int main(int argc, char *argv[]) {
         return Success;
     }
 
-    const auto APP_INDEX = gui::get_app_index(gui, emuenv.io.app_path);
+    const auto APP_INDEX = gui::get_app_index(gui, emuenv.io.app_path.find("vsh") != std::string::npos ? "emu:vsh/shell" : emuenv.io.app_path);
     emuenv.app_info.app_version = APP_INDEX->app_ver;
     emuenv.app_info.app_category = APP_INDEX->category;
     emuenv.io.addcont = APP_INDEX->addcont;
@@ -452,6 +502,8 @@ int main(int argc, char *argv[]) {
     emuenv.current_app_title = APP_INDEX->title;
     emuenv.app_info.app_short_title = APP_INDEX->stitle;
     emuenv.io.title_id = APP_INDEX->title_id;
+
+    emuenv.v3kn.friends_state.presence_cv.notify_all();
 
 #ifdef __ANDROID__
     set_current_game_id(emuenv.io.title_id);
@@ -472,25 +524,14 @@ int main(int argc, char *argv[]) {
     }
 
     bgm_player::switch_bgm_state(true);
-    gui::init_app_background(gui, emuenv, emuenv.io.app_path);
+    if (emuenv.io.app_path.find("vsh") == std::string::npos)
+        gui::init_app_background(gui, emuenv, emuenv.io.app_path);
     gui::update_last_time_app_used(gui, emuenv, emuenv.io.app_path);
 
     if (!app::late_init(emuenv)) {
         app::error_dialog("Failed to initialize Vita3K", emuenv.window.get());
         return 1;
     }
-
-    const auto draw_app_background = [](GuiState &gui, EmuEnvState &emuenv) {
-        const auto pos_min = ImVec2(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y);
-        const auto pos_max = ImVec2(pos_min.x + emuenv.logical_viewport_size.x, pos_min.y + emuenv.logical_viewport_size.y);
-
-        if (gui.apps_background.contains(emuenv.io.app_path))
-            // Display application background
-            ImGui::GetBackgroundDrawList()->AddImage(gui.apps_background[emuenv.io.app_path], pos_min, pos_max);
-        // Application background not found
-        else
-            gui::draw_background(gui, emuenv);
-    };
 
     int32_t main_module_id;
     {
@@ -530,7 +571,7 @@ int main(int argc, char *argv[]) {
         wait_for_frame_done();
 
         // Driver acto!
-        renderer::process_batches(*emuenv.renderer.get(), emuenv.renderer->features, emuenv.mem, emuenv.cfg);
+        renderer::process_batches(*emuenv.renderer.get(), emuenv.renderer->features, emuenv.mem, emuenv.cfg, true);
 
         const SceFVector2 viewport_pos = { emuenv.drawable_viewport_pos.x, emuenv.drawable_viewport_pos.y };
         const SceFVector2 viewport_size = { emuenv.drawable_viewport_size.x, emuenv.drawable_viewport_size.y };
@@ -547,37 +588,54 @@ int main(int argc, char *argv[]) {
 #endif
     }
 
+    emuenv.sdl_ticks = SDL_GetTicks();
+    emuenv.frame_count = 0;
+    bool game_was_paused = false;
+
     while (handle_events(emuenv, gui) && !emuenv.load_exec) {
 #ifdef TRACY_ENABLE
         ZoneScopedN("Game rendering"); // Tracy - Track game rendering loop scope
 #endif
-        if (emuenv.kernel.is_threads_paused())
+        const bool game_is_paused = emuenv.kernel.is_threads_paused();
+        if (game_is_paused) {
+            emuenv.sdl_ticks = SDL_GetTicks();
+            emuenv.frame_count = 0;
             wait_for_frame_done();
+        } else if (game_was_paused) {
+            emuenv.sdl_ticks = SDL_GetTicks();
+            emuenv.frame_count = 0;
+        }
+
+        const bool ui_is_open = game_is_paused || emuenv.display.imgui_render;
 
         // Driver acto!
-        renderer::process_batches(*emuenv.renderer.get(), emuenv.renderer->features, emuenv.mem, emuenv.cfg);
+        const bool has_new_frame = renderer::process_batches(*emuenv.renderer.get(), emuenv.renderer->features, emuenv.mem, emuenv.cfg, ui_is_open);
+
+        if (!has_new_frame && !game_is_paused)
+            wait_for_frame_done();
 
         const SceFVector2 viewport_pos = { emuenv.drawable_viewport_pos.x, emuenv.drawable_viewport_pos.y };
         const SceFVector2 viewport_size = { emuenv.drawable_viewport_size.x, emuenv.drawable_viewport_size.y };
         emuenv.renderer->render_frame(viewport_pos, viewport_size, emuenv.display, emuenv.gxm, emuenv.mem);
         // Calculate FPS
-        app::calculate_fps(emuenv);
+        if (has_new_frame && !game_is_paused)
+            app::calculate_fps(emuenv);
 
         // Set shaders compiled display
         gui::set_shaders_compiled_display(gui, emuenv);
 
         gui::draw_begin(gui, emuenv);
-        if (!emuenv.kernel.is_threads_paused())
+        if (!game_is_paused)
             gui::draw_common_dialog(gui, emuenv);
         gui::draw_vita_area(gui, emuenv);
 
-        if (emuenv.cfg.performance_overlay && !emuenv.kernel.is_threads_paused() && (emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING)) {
+        if (emuenv.cfg.performance_overlay && !game_is_paused && (emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING)) {
             ImGui::PushFont(gui.vita_font[emuenv.current_font_level]);
             gui::draw_perf_overlay(gui, emuenv);
             ImGui::PopFont();
         }
 
-        if (emuenv.cfg.current_config.show_touchpad_cursor && !emuenv.kernel.is_threads_paused())
+        if (emuenv.cfg.current_config.show_touchpad_cursor && !game_is_paused)
             gui::draw_touchpad_cursor(emuenv);
 
         if (emuenv.display.imgui_render) {
@@ -586,6 +644,7 @@ int main(int argc, char *argv[]) {
 
         gui::draw_end(gui);
         emuenv.renderer->swap_window(emuenv.window.get());
+        game_was_paused = game_is_paused;
 #ifdef TRACY_ENABLE
         FrameMark; // Tracy - Frame end mark for game rendering loop
 #endif

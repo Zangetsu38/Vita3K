@@ -54,6 +54,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>heeft een platina trofee verdiend in "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>heeft een trofee verdiend in "{}"!</has_earned_trophy>
+		<like>Vind ik leuk</like>
+		<likes_this>{} vindt dit leuk.</likes_this>
+		<and_like_this>{} en {} vinden dit leuk.</and_like_this>
+		<people_like_this>{} personen vinden dit leuk.</people_like_this>
+		<first_time_playing>speelt "{}" voor de eerste keer.</first_time_playing>
 		<an_error_occurred>Er is een fout opgetreden.
 Foutcode: {}</an_error_occurred>
 		<cancel>Annuleren</cancel>
@@ -183,6 +190,7 @@ Foutcode: {}</an_error_occurred>
 		<silver>Zilver</silver>
 		<hours_ago>{} uur geleden</hours_ago>
 		<minutes_ago>{} minuten geleden</minutes_ago>
+		<write_comment>Geef hier je opmerkingen</write_comment>
 	</common>
 
 	<compatibility name="Compatibilità">
@@ -197,6 +205,16 @@ Foutcode: {}</an_error_occurred>
 			<state id = "6">Giocabile</state>
 		</states>
 	</compatibility>
+
+	<contacts_pa>
+		<activities_of>{}'s activiteiten</activities_of>
+		<anyone>Iedereen</anyone>
+		<no_one>Niemand</no_one>
+		<cannot_display>Kan niet meer pagina's weergeven.</cannot_display>
+		<friends_of_friends>Vrienden van vrienden</friends_of_friends>
+		<friends_only>Alleen vrienden</friends_only>
+		<share_range>Deelbereik:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Content manager">
 		<application name="Applicaties">

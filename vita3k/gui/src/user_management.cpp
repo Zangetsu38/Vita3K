@@ -32,6 +32,8 @@
 #include <util/vector_utils.h>
 
 #include <v3kn/account.h>
+#include <v3kn/friend.h>
+#include <v3kn/state.h>
 
 #include <pugixml.hpp>
 #include <stb_image.h>
@@ -200,7 +202,7 @@ static uint32_t current_user_id_selected = 0;
 static UserMenu menu_selected = SELECT, menu = SELECT;
 
 void init_user_management(GuiState &gui, EmuEnvState &emuenv) {
-    init_app_background(gui, emuenv, "NPXS10013");
+    init_app_background(gui, emuenv, "vs0:app/NPXS10013");
     gui.vita_area.home_screen = false;
     gui.vita_area.information_bar = false;
     gui.vita_area.user_management = true;
@@ -250,9 +252,8 @@ void open_user(GuiState &gui, EmuEnvState &emuenv) {
 
 #ifdef USE_VITA3K_UPDATE
     if (emuenv.cfg.check_for_updates) {
-        std::thread update_vita3k_thread([&gui]() {
-            if (init_vita3k_update(gui))
-                gui.help_menu.vita3k_update = true;
+        std::thread update_vita3k_thread([]() {
+            check_vita3k_update();
         });
         update_vita3k_thread.detach();
     }
@@ -505,8 +506,8 @@ void draw_user_management(GuiState &gui, EmuEnvState &emuenv) {
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0.f, 0.f), ImGui::GetIO().DisplaySize, IM_COL32(0.f, 0.f, 0.f, 255.f), 0.f, ImDrawFlags_RoundCornersAll);
 
     const ImVec2 WINDOW_POS_MAX(WINDOW_POS.x + WINDOW_SIZE.x, WINDOW_POS.y + WINDOW_SIZE.y);
-    if (gui.apps_background.contains("NPXS10013"))
-        ImGui::GetBackgroundDrawList()->AddImage(gui.apps_background["NPXS10013"], WINDOW_POS, WINDOW_POS_MAX);
+    if (gui.apps_background.contains("vs0:app/NPXS10013"))
+        ImGui::GetBackgroundDrawList()->AddImage(gui.apps_background["vs0:app/NPXS10013"], WINDOW_POS, WINDOW_POS_MAX);
     else
         ImGui::GetBackgroundDrawList()->AddRectFilled(WINDOW_POS, WINDOW_POS_MAX, IM_COL32(10.f, 50.f, 140.f, 255.f), 0.f, ImDrawFlags_RoundCornersAll);
 

@@ -33,6 +33,10 @@
 
 namespace renderer {
 
+static uint16_t get_attribute_location_count(const uint8_t component_count, const uint16_t array_size) {
+    return std::max<uint16_t>(1, ((component_count + 3) / 4) * std::max<uint16_t>(array_size, 1));
+}
+
 static void layout_ssbo_offset_from_uniform_buffer_sizes(UniformBufferSizes &sizes, UniformBufferSizes &offsets, std::size_t &total_hold) {
     std::uint32_t last_offset = 0;
 
@@ -230,8 +234,12 @@ bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgra
     if (vp->attribute_infos.empty()) {
         // Insert some symbols here
         if (program.primary_reg_count != 0) {
+            uint16_t next_location = 0;
             for (size_t i = 0; i < attributes.size(); i++) {
-                vp->attribute_infos.emplace(attributes[i].regIndex, shader::usse::AttributeInformation(static_cast<uint16_t>(i), SCE_GXM_PARAMETER_TYPE_F32, 1, false, false, false));
+                const uint16_t array_size = std::max<uint16_t>(1, (attributes[i].componentCount + 3) / 4);
+                const uint8_t component_count = std::min<uint8_t>(attributes[i].componentCount, 4);
+                vp->attribute_infos.emplace(attributes[i].regIndex, shader::usse::AttributeInformation(next_location, array_size, SCE_GXM_PARAMETER_TYPE_F32, component_count, false, false, false));
+                next_location += get_attribute_location_count(component_count, array_size);
             }
         }
     }

@@ -37,6 +37,7 @@ void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread
  */
 SceUID load_module(EmuEnvState &emuenv, const std::string &module_path);
 int unload_module(EmuEnvState &emuenv, SceUID module_id);
+SceUID load_app_by_path(EmuEnvState &emuenv, const std::string &self_path, const char *titleid, const char *app_param);
 
 uint32_t start_module(EmuEnvState &emuenv, const SceKernelModuleInfo &module, SceSize args = 0, Ptr<const void> argp = Ptr<const void>{});
 uint32_t stop_module(EmuEnvState &emuenv, const SceKernelModuleInfo &module, SceSize args = 0, Ptr<const void> argp = Ptr<const void>{});
@@ -50,6 +51,7 @@ uint32_t stop_module(EmuEnvState &emuenv, const SceKernelModuleInfo &module, Sce
 bool load_sys_module(EmuEnvState &emuenv, SceSysmoduleModuleId module_id);
 int unload_sys_module(EmuEnvState &emuenv, SceSysmoduleModuleId module_id);
 bool load_sys_module_internal_with_arg(EmuEnvState &emuenv, SceUID thread_id, SceSysmoduleInternalModuleId module_id, SceSize args, Ptr<void> argp, int *retcode);
+int unload_sys_module_internal_with_arg(EmuEnvState &emuenv, SceSysmoduleInternalModuleId module_id, SceSize args, Ptr<void> argp, int *retcode);
 
 Ptr<void> create_vtable(const std::vector<uint32_t> &nids, MemState &mem);
 Ptr<void> get_client_vtable(MemState &mem);

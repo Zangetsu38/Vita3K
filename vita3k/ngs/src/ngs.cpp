@@ -22,9 +22,126 @@
 #include <ngs/system.h>
 #include <util/lock_and_find.h>
 
+#include <util/log.h>
 #include <util/vector_utils.h>
 
 namespace ngs {
+
+/*
+static uint16_t get_voice_input_count(const Rack *rack) {
+    uint16_t input_count = 0;
+
+    for (const auto &module : rack->modules) {
+        if (!module || module->module_id() != 0x5CE0) {
+            break;
+        }
+
+        input_count++;
+    }
+
+    return std::max<uint16_t>(input_count, 1);
+}
+
+static bool should_auto_route_to_master(const BussType type) {
+    switch (type) {
+    case BussType::BUSS_SAS_EMULATION:
+    case BussType::BUSS_COMPRESSOR:
+    case BussType::BUSS_SIDE_CHAIN_COMPRESSOR:
+    case BussType::BUSS_DELAY:
+    case BussType::BUSS_DISTORTION:
+    case BussType::BUSS_ENVELOPE:
+    case BussType::BUSS_EQUALIZATION:
+    case BussType::BUSS_MIXER:
+    case BussType::BUSS_PAUSER:
+    case BussType::BUSS_PITCH_SHIFT:
+    case BussType::BUSS_REVERB:
+        return true;
+
+    default:
+        return false;
+    }
+}
+
+static Rack *find_master_rack(System *system) {
+    for (Rack *candidate : system->racks) {
+        if (candidate && candidate->vdef && candidate->vdef->type == BussType::BUSS_MASTER) {
+            return candidate;
+        }
+    }
+
+    return nullptr;
+}
+
+static void auto_route_rack_to_master(const MemState &mem, Rack *source_rack, Rack *master_rack) {
+    if (!source_rack || !master_rack || !source_rack->vdef || !master_rack->vdef) {
+        return;
+    }
+
+    if (!should_auto_route_to_master(source_rack->vdef->type) || master_rack->voices.empty()) {
+        return;
+    }
+
+    Voice *master_voice = master_rack->voices[0].get(mem);
+    if (!master_voice) {
+        return;
+    }
+
+    for (const auto &voice_ptr : source_rack->voices) {
+        Voice *source_voice = voice_ptr.get(mem);
+        if (!source_voice) {
+            continue;
+        }
+
+        bool already_routed_to_master = false;
+        for (const auto &patch : source_voice->patches[0]) {
+            if (patch && patch.get(mem)->output_sub_index != -1 && patch.get(mem)->dest == master_voice) {
+                already_routed_to_master = true;
+                break;
+            }
+        }
+
+        if (!already_routed_to_master) {
+            source_voice->patch(mem, 0, -1, 0, master_voice);
+            LOG_DEBUG("Auto-routed NGS buss {} to MASTER", static_cast<int>(source_rack->vdef->type));
+        }
+    }
+}
+*/
+
+static void invalidate_rack_patches(const MemState &mem, System *system, Rack *rack) {
+    if (!system || !rack) {
+        return;
+    }
+
+    for (Rack *system_rack : system->racks) {
+        if (!system_rack) {
+            continue;
+        }
+
+        for (const auto &voice_ptr : system_rack->voices) {
+            Voice *voice = voice_ptr.get(mem);
+            if (!voice) {
+                continue;
+            }
+
+            for (auto &patches : voice->patches) {
+                for (auto &patch_ptr : patches) {
+                    Patch *patch = patch_ptr.get(mem);
+                    if (!patch || patch->output_sub_index == -1) {
+                        continue;
+                    }
+
+                    Rack *source_rack = patch->source ? patch->source->rack : nullptr;
+                    Rack *dest_rack = patch->dest ? patch->dest->rack : nullptr;
+                    if (source_rack == rack || dest_rack == rack) {
+                        patch->output_sub_index = -1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 Rack::Rack(System *mama, const Ptr<void> memspace, const uint32_t memspace_size)
     : MempoolObject(memspace, memspace_size)
     , system(mama) {}
@@ -33,7 +150,8 @@ System::System(const Ptr<void> memspace, const uint32_t memspace_size)
     : MempoolObject(memspace, memspace_size)
     , max_voices(0)
     , granularity(0)
-    , sample_rate(0) {}
+    , sample_rate(0)
+    , next_rack_generation(1) {}
 
 void VoiceInputManager::init(const uint32_t granularity, const uint16_t total_input) {
     inputs.resize(total_input);
@@ -61,9 +179,16 @@ VoiceInputManager::PCMInput *VoiceInputManager::get_input_buffer_queue(const int
 }
 
 int32_t VoiceInputManager::receive(ngs::Patch *patch, const VoiceProduct &product) {
+    /*
+        if (inputs.empty() || patch->dest_index >= static_cast<int32_t>(inputs.size())) {
+            const uint16_t required_inputs = std::max<uint16_t>(get_voice_input_count(patch->dest->rack), static_cast<uint16_t>(patch->dest_index + 1));
+            init(patch->dest->rack->system->granularity, required_inputs);
+        }
+    */
     PCMInput *input = get_input_buffer_queue(patch->dest_index);
 
     if (!input) {
+        LOG_WARN_ONCE("Dropping NGS audio patch delivery to invalid destination input {} (available inputs: {})", patch->dest_index, inputs.size());
         return -1;
     }
 
@@ -162,6 +287,9 @@ void Voice::init(Rack *mama) {
         patches[i].resize(mama->patches_per_output);
 
     inputs.init(rack->system->granularity, 1);
+    /*
+        inputs.init(rack->system->granularity, get_voice_input_count(rack));
+    */
     voice_mutex = std::make_unique<std::mutex>();
 }
 
@@ -207,7 +335,18 @@ Ptr<Patch> Voice::patch(const MemState &mem, const int32_t index, int32_t subind
 
     // Initialize the matrix
     memset(patch->volume_matrix, 0, sizeof(patch->volume_matrix));
-
+    /*
+        if (rack->channels_per_voice == 1) {
+            patch->volume_matrix[0][0] = 1.0f;
+            patch->volume_matrix[0][1] = (dest->rack->channels_per_voice == 2) ? 1.0f : 0.0f;
+        } else if (dest->rack->channels_per_voice == 1) {
+            patch->volume_matrix[0][0] = 0.5f;
+            patch->volume_matrix[1][0] = 0.5f;
+        } else {
+            patch->volume_matrix[0][0] = 1.0f;
+            patch->volume_matrix[1][1] = 1.0f;
+        }
+    */
     return patches[index][subindex];
 }
 
@@ -391,6 +530,8 @@ void release_system(State &ngs, const MemState &mem, System *system) {
 bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo *init_info, const SceNgsRackDescription *description) {
     Rack *rack = init_info->data.cast<Rack>().get(mem);
     rack = new (rack) Rack(system, init_info->data, init_info->size);
+    rack->generation = system->next_rack_generation++;
+    rack->is_released = false;
 
     // Alloc first block for Rack
     if (!rack->alloc<Rack>()) {
@@ -401,6 +542,13 @@ bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo
         apply_voice_definition(description->definition.get(mem), rack->modules);
     else
         rack->modules.clear();
+
+    /*  if (description->definition) {
+            LOG_DEBUG("NGS rack init: buss_type={} voices={} channels_per_voice={} patches_per_output={} modules={} max_patches_per_input={}",
+                static_cast<int>(description->definition.get(mem)->type), description->voice_count, description->channels_per_voice,
+                description->patches_per_output, rack->modules.size(), description->max_patches_per_input);
+        }
+    */
 
     // Initialize voice definition
     rack->channels_per_voice = description->channels_per_voice;
@@ -437,13 +585,29 @@ bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo
 
     system->racks.push_back(rack);
 
+    /*
+        if (rack->vdef) {
+            if (rack->vdef->type == BussType::BUSS_MASTER) {
+                for (Rack *candidate : system->racks) {
+                    auto_route_rack_to_master(mem, candidate, rack);
+                }
+            } else {
+                auto_route_rack_to_master(mem, rack, find_master_rack(system));
+            }
+        }
+    */
     return true;
 }
 
 void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
     // this function should only be called outside of ngs update and with the scheduler mutex acquired (except when releasing the system)
-    if (!rack)
+    if (!rack) {
+        LOG_WARN("Trying to release a rack that is already released or null.");
         return;
+    }
+
+    rack->is_released = true;
+    invalidate_rack_patches(mem, system, rack);
 
     // remove all queued voices
     for (const auto &voice : rack->voices) {

@@ -51,6 +51,10 @@ using namespace shader::usse;
 
 namespace shader {
 
+static int32_t get_attribute_location_count(const uint8_t component_count, const uint16_t array_size) {
+    return std::max<int32_t>(1, ((component_count + 3) / 4) * std::max<int32_t>(array_size, 1));
+}
+
 // **************
 // * Constants *
 // **************
@@ -1002,7 +1006,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
 
     if (program_type == SceGxmProgramType::Vertex) {
         // Create the default reg uniform buffer
-        std::vector<spv::Id> uniform_composition = { v4, f32, f32, f32, f32, f32 };
+        std::vector<spv::Id> uniform_composition = { v4, f32, f32, f32, f32, f32, f32, f32, f32 };
         if (uniform_buffer_count > 0)
             uniform_composition.push_back(buffer_addresses_type);
         if (uniform_texture_count > 0) {
@@ -1026,6 +1030,9 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         ADD_VERT_UNIFORM_MEMBER(screen_height);
         ADD_VERT_UNIFORM_MEMBER(z_offset);
         ADD_VERT_UNIFORM_MEMBER(z_scale);
+        ADD_VERT_UNIFORM_MEMBER(w_clamp_value);
+        ADD_VERT_UNIFORM_MEMBER(w_clamping);
+        ADD_VERT_UNIFORM_MEMBER(w_buffering);
 
 #undef ADD_VERT_UNIFORM_MEMBER
 #define ADD_EXT_UNIFORM_MEMBER(name)                                                                                                                                                \
@@ -1300,7 +1307,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         spv_params.thread_buffer = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, thread_buffer, "thread_buffer");
     }
 
-    int32_t in_fcount_allocated = 0;
+    int32_t next_attribute_location = 0;
     const bool has_texture_buffer = program.texture_buffer_count > 0;
 
     for (const auto &input : program_input.inputs) {
@@ -1352,8 +1359,8 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
                            }
                        },
                        [&](const AttributeInputSource &s) {
-                           add_var_to_reg(input, s.name, s.semantic, true, s.regformat, in_fcount_allocated / 4, s.index);
-                           in_fcount_allocated += ((input.array_size * input.component_count + 3) / 4 * 4);
+                            add_var_to_reg(input, s.name, s.semantic, true, s.regformat, next_attribute_location, s.index);
+                            next_attribute_location += get_attribute_location_count(input.component_count, input.array_size);
                        } },
             input.source);
     }
@@ -1365,13 +1372,14 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
             spv_params.samplers.emplace(REG_SA_COUNT + sampler.first, sampler.second);
     }
 
-    if (!translation_state.is_fragment && (in_fcount_allocated == 0) && (program.primary_reg_count != 0)) {
+    if (!translation_state.is_fragment && (next_attribute_location == 0) && (program.primary_reg_count != 0)) {
         // Using hint to create attribute. Looks like attribute with F32 types are stripped, otherwise
         // whole shader symbols are kept...
         if (translation_state.hints->attributes) {
             LOG_INFO("Shader stripped all symbols, trying to use hint attributes");
 
             const auto &attributes = translation_state.hints->attributes;
+            int32_t fallback_location = 0;
             for (std::size_t i = 0; i < attributes->size(); i++) {
                 Input inp;
                 inp.offset = attributes->at(i).regIndex;
@@ -1731,16 +1739,29 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                     spv::Id z_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(2) });
                     spv::Id w_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(3) });
                     spv::Id z = b.createLoad(z_ref, spv::NoPrecision);
-                    const spv::Id w = b.createLoad(w_ref, spv::NoPrecision);
+                    const spv::Id original_w = b.createLoad(w_ref, spv::NoPrecision);
+                    spv::Id w = original_w;
 
                     spv::Id z_offset = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(VERT_UNIFORM_z_offset) });
                     spv::Id z_scale = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(VERT_UNIFORM_z_scale) });
+                    spv::Id w_clamp_value = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(VERT_UNIFORM_w_clamp_value) });
+                    spv::Id w_clamping = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(VERT_UNIFORM_w_clamping) });
+                    spv::Id w_buffering = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(VERT_UNIFORM_w_buffering) });
                     z_offset = b.createLoad(z_offset, spv::NoPrecision);
                     z_scale = b.createLoad(z_scale, spv::NoPrecision);
+                    w_clamp_value = b.createLoad(w_clamp_value, spv::NoPrecision);
+                    w_clamping = b.createLoad(w_clamping, spv::NoPrecision);
+                    w_buffering = b.createLoad(w_buffering, spv::NoPrecision);
 
-                    // screen_z = z_offset + z_scale * (z / w)
-                    z = b.createBinOp(spv::OpFDiv, f32, z, w);
-                    z = b.createBinOp(spv::OpFMul, f32, z, z_scale);
+                    const spv::Id w_clamping_enabled = b.createOp(spv::OpFOrdGreaterThan, b.makeBoolType(), { w_clamping, half });
+                    const spv::Id clamped_w = b.createBuiltinCall(f32, utils.std_builtins, GLSLstd450FMax, { w, w_clamp_value });
+                    w = b.createTriOp(spv::OpSelect, f32, w_clamping_enabled, clamped_w, w);
+
+                    const spv::Id w_buffering_enabled = b.createOp(spv::OpFOrdGreaterThan, b.makeBoolType(), { w_buffering, half });
+                    const spv::Id z_wbuffer = b.createBinOp(spv::OpFDiv, f32, z_scale, w);
+                    spv::Id z_zbuffer = b.createBinOp(spv::OpFDiv, f32, z, w);
+                    z_zbuffer = b.createBinOp(spv::OpFMul, f32, z_zbuffer, z_scale);
+                    z = b.createTriOp(spv::OpSelect, f32, w_buffering_enabled, z_wbuffer, z_zbuffer);
                     z = b.createBinOp(spv::OpFAdd, f32, z, z_offset);
 
                     // z values below 0 get clamped
@@ -1752,8 +1773,8 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                         z = b.createBinOp(spv::OpFAdd, f32, z, b.makeFloatConstant(-1.0f));
                     }
 
-                    // multiply by w because it will be re-divided by w during screen normalization
-                    z = b.createBinOp(spv::OpFMul, f32, z, w);
+                    // multiply by the original clip-space w because it will be re-divided by w during screen normalization
+                    z = b.createBinOp(spv::OpFMul, f32, z, original_w);
 
                     b.createStore(z, z_ref);
                 }

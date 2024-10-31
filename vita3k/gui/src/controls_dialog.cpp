@@ -123,23 +123,27 @@ static void remapper_button(GuiState &gui, EmuEnvState &emuenv, int *button, int
 }
 
 void draw_controls_dialog(GuiState &gui, EmuEnvState &emuenv) {
+    const ImVec2 VIEWPORT_POS(emuenv.logical_viewport_pos.x, emuenv.logical_viewport_pos.y);
+    const ImVec2 VIEWPORT_SIZE(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
     const auto RES_SCALE = ImVec2(emuenv.gui_scale.x, emuenv.gui_scale.y);
+    const ImVec2 SCALE(RES_SCALE.x * emuenv.manual_dpi_scale, RES_SCALE.y * emuenv.manual_dpi_scale);
+    const auto INFORMATION_BAR_HEIGHT = 32.f * SCALE.y;
+
     static const auto BUTTON_SIZE = ImVec2(120.f * emuenv.manual_dpi_scale, 0.f);
 
     auto &lang = gui.lang.controls;
     auto &common = emuenv.common_dialog.lang.common;
 
-#ifndef __ANDROID__
-    float height = emuenv.logical_viewport_size.y / emuenv.manual_dpi_scale;
-    if (ImGui::BeginMainMenuBar()) {
-        height = height - ImGui::GetWindowHeight() * 2;
-        ImGui::EndMainMenuBar();
-    }
-
-    ImGui::SetNextWindowSize(ImVec2(0, height));
-#endif
-    ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x / 2.f, ImGui::GetIO().DisplaySize.y / 2.f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::Begin("##controls", &gui.controls_menu.controls_dialog, ImGuiWindowFlags_NoTitleBar);
+    const ImVec2 WINDOW_SIZE(VIEWPORT_SIZE.x, VIEWPORT_SIZE.y - INFORMATION_BAR_HEIGHT);
+    const ImVec2 WINDOW_POS(VIEWPORT_POS.x, VIEWPORT_POS.y + INFORMATION_BAR_HEIGHT);
+    ImGui::SetNextWindowPos(WINDOW_POS, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(WINDOW_SIZE, ImGuiCond_Always);
+    const auto flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
+    ImGui::Begin("##controls", &gui.controls_menu.controls_dialog, flags);
+    const ImVec2 CHILD_SIZE(WINDOW_SIZE.x / 2.f, VIEWPORT_SIZE.y / 1.2f);
+    const ImVec2 CHILD_POS(WINDOW_POS.x + ((WINDOW_SIZE.x - CHILD_SIZE.x) / 2.f), WINDOW_POS.y + ((WINDOW_SIZE.y - CHILD_SIZE.y) / 2.f));
+    ImGui::SetNextWindowPos(CHILD_POS, ImGuiCond_Always);
+    ImGui::BeginChild("##controls_child", CHILD_SIZE, ImGuiChildFlags_Borders, flags);
     ImGui::SetWindowFontScale(RES_SCALE.x);
     TextColoredCentered(GUI_COLOR_TEXT_TITLE, gui.lang.main_menubar.controls["title"].c_str());
     ImGui::Spacing();
@@ -256,6 +260,7 @@ void draw_controls_dialog(GuiState &gui, EmuEnvState &emuenv) {
         gui.controls_menu.controls_dialog = false;
 
     ImGui::ScrollWhenDragging();
+    ImGui::EndChild();
     ImGui::End();
 }
 

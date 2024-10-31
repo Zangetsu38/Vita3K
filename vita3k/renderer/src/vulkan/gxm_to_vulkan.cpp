@@ -257,6 +257,7 @@ static constexpr vk::ComponentMapping swizzle_rrr0 = { Swizzle::eR, Swizzle::eR,
 static constexpr vk::ComponentMapping swizzle_rrr1 = { Swizzle::eR, Swizzle::eR, Swizzle::eR, Swizzle::eOne };
 static constexpr vk::ComponentMapping swizzle_000r = { Swizzle::eZero, Swizzle::eZero, Swizzle::eZero, Swizzle::eR };
 static constexpr vk::ComponentMapping swizzle_111r = { Swizzle::eOne, Swizzle::eOne, Swizzle::eOne, Swizzle::eR };
+static constexpr vk::ComponentMapping swizzle_000a = { Swizzle::eZero, Swizzle::eZero, Swizzle::eZero, Swizzle::eR };
 
 // SceGxmSwizzle2Mode
 static constexpr vk::ComponentMapping swizzle_rg01 = { Swizzle::eR, Swizzle::eG, Swizzle::eZero, Swizzle::eOne };
@@ -287,6 +288,8 @@ static vk::ComponentMapping translate_swizzle1(SceGxmColorSwizzle1Mode mode) {
     switch (mode) {
     case SCE_GXM_COLOR_SWIZZLE1_R:
         return swizzle_r001;
+    case SCE_GXM_COLOR_SWIZZLE1_A:
+        return swizzle_000a;
     default:
         LOG_ERROR("Unknown swizzle mode {}", log_hex(mode));
         return swizzle_identity;
@@ -843,7 +846,7 @@ vk::Format translate_format(SceGxmTextureBaseFormat base_format) {
     }
 }
 
-vk::SamplerAddressMode translate_address_mode(SceGxmTextureAddrMode src) {
+vk::SamplerAddressMode translate_address_mode(SceGxmTextureAddrMode src, bool support_mirror_clamp_to_edge) {
     switch (src) {
     case SCE_GXM_TEXTURE_ADDR_REPEAT:
         return vk::SamplerAddressMode::eRepeat;
@@ -852,12 +855,15 @@ vk::SamplerAddressMode translate_address_mode(SceGxmTextureAddrMode src) {
     case SCE_GXM_TEXTURE_ADDR_CLAMP:
         return vk::SamplerAddressMode::eClampToEdge;
     case SCE_GXM_TEXTURE_ADDR_MIRROR_CLAMP:
-        return vk::SamplerAddressMode::eMirrorClampToEdge;
+        if (support_mirror_clamp_to_edge)
+            return vk::SamplerAddressMode::eMirrorClampToEdge;
+        LOG_WARN_ONCE("Mirror clamp address mode is approximated on Vulkan.");
+        return vk::SamplerAddressMode::eMirroredRepeat;
     case SCE_GXM_TEXTURE_ADDR_REPEAT_IGNORE_BORDER:
     case SCE_GXM_TEXTURE_ADDR_CLAMP_FULL_BORDER:
     case SCE_GXM_TEXTURE_ADDR_CLAMP_IGNORE_BORDER:
     case SCE_GXM_TEXTURE_ADDR_CLAMP_HALF_BORDER:
-        LOG_ERROR_ONCE("Unhandled border color address mode, texture will be corrupted. Please report it to the developers.");
+        LOG_WARN_ONCE("Border color address mode is approximated on Vulkan.");
         return (src == SCE_GXM_TEXTURE_ADDR_REPEAT_IGNORE_BORDER) ? vk::SamplerAddressMode::eRepeat : vk::SamplerAddressMode::eClampToBorder;
     default:
         LOG_ERROR("Unknown address mode {}", log_hex(src));

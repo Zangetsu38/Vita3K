@@ -20,6 +20,18 @@
 
 namespace ngs {
 
+void CompressorModule::set_default_preset(const MemState &mem, ModuleData &data) {
+    auto *params = data.info.data.cast<SceNgsCompressorParams>().get(mem);
+    if (!params) {
+        return;
+    }
+
+    *params = {};
+    params->desc.id = SCE_NGS_COMPRESSOR_PARAMS_STRUCT_ID;
+    params->desc.size = sizeof(SceNgsCompressorParams);
+    params->fRatio = 1.0f;
+}
+
 bool CompressorModule::process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
     if (!data.is_bypassed) {
         const SceNgsParamsDescriptor *desc = data.get_parameters<SceNgsParamsDescriptor>(mem);

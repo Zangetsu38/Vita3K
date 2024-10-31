@@ -58,6 +58,7 @@ typedef std::pair<ProgressData, ProgressCallback> CallbackData;
 struct WebResponse {
     int curl_res = 0;
     std::string body;
+    long http_code = 0;
 };
 
 struct CurlSession {

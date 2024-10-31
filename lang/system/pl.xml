@@ -113,6 +113,13 @@ jest to zależne od jej rozmiaru i twojego sprzętu.</delete_app_description>
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>zdobył(-a) platynowe trofeum w grze "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>zdobył(-a) trofeum w grze "{}"!</has_earned_trophy>
+		<like>Lubię to</like>
+		<likes_this>{} lubi to.</likes_this>
+		<and_like_this>{} i {} lubią to.</and_like_this>
+		<people_like_this>Liczba osób, które to lubią: {}.</people_like_this>
+		<first_time_playing>gra po raz pierwszy w grę"{}".</first_time_playing>
 		<an_error_occurred>Wystąpił błąd.
 Kod błędu: {}</an_error_occurred>
 		<cancel>Anuluj</cancel>
@@ -245,6 +252,7 @@ Kod błędu: {}</an_error_occurred>
 		<silver>Srebrny</silver>
 		<hours_ago>{} godz. temu</hours_ago>
 		<minutes_ago>{} min temu</minutes_ago>
+		<write_comment>Napisz komentarz</write_comment>
 	</common>
 
 	<compatibility name="Kompatybilność">
@@ -280,6 +288,16 @@ Kod błędu: {}</an_error_occurred>
 		<pipelines_compiled>{} potoków cieni skompilowanych</pipelines_compiled>
 		<shaders_compiled>{} cieni skompilowanych</shaders_compiled>
 	</compile_shaders>
+
+	<contacts_pa>
+		<activities_of>Operacje użytkownika {}</activities_of>
+		<anyone>Każdy</anyone>
+		<no_one>Nikt</no_one>
+		<cannot_display>Nie można wyświetlić więcej stron.</cannot_display>
+		<friends_of_friends>Znajomi znajomych</friends_of_friends>
+		<friends_only>Tylko znajomi</friends_only>
+		<share_range>Zakres dostępu:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Menedżer zawartości">
 		<application name="Aplikacje">

@@ -196,6 +196,17 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
         descriptors[3] = context.last_frag_texture_descriptor;
     }
 
+    const auto is_cube_slot = [&](const SceGxmProgram &program, uint32_t texture_idx) {
+        const SceGxmProgramParameter *parameters = program.program_parameters();
+        for (uint32_t p = 0; p < program.parameter_count; p++) {
+            const SceGxmProgramParameter &parameter = parameters[p];
+            if (parameter.category == SCE_GXM_PARAMETER_CATEGORY_SAMPLER && parameter.resource_index == texture_idx) {
+                return parameter.is_sampler_cube();
+            }
+        }
+        return false;
+    };
+
     // bind textures
     std::array<vk::WriteDescriptorSet, 16> write_descrs;
     // some default sampler in case a slot has never been set and we read a slot with higher idx
@@ -203,6 +214,11 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
         .sampler = context.state.default_image.sampler,
         .imageView = context.state.default_image.view,
         .imageLayout = vk::ImageLayout::eGeneral
+    };
+    vk::DescriptorImageInfo default_cube_image_info{
+        .sampler = context.state.default_cubemap_image.sampler,
+        .imageView = context.state.default_cubemap_image.view,
+        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal
     };
 
     // vertex
@@ -214,7 +230,10 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
                 .dstArrayElement = 0,
                 .descriptorType = vk::DescriptorType::eCombinedImageSampler,
             };
-            write_descrs[i].setImageInfo(context.vertex_textures[i].sampler ? context.vertex_textures[i] : default_image_info);
+            const bool needs_cube = is_cube_slot(*context.record.vertex_program.get(mem)->program.get(mem), i);
+            const vk::DescriptorImageInfo &fallback = needs_cube ? default_cube_image_info : default_image_info;
+            const vk::DescriptorImageInfo &texture_info = context.vertex_textures[i].sampler ? context.vertex_textures[i] : fallback;
+            write_descrs[i].setImageInfo((needs_cube && !context.vertex_textures_are_cube[i]) ? fallback : texture_info);
         }
         state.device.updateDescriptorSets(vertex_textures_count, write_descrs.data(), 0, nullptr);
     }
@@ -228,7 +247,10 @@ static void draw_bind_descriptors(VKContext &context, MemState &mem) {
                 .dstArrayElement = 0,
                 .descriptorType = vk::DescriptorType::eCombinedImageSampler,
             };
-            write_descrs[i].setImageInfo(context.fragment_textures[i].sampler ? context.fragment_textures[i] : default_image_info);
+            const bool needs_cube = is_cube_slot(*context.record.fragment_program.get(mem)->program.get(mem), i);
+            const vk::DescriptorImageInfo &fallback = needs_cube ? default_cube_image_info : default_image_info;
+            const vk::DescriptorImageInfo &texture_info = context.fragment_textures[i].sampler ? context.fragment_textures[i] : fallback;
+            write_descrs[i].setImageInfo((needs_cube && !context.fragment_textures_are_cube[i]) ? fallback : texture_info);
         }
         state.device.updateDescriptorSets(fragment_texture_count, write_descrs.data(), 0, nullptr);
     }
@@ -254,6 +276,9 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     GxmRecordState &state = context.record;
     const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
     VertexProgram *vkvert = vertex_program.renderer_data.get();
+
+    std::fill_n(context.vertex_stream_buffers, SCE_GXM_MAX_VERTEX_STREAMS, context.state.default_buffer.buffer);
+    std::fill_n(context.vertex_stream_offsets, SCE_GXM_MAX_VERTEX_STREAMS, 0);
 
     int max_stream_idx = -1;
 
@@ -321,7 +346,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
         }
     }
 
-    context.render_cmd.bindVertexBuffers(0, max_stream_idx, context.vertex_stream_buffers, context.vertex_stream_offsets);
+    context.render_cmd.bindVertexBuffers(0, SCE_GXM_MAX_VERTEX_STREAMS, context.vertex_stream_buffers, context.vertex_stream_offsets);
 }
 
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
@@ -441,6 +466,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     vert_ublock.viewport_flag = (context.record.viewport_flat) ? 0.0f : 1.0f;
     vert_ublock.z_offset = context.record.z_offset;
     vert_ublock.z_scale = context.record.z_scale;
+    vert_ublock.w_clamp_value = context.record.viewport_w_clamp_value;
+    vert_ublock.w_clamping = context.record.viewport_w_clamping ? 1.0f : 0.0f;
+    vert_ublock.w_buffering = context.record.viewport_w_buffering ? 1.0f : 0.0f;
     vert_ublock.screen_width = context.render_target->width / context.state.res_multiplier;
     vert_ublock.screen_height = context.render_target->height / context.state.res_multiplier;
 
@@ -453,6 +481,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     auto &frag_ublock = context.curr_frag_ublock.base_block;
     frag_ublock.writing_mask = context.record.writing_mask;
+    frag_ublock.use_raw_image = static_cast<float>(context.state.features.preserve_f16_nan_as_u16 && context.current_color_raw_view);
     frag_ublock.res_multiplier = context.state.res_multiplier;
     const bool has_msaa = context.render_target->multisample_mode;
     const bool has_downscale = context.record.color_surface.downscale;

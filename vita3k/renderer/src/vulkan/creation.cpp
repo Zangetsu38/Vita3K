@@ -160,11 +160,11 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
     width = static_cast<uint32_t>(params.width * state.res_multiplier);
     height = static_cast<uint32_t>(params.height * state.res_multiplier);
 
-    vk::ImageUsageFlags color_usage = vk::ImageUsageFlagBits::eColorAttachment;
+    vk::ImageUsageFlags color_usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eInputAttachment;
     if (state.features.support_shader_interlock)
         color_usage |= vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eStorage;
     else
-        color_usage |= vk::ImageUsageFlagBits::eInputAttachment | vk::ImageUsageFlagBits::eTransientAttachment;
+        color_usage |= vk::ImageUsageFlagBits::eTransientAttachment;
     color.init_image(color_usage);
     if (params.multisampleMode == SCE_GXM_MULTISAMPLE_4X) {
         // the depth buffer may need to be 4x bigger if we use a texture without downscale

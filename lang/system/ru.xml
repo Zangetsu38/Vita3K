@@ -95,6 +95,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>получил(-а) платиновый приз в "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>получил(-а) приз в "{}"!</has_earned_trophy>
+		<like>Нравится</like>
+		<likes_this>Это нравится пользователю {}.</likes_this>
+		<and_like_this>Это нравится пользователям {} и {}.</and_like_this>
+		<people_like_this>Это нравится {} пользователям.</people_like_this>
+		<first_time_playing>впервые играет в "{}".</first_time_playing>
 		<an_error_occurred>Произошла ошибка.
 Код ошибки: {}</an_error_occurred>
 		<cancel>Отмена</cancel>
@@ -226,6 +233,7 @@
 		<silver>Серебро</silver>
 		<hours_ago>{} час. назад</hours_ago>
 		<minutes_ago>{} мин. назад</minutes_ago>
+		<write_comment>Добавить комментарий</write_comment>
 	</common>
 
 	<compatibility name="Совместимость">
@@ -261,6 +269,16 @@
 		<pipelines_compiled>{} конвейеров скомпилировано</pipelines_compiled>
 		<shaders_compiled>{} шейдеров скомпилировано</shaders_compiled>
 	</compile_shaders>
+
+	<contacts_pa>
+		<activities_of>События {}</activities_of>
+		<anyone>Все</anyone>
+		<no_one>Никто</no_one>
+		<cannot_display>Невозможно отобразить дополнительные страницы.</cannot_display>
+		<friends_of_friends>Друзья Друзей</friends_of_friends>
+		<friends_only>Только Друзья</friends_only>
+		<share_range>Степень доступа:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Управление данными">
 		<application name="Приложения">

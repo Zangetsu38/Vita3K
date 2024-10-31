@@ -23,6 +23,7 @@
 
 #include <condition_variable>
 #include <queue>
+#include <unordered_set>
 #include <vector>
 
 struct MemState;
@@ -50,6 +51,8 @@ struct OperationPending {
         struct {
             State *state;
             Rack *rack;
+            uint64_t generation;
+            bool *completed;
             // can't use a ptr, otherwise the default constructor is deleted
             Address callback;
         } release_data;
@@ -59,10 +62,12 @@ struct OperationPending {
 struct VoiceScheduler {
     std::vector<Voice *> queue;
     std::queue<OperationPending> operations_pending;
+    std::unordered_set<Voice *> released_voices_during_update;
 
     std::recursive_mutex mutex;
     std::condition_variable_any condvar;
     bool is_updating = false;
+    SceUID updating_thread_id = -1;
 
 protected:
     void deque_insert(const MemState &mem, Voice *voice);

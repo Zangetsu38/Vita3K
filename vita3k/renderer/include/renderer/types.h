@@ -55,6 +55,7 @@ enum class GXMState : std::uint16_t {
     RegionClip,
     Program,
     Viewport,
+    ViewportW,
     DepthBias,
     DepthFunc,
     DepthWriteEnable,
@@ -136,9 +137,12 @@ struct GxmRecordState {
     SceGxmDepthStencilSurface depth_stencil_surface;
 
     bool viewport_flat = false;
+    bool viewport_w_buffering = false;
+    bool viewport_w_clamping = false;
     std::array<float, 4> viewport_flip = { 1.0f, 1.0f, 1.0f, 1.0f };
     float z_offset = 0.5f;
     float z_scale = 0.5f;
+    float viewport_w_clamp_value = 0.0f;
 
     GxmStencilStateValues front_stencil_state_values;
     GxmStencilStateValues back_stencil_state_values;

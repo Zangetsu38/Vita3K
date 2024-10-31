@@ -48,6 +48,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>on ansainnut platinatrophyn kohteessa "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>on ansainnut trophyn pelissä "{}"!</has_earned_trophy>
+		<like>Tykkää</like>
+		<likes_this>{} tykkää tästä.</likes_this>
+		<and_like_this>{} ja {} tykkäävät tästä.</and_like_this>
+		<people_like_this>{} henkilöä tykkää tästä.</people_like_this>
+		<first_time_playing>pelaa peliä "{}" ensimmäistä kertaa.</first_time_playing>
 		<an_error_occurred>Virhe on tapahtunut.
 Virhekoodi: {}</an_error_occurred>
 		<cancel>Peruuta</cancel>
@@ -177,7 +184,18 @@ Virhekoodi: {}</an_error_occurred>
 		<silver>Hopea</silver>
 		<hours_ago>{} tuntia sitten</hours_ago>
 		<minutes_ago>{} minuuttia sitten</minutes_ago>
+		<write_comment>Kirjoita kommentti</write_comment>
 	</common>
+
+	<contacts_pa>
+		<activities_of>Käyttäjän {} tapahtumat</activities_of>
+		<anyone>Kuka tahansa</anyone>
+		<no_one>Ei kukaan</no_one>
+		<cannot_display>Ei voi näyttää lisää sivuja.</cannot_display>
+		<friends_of_friends>Ystävien ystävät</friends_of_friends>
+		<friends_only>Vain ystävät</friends_only>
+		<share_range>Jakamisen laajuus:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Sisällönhallinta">
 		<application name="Sovellukset">

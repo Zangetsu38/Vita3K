@@ -23,18 +23,20 @@
 #include "util/log.h"
 #include "vkutil/vkutil.h"
 
+#include <atomic>
+
 #ifdef __ANDROID__
 #include <SDL3/SDL.h>
 #include <jni.h>
 
-static bool has_surface = false;
+static std::atomic<bool> has_surface{ false };
 
 extern "C" JNIEXPORT void JNICALL
 Java_org_vita3k_emulator_EmuSurface_setSurfaceStatus(JNIEnv *env, jobject thiz, bool surface_present) {
-    has_surface = surface_present;
+    has_surface.store(surface_present, std::memory_order_release);
 }
 #else
-static constexpr bool has_surface = true;
+static std::atomic<bool> has_surface{ true };
 #endif
 
 namespace renderer::vulkan {
@@ -275,7 +277,7 @@ void ScreenRenderer::cleanup() {
 static constexpr uint64_t next_image_timeout = std::numeric_limits<uint64_t>::max();
 
 bool ScreenRenderer::acquire_swapchain_image(bool start_render_pass) {
-    if (!has_surface) {
+    if (!has_surface.load(std::memory_order_acquire)) {
         swapchain_image_idx = 0xDEADBEAF;
         return false;
     }
@@ -408,6 +410,12 @@ void ScreenRenderer::swap_window() {
     submit_info.setSignalSemaphores(image_ready_semaphores[current_frame]);
     submit_info.setCommandBuffers(current_cmd_buffer);
     state.general_queue.submit(submit_info, fences[swapchain_image_idx]);
+
+    if (!has_surface.load(std::memory_order_acquire)) {
+        swapchain_image_idx = ~0;
+        current_cmd_buffer = nullptr;
+        return;
+    }
 
     // then present the surface
     vk::PresentInfoKHR present_info{

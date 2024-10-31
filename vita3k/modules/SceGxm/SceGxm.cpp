@@ -1325,6 +1325,11 @@ static void update_viewport(renderer::State &state, SceGxmContext *context) {
     } else {
         renderer::set_viewport_flat(state, context->renderer.get());
     }
+
+    renderer::set_viewport_w(state, context->renderer.get(),
+        context->state.viewport.w_buffer == SCE_GXM_WBUFFER_ENABLED,
+        context->state.viewport.w_clamp == SCE_GXM_WCLAMP_MODE_ENABLED,
+        context->state.viewport.w_clamp_value);
 }
 
 EXPORT(void, sceGxmSetDefaultRegionClipAndViewport, SceGxmContext *context, uint32_t xMax, uint32_t yMax) {
@@ -3608,17 +3613,38 @@ EXPORT(void, sceGxmSetBackStencilRef, SceGxmContext *context, uint8_t sref) {
 
 EXPORT(void, sceGxmSetBackVisibilityTestEnable, SceGxmContext *context, SceGxmVisibilityTestMode enable) {
     TRACY_FUNC(sceGxmSetBackVisibilityTestEnable, context, enable);
-    UNIMPLEMENTED();
+
+    if (!emuenv.renderer->features.enable_memory_mapping) {
+        UNIMPLEMENTED();
+        return;
+    }
+
+    context->state.visibility_enable = enable != SCE_GXM_VISIBILITY_TEST_DISABLED;
+    renderer::set_visibility_index(*emuenv.renderer, context->renderer.get(), context->state.visibility_enable, context->state.visibility_index, context->state.visibility_is_increment);
 }
 
 EXPORT(void, sceGxmSetBackVisibilityTestIndex, SceGxmContext *context, uint32_t index) {
     TRACY_FUNC(sceGxmSetBackVisibilityTestIndex, context, index);
-    UNIMPLEMENTED();
+
+    if (!emuenv.renderer->features.enable_memory_mapping) {
+        UNIMPLEMENTED();
+        return;
+    }
+
+    context->state.visibility_index = index;
+    renderer::set_visibility_index(*emuenv.renderer, context->renderer.get(), context->state.visibility_enable, context->state.visibility_index, context->state.visibility_is_increment);
 }
 
 EXPORT(void, sceGxmSetBackVisibilityTestOp, SceGxmContext *context, SceGxmVisibilityTestOp op) {
     TRACY_FUNC(sceGxmSetBackVisibilityTestOp, context, op);
-    UNIMPLEMENTED();
+
+    if (!emuenv.renderer->features.enable_memory_mapping) {
+        UNIMPLEMENTED();
+        return;
+    }
+
+    context->state.visibility_is_increment = (op == SCE_GXM_VISIBILITY_TEST_OP_INCREMENT);
+    renderer::set_visibility_index(*emuenv.renderer, context->renderer.get(), context->state.visibility_enable, context->state.visibility_index, context->state.visibility_is_increment);
 }
 
 EXPORT(void, sceGxmSetCullMode, SceGxmContext *context, SceGxmCullMode mode) {
@@ -4224,19 +4250,52 @@ EXPORT(int, sceGxmSetVisibilityBuffer, SceGxmContext *immediateContext, Ptr<void
     return 0;
 }
 
-EXPORT(void, sceGxmSetWBufferEnable) {
-    TRACY_FUNC(sceGxmSetWBufferEnable);
-    UNIMPLEMENTED();
+EXPORT(void, sceGxmSetWBufferEnable, SceGxmContext *context, SceGxmWBufferMode enable) {
+    TRACY_FUNC(sceGxmSetWBufferEnable, context, enable);
+    if (context->state.viewport.w_buffer != enable) {
+        context->state.viewport.w_buffer = enable;
+
+        if (!context->state.active) {
+            LOG_WARN_ONCE("The call was made outside of the Scene. It will be applied when the next Scene is called.");
+            return;
+        }
+
+        if (context->alloc_space) {
+            update_viewport(*emuenv.renderer, context);
+        }
+    }
 }
 
-EXPORT(void, sceGxmSetWClampEnable) {
-    TRACY_FUNC(sceGxmSetWClampEnable);
-    UNIMPLEMENTED();
+EXPORT(void, sceGxmSetWClampEnable, SceGxmContext *context, SceGxmWClampMode enable) {
+    TRACY_FUNC(sceGxmSetWClampEnable, context, enable);
+    if (context->state.viewport.w_clamp != enable) {
+        context->state.viewport.w_clamp = enable;
+
+        if (!context->state.active) {
+            LOG_WARN_ONCE("The call was made outside of the Scene. It will be applied when the next Scene is called.");
+            return;
+        }
+
+        if (context->alloc_space) {
+            update_viewport(*emuenv.renderer, context);
+        }
+    }
 }
 
 EXPORT(void, sceGxmSetWClampValue, SceGxmContext *context, float clampValue) {
     TRACY_FUNC(sceGxmSetWClampValue, context, clampValue);
-    UNIMPLEMENTED();
+    if (context->state.viewport.w_clamp_value != clampValue) {
+        context->state.viewport.w_clamp_value = clampValue;
+
+        if (!context->state.active) {
+            LOG_WARN_ONCE("The call was made outside of the Scene. It will be applied when the next Scene is called.");
+            return;
+        }
+
+        if (context->alloc_space) {
+            update_viewport(*emuenv.renderer, context);
+        }
+    }
 }
 
 EXPORT(int, sceGxmSetWarningEnabled) {

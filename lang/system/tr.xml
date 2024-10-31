@@ -54,6 +54,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>, "{}" oyununda bir platin kupa kazandı!</has_earned_platinum_trophy>
+		<has_earned_trophy>, "{}" oyununda bir kupa kazandı!</has_earned_trophy>
+		<like>Beğen</like>
+		<likes_this>{} bunu beğendi.</likes_this>
+		<and_like_this>{} ve {} bunu beğendi.</and_like_this>
+		<people_like_this>{} kişi bunu beğendi.</people_like_this>
+		<first_time_playing>, ilk kez "{}" oynuyor.</first_time_playing>
 		<an_error_occurred>Bir hata oluştu.
 Hata Kodu: {}</an_error_occurred>
 		<cancel>İptal</cancel>
@@ -183,7 +190,18 @@ Hata Kodu: {}</an_error_occurred>
 		<silver>Gümüş</silver>
 		<hours_ago>{} Saat Önce</hours_ago>
 		<minutes_ago>{} Dakika Önce</minutes_ago>
+		<write_comment>Yorum Yaz</write_comment>
 	</common>
+
+	<contacts_pa>
+		<activities_of>{} Kullanıcısının Etkinlikleri</activities_of>
+		<anyone>Herkes</anyone>
+		<no_one>Hiç Kimse</no_one>
+		<cannot_display>Daha fazla sayfa görüntülenemiyor.</cannot_display>
+		<friends_of_friends>Arkadaşlarımın Arkadaşları</friends_of_friends>
+		<friends_only>Yalnızca Arkadaşlar</friends_only>
+		<share_range>Paylaşma Durumu:</share_range>
+	</contacts_pa>
 
 	<content_manager name="İçerik Yöneticisi">
 		<application name="Uygulamalar">

@@ -39,6 +39,7 @@ struct CommandHelper;
 COMMAND_SET_STATE(region_clip);
 COMMAND_SET_STATE(program);
 COMMAND_SET_STATE(viewport);
+COMMAND_SET_STATE(viewport_w);
 COMMAND_SET_STATE(depth_bias);
 COMMAND_SET_STATE(depth_func);
 COMMAND_SET_STATE(depth_write_enable);

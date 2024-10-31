@@ -389,13 +389,12 @@ WebResponse get_web_response_ex(const std::string &url, const std::string &token
 
     web_response.curl_res = curl_easy_perform(curl);
 
-    long response_code;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &web_response.http_code);
 
     if (!has_session_given)
         cleanup_curl_session(local_session);
 
-    if (response_code / 100 == 2)
+    if (web_response.http_code / 100 == 2)
         return web_response;
 
     web_response.body.clear();

@@ -627,6 +627,7 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             { vk::KHRBufferDeviceAddressExtensionName, &support_buffer_device_address },
             // needed for uniform uvec2 arrays not to take twice the size
             { vk::KHRUniformBufferStandardLayoutExtensionName, &support_standard_layout },
+            { vk::KHRSamplerMirrorClampToEdgeExtensionName, &support_sampler_mirror_clamp_to_edge },
             // needed for FSR
             { vk::KHRShaderFloat16Int8ExtensionName, &support_fsr },
             // used for accurate programmable blending on desktop GPUs
@@ -848,7 +849,8 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
     // create the default image and buffer
     {
         default_buffer = vkutil::Buffer(KiB(4));
-        default_buffer.init_buffer(vk::BufferUsageFlagBits::eVertexBuffer);
+        default_buffer.init_buffer(vk::BufferUsageFlagBits::eVertexBuffer, vkutil::vma_mapped_alloc);
+        memset(default_buffer.mapped_data, 0, static_cast<size_t>(default_buffer.size));
 
         // create the default image, it must be cleared then transitioned
         default_image = vkutil::Image(1, 1, vk::Format::eR8G8B8A8Unorm);
@@ -876,6 +878,57 @@ bool VKState::create(SDL_Window *window, std::unique_ptr<renderer::State> &state
             .maxLod = 0.0f,
         };
         default_image.sampler = device.createSampler(sampler_info);
+
+        // create the default cubemap image
+        default_cubemap_image.width = 1;
+        default_cubemap_image.height = 1;
+        default_cubemap_image.format = vk::Format::eR8G8B8A8Unorm;
+
+        vk::ImageCreateInfo cube_image_info{
+            .flags = vk::ImageCreateFlagBits::eCubeCompatible,
+            .imageType = vk::ImageType::e2D,
+            .format = default_cubemap_image.format,
+            .extent = vk::Extent3D{ .width = 1, .height = 1, .depth = 1 },
+            .mipLevels = 1,
+            .arrayLayers = 6,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
+            .sharingMode = vk::SharingMode::eExclusive,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        };
+        std::tie(default_cubemap_image.image, default_cubemap_image.allocation) = allocator.createImage(cube_image_info, vkutil::vma_auto_alloc);
+
+        vk::ImageViewCreateInfo cube_view_info{
+            .image = default_cubemap_image.image,
+            .viewType = vk::ImageViewType::eCube,
+            .format = default_cubemap_image.format,
+            .components = vkutil::default_comp_mapping,
+            .subresourceRange = {
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 6
+            }
+        };
+        default_cubemap_image.view = device.createImageView(cube_view_info);
+        default_cubemap_image.sampler = default_image.sampler;
+
+        vk::CommandBuffer cube_cmd_buffer = vkutil::create_single_time_command(device, general_command_pool);
+        vk::ImageSubresourceRange cube_range{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 6
+        };
+        vkutil::transition_image_layout(cube_cmd_buffer, default_cubemap_image.image, vkutil::ImageLayout::Undefined, vkutil::ImageLayout::TransferDst, cube_range);
+        vk::ClearColorValue cube_white{ .float32 = std::array<float, 4>{ 1.0f, 1.0f, 1.0f, 1.0f } };
+        cube_cmd_buffer.clearColorImage(default_cubemap_image.image, vk::ImageLayout::eTransferDstOptimal, cube_white, cube_range);
+        vkutil::transition_image_layout(cube_cmd_buffer, default_cubemap_image.image, vkutil::ImageLayout::TransferDst, vkutil::ImageLayout::SampledImage, cube_range);
+        default_cubemap_image.layout = vkutil::ImageLayout::SampledImage;
+        vkutil::end_single_time_command(device, general_queue, general_command_pool, cube_cmd_buffer);
     }
 
     // create the frame objects

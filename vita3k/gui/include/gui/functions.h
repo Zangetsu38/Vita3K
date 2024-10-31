@@ -20,6 +20,7 @@
 #include <gui/state.h>
 #include <ime/state.h>
 #include <io/vfs.h>
+#include <v3kn/friend.h>
 
 #include <cstdint>
 #include <map>
@@ -41,12 +42,24 @@ void browse_home_apps_list(GuiState &gui, EmuEnvState &emuenv, const uint32_t bu
 void browse_live_area_apps_list(GuiState &gui, EmuEnvState &emuenv, const uint32_t button);
 void browse_pages_manual(GuiState &gui, EmuEnvState &emuenv, const uint32_t button);
 void browse_save_data_dialog(GuiState &gui, EmuEnvState &emuenv, const uint32_t button);
+void browse_settings(GuiState &gui, EmuEnvState &emuenv, const uint32_t button);
 void browse_users_management(GuiState &gui, EmuEnvState &emuenv, const uint32_t button);
-void close_and_run_new_app(EmuEnvState &emuenv, const std::string &app_path);
+void close_and_run_new_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 void close_live_area_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 void close_start_screen(GuiState &gui, EmuEnvState &emuenv);
 void close_system_app(GuiState &gui, EmuEnvState &emuenv);
 void delete_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
+void destroy_download_manager();
+void draw_friend_status_dot(ImDrawList *draw_list, const ImVec2 &pos, const ImVec2 &scale, PresenceStatus presence_status);
+void draw_stretchable_horizontal_image(ImDrawList *draw_list, ImTextureID texture, const ImVec2 &pos, const ImVec2 &size,
+    float texture_width, float texture_height, float left_slice_width, float right_slice_width, ImU32 tint = IM_COL32_WHITE,
+    float source_x = 0.f, float source_y = 0.f, float source_width = 0.f, float source_height = 0.f);
+void draw_stretchable_9slice_image(ImDrawList *draw_list, ImTextureID texture, const ImVec2 &pos, const ImVec2 &size,
+    float texture_width, float texture_height, float left_slice_width, float right_slice_width, float top_slice_height, float bottom_slice_height, ImU32 tint = IM_COL32_WHITE,
+    float source_x = 0.f, float source_y = 0.f, float source_width = 0.f, float source_height = 0.f,
+    float dest_left_width = -1.f, float dest_right_width = -1.f, float dest_top_height = -1.f, float dest_bottom_height = -1.f);
+ImU32 get_panel_edge_dominant_color(const gui::IconData &panel_data);
+void draw_ellipsis_text(const std::string &text, const float wrap_width, const ImVec2 init_pos, const ImVec2 align, const ImVec4 &col, const uint32_t max_lines = 2);
 void erase_app_notice(GuiState &gui, const std::string &title_id);
 void get_app_info(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 size_t get_app_size(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
@@ -59,10 +72,12 @@ void get_app_param(GuiState &gui, EmuEnvState &emuenv, const std::string &app_pa
 void get_firmware_file(EmuEnvState &emuenv);
 void get_modules_list(GuiState &gui, EmuEnvState &emuenv);
 void get_notice_list(EmuEnvState &emuenv);
+bool get_remote_update_info(GuiState &gui, EmuEnvState &emuenv, const std::string &id);
 ImU32 get_selectable_color_pulse(const float max_alpha = 255.f);
 std::string get_theme_title_from_buffer(const vfs::FileBuffer &buffer);
 std::vector<TimeApp>::iterator get_time_app_index(GuiState &gui, EmuEnvState &emuenv, const std::string &app);
 void get_time_apps(GuiState &gui, EmuEnvState &emuenv);
+bool get_update_history_infos(const std::string &update_history, const std::string &ver = "0");
 void get_user_apps_title(GuiState &gui, EmuEnvState &emuenv);
 void get_users_list(GuiState &gui, EmuEnvState &emuenv);
 bool get_sys_apps_state(GuiState &gui);
@@ -71,37 +86,48 @@ std::string get_sys_lang_name(uint32_t lang_id);
 void init(GuiState &gui, EmuEnvState &emuenv);
 void init_app_background(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 void init_app_icon(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
-void init_apps_icon(GuiState &gui, EmuEnvState &emuenv, const std::vector<gui::App> &app_list);
+void init_apps_icon(GuiState &gui, EmuEnvState &emuenv, const std::vector<gui::App> &apps_list);
 void init_config(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 void init_content_manager(GuiState &gui, EmuEnvState &emuenv);
 vfs::FileBuffer init_default_icon(GuiState &gui, EmuEnvState &emuenv);
+void init_fw_apps(GuiState &gui, EmuEnvState &emuenv);
 void init_home(GuiState &gui, EmuEnvState &emuenv);
 void init_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 bool init_manual(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 void init_notice_info(GuiState &gui, EmuEnvState &emuenv);
 bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_id);
+void init_theme_package(GuiState &gui, EmuEnvState &emuenv, const std::string &content_id);
 void init_theme_start_background(GuiState &gui, EmuEnvState &emuenv, const std::string &content_id);
 void init_last_time_apps(GuiState &gui, EmuEnvState &emuenv);
 void init_trophy_collection(GuiState &gui, EmuEnvState &emuenv);
 void init_user(GuiState &gui, EmuEnvState &emuenv, const std::string &user_id);
-void init_user_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
-void init_user_apps(GuiState &gui, EmuEnvState &emuenv);
 bool init_user_background(GuiState &gui, EmuEnvState &emuenv, const std::string &background_path);
 bool init_user_backgrounds(GuiState &gui, EmuEnvState &emuenv);
 void init_user_management(GuiState &gui, EmuEnvState &emuenv);
 bool init_user_start_background(GuiState &gui, const std::string &image_path);
+void init_vita_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
+void init_vita_apps(GuiState &gui, EmuEnvState &emuenv);
 void load_and_update_compat_user_apps(GuiState &gui, EmuEnvState &emuenv);
 void load_fonts(GuiState &gui, EmuEnvState &emuenv, bool reload);
 void open_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 void open_manual(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
+void open_friend_activity(GuiState &gui, EmuEnvState &emuenv, const time_t created_at, const std::string &online_id);
+void open_friend_profile(GuiState &gui, EmuEnvState &emuenv, const std::string &online_id);
+void open_friend(GuiState &gui, EmuEnvState &emuenv);
+void open_friend_requests(GuiState &gui, EmuEnvState &emuenv);
 void open_path(const std::string &path);
 void open_search(const std::string &title);
 void open_trophy_unlocked(GuiState &gui, EmuEnvState &emuenv, const std::string &np_com_id, const std::string &trophy_id);
 void open_user(GuiState &gui, EmuEnvState &emuenv);
+void check_vita3k_update();
+bool consume_vita3k_update_pending(GuiState &gui);
 bool init_vita3k_update(GuiState &gui);
+void pkg_install(GuiState &gui, EmuEnvState &emuenv, const fs::path &pkg_path, const std::string &zrif, const std::string &id = "");
 void pre_init(GuiState &gui, EmuEnvState &emuenv);
 void pre_load_app(GuiState &gui, EmuEnvState &emuenv, bool live_area, const std::string &app_path);
 void pre_run_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
+void refresh_current_friends_screen(GuiState &gui, EmuEnvState &emuenv, bool reload_avatar = false);
+void refresh_live_area(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
 void reset_controller_binding(EmuEnvState &emuenv);
 void save_apps_cache(GuiState &gui, EmuEnvState &emuenv);
 void save_user(GuiState &gui, EmuEnvState &emuenv, const std::string &user_id);
@@ -110,11 +136,14 @@ void set_config(EmuEnvState &emuenv);
 void set_current_config(EmuEnvState &emuenv, const std::string &app_path);
 bool set_scroll_animation(float &scroll, float target_scroll, const std::string &target_id, std::function<void(float)> set_scroll);
 void set_shaders_compiled_display(GuiState &gui, EmuEnvState &emuenv);
-void refresh_app(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
+void close_start_screen(GuiState &gui, EmuEnvState &emuenv);
+void refresh_and_check_patch(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
+void update_install(GuiState &gui, EmuEnvState &emuenv, const std::string &id);
 void reset_last_time_app_used(GuiState &gui, EmuEnvState &emuenv, const std::string &app);
 void update_last_time_app_used(GuiState &gui, EmuEnvState &emuenv, const std::string &app);
 void update_live_area_current_open_apps_list(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
-void update_notice_info(GuiState &gui, EmuEnvState &emuenv, const std::string &type);
+void update_notice_info(GuiState &gui, EmuEnvState &emuenv, const std::string &type, const std::string &id = "");
+void update_themes(GuiState &gui, EmuEnvState &emuenv, const std::string &content_id);
 void update_time_app_used(GuiState &gui, EmuEnvState &emuenv, const std::string &app);
 void save_notice_list(EmuEnvState &emuenv);
 void set_controller_overlay_state(int overlay_mask, bool edit = false, bool reset = false);
@@ -128,17 +157,20 @@ void draw_vita_area(GuiState &gui, EmuEnvState &emuenv);
 void draw_ui(GuiState &gui, EmuEnvState &emuenv);
 
 void draw_app_context_menu(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path);
-void draw_background(GuiState &gui, EmuEnvState &emuenv);
+void draw_background(GuiState &gui, EmuEnvState &emuenv, const bool is_image_background = true);
 void draw_common_dialog(GuiState &gui, EmuEnvState &emuenv);
 void draw_ime(Ime &ime, EmuEnvState &emuenv);
 void draw_info_message(GuiState &gui, EmuEnvState &emuenv);
 void draw_initial_setup(GuiState &gui, EmuEnvState &emuenv);
+void draw_pkg_install(GuiState &gui, EmuEnvState &emuenv);
 void draw_reinstall_dialog(GenericDialogState *status, GuiState &gui, EmuEnvState &emuenv);
 void draw_pre_compiling_shaders_progress(GuiState &gui, EmuEnvState &emuenv, const uint32_t &total);
 void draw_shaders_count_compiled(GuiState &gui, EmuEnvState &emuenv);
 void draw_trophies_unlocked(GuiState &gui, EmuEnvState &emuenv);
 void draw_touchpad_cursor(EmuEnvState &emuenv);
 void draw_perf_overlay(GuiState &gui, EmuEnvState &emuenv);
+void draw_update_history_infos(GuiState &gui, EmuEnvState &emuenv);
+void draw_notifications(GuiState &gui, EmuEnvState &emuenv);
 
 ImTextureID load_image(GuiState &gui, const uint8_t *data, const int size);
 

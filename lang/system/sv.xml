@@ -48,6 +48,13 @@
 	</app_context>
 	
 	<common>
+		<has_earned_platinum_trophy>har vunnit en platinatrophy i "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>har vunnit en trophy i "{}"!</has_earned_trophy>
+		<like>Gilla</like>
+		<likes_this>{} gillar detta.</likes_this>
+		<and_like_this>{} och {} gillar detta.</and_like_this>
+		<people_like_this>{} personer gillar detta.</people_like_this>
+		<first_time_playing>spelar "{}" för första gången.</first_time_playing>
 		<an_error_occurred>Ett fel har inträffat.
 Felkod: {}</an_error_occurred>
 		<cancel>Avbryt</cancel>
@@ -177,7 +184,18 @@ Felkod: {}</an_error_occurred>
 		<silver>Silver</silver>
 		<hours_ago>{} timmar sedan</hours_ago>
 		<minutes_ago>{} minuter sedan</minutes_ago>
+		<write_comment>Skriv kommentar</write_comment>
 	</common>
+
+	<contacts_pa>
+		<activities_of>{}s aktiviteter</activities_of>
+		<anyone>Alla</anyone>
+		<no_one>Ingen</no_one>
+		<cannot_display>Kunde inte visa fler sidor.</cannot_display>
+		<friends_of_friends>Vänners vänner</friends_of_friends>
+		<friends_only>Bara vänner</friends_only>
+		<share_range>Delningsgränser:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Innehållshanterare">
 		<application name="Applikationer">

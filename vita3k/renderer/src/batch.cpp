@@ -117,28 +117,35 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
     } while (true);
 }
 
-void process_batches(renderer::State &state, const FeatureState &features, MemState &mem, Config &config) {
-    // always display a frame every 500ms
-    auto max_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + 500;
+bool process_batches(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, const bool non_blocking) {
+    constexpr uint32_t max_batches_per_iteration = 4;
+    uint32_t processed_batches = 0;
+    const auto max_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + 500;
 
     while (!state.should_display) {
+        if (non_blocking && (processed_batches >= max_batches_per_iteration))
+            break;
+
         // Try to wait for a batch (about 2 or 3ms, game should be fast for this)
         auto cmd_list = state.command_buffer_queue.top(3);
 
         if (!cmd_list || !is_cmd_ready(mem, *cmd_list)) {
             // beginning of the game or homebrew not using gxm
             if (state.context == nullptr)
-                return;
+                break;
 
             // keep the old behavior for opengl with vsync as it looks like the new one causes some issues
             if (state.current_backend == Backend::OpenGL && config.current_config.v_sync)
-                return;
+                break;
 
             if (!cmd_list || !wait_cmd(mem, *cmd_list)) {
-                auto curr_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                if (non_blocking)
+                    break;
+
+                const auto curr_time = duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
                 if (curr_time >= max_time)
                     // display a frame even though the game is not diplaying anything
-                    return;
+                    break;
 
                 // this mean the command is still not ready, check if we can display it again
                 continue;
@@ -147,7 +154,10 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
 
         state.command_buffer_queue.pop();
         process_batch(state, features, mem, config, *cmd_list);
+        processed_batches++;
     }
+
+    return state.should_display;
 }
 
 void reset_command_list(CommandList &command_list) {

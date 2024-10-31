@@ -49,7 +49,7 @@ void draw_online_storage(GuiState &gui, EmuEnvState &emuenv) {
     const auto APP_INDEX = get_app_index(gui, app_path);
     const auto &app_titleid = APP_INDEX->title_id;
     const auto &app_title = APP_INDEX->title;
-    const auto &app_icon = gui.app_selector.user_apps_icon[app_path];
+    const auto &app_icon = gui.app_selector.vita_apps_icon[app_path];
 
     auto &storage_state = emuenv.v3kn.storage_state;
     auto &lang = gui.lang.online_storage;
@@ -71,10 +71,7 @@ void draw_online_storage(GuiState &gui, EmuEnvState &emuenv) {
     ImGui::SetCursorPos(ImVec2(10.f * SCALE.x, 10.f * SCALE.y));
     if (ImGui::Button("X", CLOSE_BUTTON_SIZE)) {
         gui.vita_area.online_storage = false;
-        if (gui.live_area_app_current_open >= 0)
-            gui.vita_area.live_area_screen = true;
-        else
-            gui.vita_area.home_screen = true;
+        gui.vita_area.home_screen = true;
     }
     ImGui::PopStyleVar();
 

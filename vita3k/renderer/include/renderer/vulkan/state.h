@@ -98,12 +98,14 @@ struct VKState : public renderer::State {
     Queue<WaitThreadRequest> request_queue;
 
     vkutil::Image default_image;
+    vkutil::Image default_cubemap_image;
     vkutil::Buffer default_buffer;
 
     bool support_fsr = false;
     // support for the VK_KHR_uniform_buffer_standard_layout extension, needed for memory mapping and texture viewport
     bool support_standard_layout = false;
     bool support_rasterized_order_access = false;
+    bool support_sampler_mirror_clamp_to_edge = false;
 
 #ifdef __ANDROID__
     bool support_android_buffer_import = false;

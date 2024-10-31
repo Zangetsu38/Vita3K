@@ -991,9 +991,10 @@ EXPORT(int, sceKernelCloseMsgPipe) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelCloseMutex) {
-    TRACY_FUNC(sceKernelCloseMutex);
-    return UNIMPLEMENTED();
+EXPORT(int, sceKernelCloseMutex, SceUID mutexId) {
+    TRACY_FUNC(sceKernelCloseMutex, mutexId);
+    LOG_INFO("Closing mutex {}", mutexId);
+    return mutex_close(emuenv.kernel, export_name, thread_id, mutexId);
 }
 
 EXPORT(int, sceKernelCloseMutex_089) {
@@ -1038,7 +1039,8 @@ EXPORT(SceUID, sceKernelCreateCallback, char *name, SceUInt32 attr, Ptr<SceKerne
 
 EXPORT(int, sceKernelCreateThreadForUser, const char *name, SceKernelThreadEntry entry, int init_priority, SceKernelCreateThread_opt *options) {
     TRACY_FUNC(sceKernelCreateThreadForUser, name, entry, init_priority, options);
-    if (options->cpu_affinity_mask & ~SCE_KERNEL_CPU_MASK_USER_ALL) {
+    if (options->cpu_affinity_mask & ~(SCE_KERNEL_CPU_MASK_USER_ALL | 0x80000)) {
+        LOG_DEBUG("cpu_affinity_mask: {}", options->cpu_affinity_mask);
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_CPU_AFFINITY);
     }
 

@@ -24,6 +24,7 @@
 #include <queue>
 
 namespace shader::usse {
+
 bool is_kill(const std::uint64_t inst) {
     return (inst >> 59) == 0b11111 && (((inst >> 32) & ~0xF8FFFFFF) >> 24) == 1 && ((inst >> 32) & ~0xFFCFFFFF) >> 20 == 3;
 }
@@ -235,7 +236,7 @@ void get_attribute_informations(const SceGxmProgram &program, AttributeInformati
             }
 
             bool regformat = (vertex_varyings_ptr->untyped_pa_regs & ((uint64_t)1 << parameter.resource_index)) != 0;
-            locmap.emplace(parameter.resource_index, AttributeInformation(fcount_allocated / 4, parameter.type, parameter.component_count, is_integer, is_signed, regformat));
+            locmap.emplace(parameter.resource_index, AttributeInformation(fcount_allocated / 4, parameter.array_size, parameter.type, parameter.component_count, is_integer, is_signed, regformat));
             fcount_allocated += ((parameter.array_size * parameter.component_count + 3) / 4) * 4;
         }
     }

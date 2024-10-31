@@ -232,6 +232,13 @@ COMMAND_SET_STATE(viewport) {
     }
 }
 
+COMMAND_SET_STATE(viewport_w) {
+    TRACY_FUNC_COMMANDS_SET_STATE(viewport_w);
+    render_context->record.viewport_w_buffering = helper.pop<bool>();
+    render_context->record.viewport_w_clamping = helper.pop<bool>();
+    render_context->record.viewport_w_clamp_value = helper.pop<float>();
+}
+
 COMMAND_SET_STATE(depth_bias) {
     TRACY_FUNC_COMMANDS_SET_STATE(depth_bias);
     const bool is_front = helper.pop<bool>();
@@ -541,6 +548,7 @@ COMMAND(handle_set_state) {
         { GXMState::RegionClip, cmd_set_state_region_clip },
         { GXMState::Program, cmd_set_state_program },
         { GXMState::Viewport, cmd_set_state_viewport },
+        { GXMState::ViewportW, cmd_set_state_viewport_w },
         { GXMState::DepthBias, cmd_set_state_depth_bias },
         { GXMState::DepthFunc, cmd_set_state_depth_func },
         { GXMState::DepthWriteEnable, cmd_set_state_depth_write_enable },

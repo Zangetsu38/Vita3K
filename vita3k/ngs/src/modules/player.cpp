@@ -82,6 +82,19 @@ void PlayerModule::on_param_change(const MemState &mem, ModuleData &data) {
 }
 
 void PlayerModule::set_default_preset(const MemState &mem, ModuleData &data) {
+    auto *params = data.info.data.cast<SceNgsPlayerParams>().get(mem);
+    if (params) {
+        memset(params, 0, sizeof(SceNgsPlayerParams));
+        params->descriptor.id = SCE_NGS_PLAYER_PARAMS_STRUCT_ID;
+        params->descriptor.size = sizeof(SceNgsPlayerParams);
+        params->playback_frequency = static_cast<float>(data.parent->rack->system->sample_rate);
+        params->playback_scalar = 1.0f;
+        params->channels = 2;
+        params->channel_map[0] = 0;
+        params->channel_map[1] = 1;
+        params->type = ParameterAudioTypePCM;
+    }
+
     SceNgsPlayerStates *state = data.get_state<SceNgsPlayerStates>();
     LOG_WARN_ONCE("Player reset state");
     *state = {};

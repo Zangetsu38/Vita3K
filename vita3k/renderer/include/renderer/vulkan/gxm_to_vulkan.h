@@ -47,7 +47,7 @@ vk::ComponentMapping translate_swizzle(SceGxmColorFormat format);
 namespace texture {
 vk::Format translate_format(SceGxmTextureBaseFormat base_format);
 vk::ComponentMapping translate_swizzle(SceGxmTextureFormat format);
-vk::SamplerAddressMode translate_address_mode(SceGxmTextureAddrMode src);
+vk::SamplerAddressMode translate_address_mode(SceGxmTextureAddrMode src, bool support_mirror_clamp_to_edge);
 vk::Filter translate_filter(SceGxmTextureFilter src);
 } // namespace texture
 

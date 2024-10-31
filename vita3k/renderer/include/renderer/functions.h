@@ -57,7 +57,7 @@ void reset_command_list(CommandList &command_list);
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list);
 bool is_cmd_ready(MemState &mem, CommandList &command_list);
 void process_batch(State &state, MemState &mem, Config &config, CommandList &command_list);
-void process_batches(State &state, const FeatureState &features, MemState &mem, Config &config);
+bool process_batches(State &state, const FeatureState &features, MemState &mem, Config &config, bool non_blocking = false);
 bool init(SDL_Window *window, std::unique_ptr<State> &state, Backend backend, const Config &config, const Root &root_paths);
 
 void set_depth_bias(State &state, Context *ctx, bool is_front, int factor, int units);
@@ -71,6 +71,7 @@ void set_program(State &state, Context *ctx, Ptr<const void> program, const bool
 void set_cull_mode(State &state, Context *ctx, SceGxmCullMode cull);
 void set_texture(State &state, Context *ctx, const std::uint32_t tex_index, const SceGxmTexture tex);
 void set_viewport_real(State &state, Context *ctx, float xOffset, float yOffset, float zOffset, float xScale, float yScale, float zScale);
+void set_viewport_w(State &state, Context *ctx, bool w_buffering, bool w_clamping, float w_clamp_value);
 void set_viewport_flat(State &state, Context *ctx);
 void set_region_clip(State &state, Context *ctx, SceGxmRegionClipMode mode, unsigned int xMin, unsigned int xMax, unsigned int yMin, unsigned int yMax);
 void set_two_sided_enable(State &state, Context *ctx, SceGxmTwoSidedMode mode);

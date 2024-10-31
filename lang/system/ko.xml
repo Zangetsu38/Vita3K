@@ -80,6 +80,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>님이 "{}"에서 플래티넘 트로피를 획득했습니다!</has_earned_platinum_trophy>
+		<has_earned_trophy>님이 "{}"에서 트로피를 획득했습니다!</has_earned_trophy>
+		<like>좋아요</like>
+		<likes_this>{}님이 좋아합니다.</likes_this>
+		<and_like_this>{}님과 {}님이 좋아합니다.</and_like_this>
+		<people_like_this>{} 명이 좋아합니다.</people_like_this>
+		<first_time_playing>님이 "{}"(을)를 처음으로 플레이하고 있습니다.</first_time_playing>
 		<an_error_occurred>에러기 발생했습니다.
 에러  코드: {}</an_error_occurred>
 		<cancel>취소</cancel>
@@ -209,10 +216,21 @@
 		<silver>실버</silver>
 		<hours_ago>{} 시간 전</hours_ago>
 		<minutes_ago>{} 분 전</minutes_ago>
+		<write_comment>코멘트 쓰기</write_comment>
 	</common>
 
 	<compatibility name="호환성">
 	</compatibility>
+
+	<contacts_pa>
+		<activities_of>{}님의 활동</activities_of>
+		<anyone>누구나</anyone>
+		<no_one>공개하지 않음</no_one>
+		<cannot_display>더 이상 페이지를 표시할 수 없습니다.</cannot_display>
+		<friends_of_friends>친구의 친구</friends_of_friends>
+		<friends_only>친구</friends_only>
+		<share_range>공개 범위:</share_range>
+	</contacts_pa>
 
 	<content_manager name="콘텐츠 관리">
 		<application name="애플리케이션">

@@ -19,10 +19,20 @@
 
 #include "../SceProcessmgr/SceProcessmgr.h"
 
+#include <audio/state.h>
+#include <kernel/state.h>
+#include <ngs/modules/compressor.h>
+#include <ngs/modules/mixer.h>
+#include <ngs/modules/pauser.h>
+#include <ngs/modules/player.h>
+#include <ngs/modules/reverb.h>
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/log.h>
 #include <util/tracy.h>
+#include <util/vector_utils.h>
+
+#include <algorithm>
 
 TRACY_MODULE_NAME(SceNgs);
 
@@ -80,6 +90,57 @@ enum SceNgsVoiceState : uint32_t {
 static constexpr SceUInt32 SCE_NGS_MODULE_FLAG_NOT_BYPASSED = 0;
 static constexpr SceUInt32 SCE_NGS_MODULE_FLAG_BYPASSED = 2;
 
+static const char *ngsBussTypeName(const ngs::BussType type) {
+    switch (type) {
+    case ngs::BussType::BUSS_MASTER:
+        return "MASTER";
+    case ngs::BussType::BUSS_COMPRESSOR:
+        return "COMPRESSOR";
+    case ngs::BussType::BUSS_SIDE_CHAIN_COMPRESSOR:
+        return "SIDE_CHAIN_COMPRESSOR";
+    case ngs::BussType::BUSS_DELAY:
+        return "DELAY";
+    case ngs::BussType::BUSS_DISTORTION:
+        return "DISTORTION";
+    case ngs::BussType::BUSS_ENVELOPE:
+        return "ENVELOPE";
+    case ngs::BussType::BUSS_EQUALIZATION:
+        return "EQUALIZATION";
+    case ngs::BussType::BUSS_MIXER:
+        return "MIXER";
+    case ngs::BussType::BUSS_PAUSER:
+        return "PAUSER";
+    case ngs::BussType::BUSS_PITCH_SHIFT:
+        return "PITCH_SHIFT";
+    case ngs::BussType::BUSS_REVERB:
+        return "REVERB";
+    case ngs::BussType::BUSS_SAS_EMULATION:
+        return "SAS_EMULATION";
+    case ngs::BussType::BUSS_SIMPLE:
+        return "SIMPLE";
+    case ngs::BussType::BUSS_ATRAC9:
+        return "ATRAC9";
+    case ngs::BussType::BUSS_SIMPLE_ATRAC9:
+        return "SIMPLE_ATRAC9";
+    case ngs::BussType::BUSS_SCREAM:
+        return "SCREAM";
+    case ngs::BussType::BUSS_SCREAM_ATRAC9:
+        return "SCREAM_ATRAC9";
+    case ngs::BussType::BUSS_NORMAL_PLAYER:
+        return "NORMAL_PLAYER";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static bool ngsVoiceHasActivePatch(const ngs::Voice *voice, MemState &mem);
+static bool ngsVoiceHasAudibleOutput(const ngs::Voice *voice, int granularity);
+static ngs::Voice *ngsFindMasterVoice(ngs::System *system, MemState &mem);
+static bool ngsTryReplaceImplicitMasterPatch(ngs::Voice *source, ngs::Voice *dest, SceNgsPatchSetupInfo *patch_info, Ptr<ngs::Patch> *handle, MemState &mem);
+static SceUInt32 ngsVoiceStateFromHLEState(const ngs::Voice *voice);
+
+// static ngs::Patch *g_last_created_patch = nullptr;
+
 enum SceNgsVoiceInitFlag {
     SCE_NGS_VOICE_INIT_BASE = 0,
     SCE_NGS_VOICE_INIT_ROUTING = 1,
@@ -89,6 +150,36 @@ enum SceNgsVoiceInitFlag {
 };
 
 static constexpr uint32_t SCE_NGS_SAMPLE_OFFSET_FROM_AT9_HEADER = 1 << 31;
+
+template <typename T>
+static void write_default_module_preset(void *params_buffer, const T &params) {
+    memcpy(params_buffer, &params, sizeof(T));
+}
+
+static void ngs_mark_rack_released(ngs::Rack *rack, MemState &mem, const bool remove_from_queue) {
+    rack->is_released = true;
+
+    for (const auto &voice : rack->voices) {
+        ngs::Voice *voice_ptr = voice.get(mem);
+        rack->system->voice_scheduler.released_voices_during_update.insert(voice_ptr);
+
+        if (remove_from_queue) {
+            rack->system->voice_scheduler.deque_voice(voice_ptr);
+        }
+    }
+}
+
+static void ngs_queue_rack_release(ngs::State &state, ngs::Rack *rack, const Ptr<void> callback, bool *completed = nullptr) {
+    ngs::OperationPending op;
+    op.type = ngs::PendingType::ReleaseRack;
+    op.system = rack->system;
+    op.release_data.state = &state;
+    op.release_data.rack = rack;
+    op.release_data.generation = rack->generation;
+    op.release_data.completed = completed;
+    op.release_data.callback = callback.address();
+    rack->system->voice_scheduler.operations_pending.push(op);
+}
 
 EXPORT(int, sceNgsAT9GetSectionDetails, uint32_t samples_start, const uint32_t num_samples, uint32_t config_data, SceNgsAT9SkipBufferInfo *info) {
     TRACY_FUNC(sceNgsAT9GetSectionDetails, samples_start, num_samples, config_data, info);
@@ -179,7 +270,71 @@ EXPORT(int, sceNgsModuleGetNumPresets, ngs::System *system, const SceUInt32 modu
 
 EXPORT(int, sceNgsModuleGetPreset, ngs::System *system, const SceUInt32 module, const SceUInt32 preset_index, void *params_buffer) {
     TRACY_FUNC(sceNgsModuleGetPreset, system, module, preset_index, params_buffer);
-    return UNIMPLEMENTED();
+
+    if (!emuenv.cfg.current_config.ngs_enable)
+        return SCE_NGS_OK;
+
+    if (!params_buffer)
+        return SCE_NGS_ERROR_INVALID_ARG;
+
+    switch (module) {
+    case 0x5CE1: {
+        SceNgsCompressorParams params{};
+        params.desc.id = SCE_NGS_COMPRESSOR_PARAMS_STRUCT_ID;
+        params.desc.size = sizeof(params);
+        params.fRatio = 1.0f;
+        write_default_module_preset(params_buffer, params);
+        break;
+    }
+    case 0x5CE5: {
+        SceNgsPauserParams params{};
+        params.desc.id = SCE_NGS_PAUSER_PARAMS_STRUCT_ID;
+        params.desc.size = sizeof(params);
+        write_default_module_preset(params_buffer, params);
+        break;
+    }
+    case 0x5CE6: {
+        SceNgsPlayerParams params{};
+        params.descriptor.id = SCE_NGS_PLAYER_PARAMS_STRUCT_ID;
+        params.descriptor.size = sizeof(params);
+        params.playback_frequency = system ? static_cast<float>(system->sample_rate) : 48000.0f;
+        params.playback_scalar = 1.0f;
+        params.channels = 2;
+        params.channel_map[0] = 0;
+        params.channel_map[1] = 1;
+        params.type = ParameterAudioTypePCM;
+        write_default_module_preset(params_buffer, params);
+        break;
+    }
+    case 0x5CE7: {
+        SceNgsReverbParams params{};
+        params.desc.id = SCE_NGS_REVERB_PARAMS_STRUCT_ID;
+        params.desc.size = sizeof(params);
+        params.fDiffusion = 1.0f;
+        params.fDensity = 1.0f;
+        write_default_module_preset(params_buffer, params);
+        break;
+    }
+    case 0x5CE9: {
+        SceNgsMixerParams params{};
+        params.desc.id = SCE_NGS_MIXER_PARAMS_STRUCT_ID;
+        params.desc.size = sizeof(params);
+        params.fGainIn[0] = 1.0f;
+        params.fGainIn[1] = 1.0f;
+        write_default_module_preset(params_buffer, params);
+        break;
+    }
+    default:
+        memset(params_buffer, 0, sizeof(SceNgsParamsDescriptor));
+        LOG_DEBUG("sceNgsModuleGetPreset: returning zeroed params for unknown module={} preset_index={}",
+            module, preset_index);
+        break;
+    }
+
+    LOG_DEBUG("sceNgsModuleGetPreset: returning empty preset for module={} preset_index={}",
+        module, preset_index);
+
+    return SCE_NGS_OK;
 }
 
 EXPORT(int, sceNgsPatchCreateRouting, SceNgsPatchSetupInfo *patch_info, Ptr<ngs::Patch> *handle) {
@@ -188,23 +343,44 @@ EXPORT(int, sceNgsPatchCreateRouting, SceNgsPatchSetupInfo *patch_info, Ptr<ngs:
         return 0;
     }
 
-    if (!patch_info || !handle)
+    if (!patch_info || !handle) {
+        // LOG_DEBUG("NGS patch create failed: null patch_info or handle");
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    }
 
-    if (!patch_info->source || !patch_info->dest)
+    if (!patch_info->source || !patch_info->dest) {
+        // LOG_DEBUG("NGS patch create failed: null source or dest handle");
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    }
 
     // Make the scheduler order this right based on dependencies request
     ngs::Voice *source = patch_info->source.get(emuenv.mem);
+    //  ngs::Voice *dest = patch_info->dest.get(emuenv.mem);
 
-    if (!source)
+    if (!source /* || !dest*/) {
+        // LOG_DEBUG("NGS patch create failed: unresolved source or dest voice (source={} dest={})", source != nullptr, dest != nullptr);
         return RET_ERROR(SCE_NGS_ERROR);
+    }
 
     *handle = source->rack->system->voice_scheduler.patch(emuenv.mem, patch_info);
 
     if (!*handle) {
+        /*      if (ngsTryReplaceImplicitMasterPatch(source, dest, patch_info, handle, emuenv.mem)) {
+                    g_last_created_patch = handle->get(emuenv.mem);
+                    return SCE_NGS_OK;
+                }
+        */
+        // LOG_DEBUG("NGS patch create failed: {} {}:{} -> {} in={}",
+        //     ngsBussTypeName(source->rack->vdef->type), patch_info->source_output_index, patch_info->source_output_subindex,
+        //     ngsBussTypeName(dest->rack->vdef->type), patch_info->dest_input_index);
         return RET_ERROR(SCE_NGS_ERROR);
     }
+
+    // g_last_created_patch = handle->get(emuenv.mem);
+    //  LOG_DEBUG("NGS patch created: {} {}:{} -> {} in={} (source_state={} dest_state={})",
+    //  ngsBussTypeName(source->rack->vdef->type), patch_info->source_output_index, patch_info->source_output_subindex,
+    //  dest ? ngsBussTypeName(dest->rack->vdef->type) : "UNKNOWN", patch_info->dest_input_index,
+    //  ngsVoiceStateFromHLEState(source), dest ? ngsVoiceStateFromHLEState(dest) : 0);
 
     return SCE_NGS_OK;
 }
@@ -291,6 +467,7 @@ EXPORT(SceUInt32, sceNgsRackGetVoiceHandle, ngs::Rack *rack, const uint32_t inde
     }
 
     *voice = rack->voices[index];
+    // LOG_DEBUG("NGS rack get voice handle: buss={} index={} handle={:#X}", ngsBussTypeName(rack->vdef->type), index, voice->address());
     return SCE_NGS_OK;
 }
 
@@ -320,25 +497,31 @@ EXPORT(SceInt32, sceNgsRackRelease, ngs::Rack *rack, Ptr<void> callback) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
     std::unique_lock<std::recursive_mutex> lock(rack->system->voice_scheduler.mutex);
+    if (rack->is_released)
+        return SCE_NGS_OK;
+
     if (!rack->system->voice_scheduler.is_updating) {
         ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
     } else if (!callback) {
-        // wait for the update to finish
-        // if this is called in an interrupt handler it will softlock ngs
-        // but I don't think this is allowed (and if it is I don't know how to prevent this)
-        LOG_WARN_ONCE("sceNgsRackRelease called in a synchronous way during a ngs update, contact devs if your game softlocks now.");
+        if (rack->system->voice_scheduler.updating_thread_id == thread_id) {
+            ngs_mark_rack_released(rack, emuenv.mem, false);
 
-        rack->system->voice_scheduler.condvar.wait(lock);
-        ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
+            ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
+            return SCE_NGS_OK;
+        }
+
+        ngs_mark_rack_released(rack, emuenv.mem, true);
+
+        bool completed = false;
+        ngs_queue_rack_release(emuenv.ngs, rack, Ptr<void>(), &completed);
+
+        rack->system->voice_scheduler.condvar.wait(lock, [&completed] {
+            return completed;
+        });
     } else {
-        // destroy rack asynchronously
-        ngs::OperationPending op;
-        op.type = ngs::PendingType::ReleaseRack;
-        op.system = rack->system;
-        op.release_data.state = &emuenv.ngs;
-        op.release_data.rack = rack;
-        op.release_data.callback = callback.address();
-        rack->system->voice_scheduler.operations_pending.push(op);
+        ngs_mark_rack_released(rack, emuenv.mem, true);
+
+        ngs_queue_rack_release(emuenv.ngs, rack, callback);
     }
 
     return SCE_NGS_OK;
@@ -403,9 +586,19 @@ EXPORT(SceInt32, sceNgsSystemRelease, ngs::System *system) {
     return SCE_NGS_OK;
 }
 
-EXPORT(int, sceNgsSystemSetFlags) {
-    TRACY_FUNC(sceNgsSystemSetFlags);
-    return UNIMPLEMENTED();
+EXPORT(int, sceNgsSystemSetFlags, ngs::System *system, const SceUInt32 system_flags) {
+    TRACY_FUNC(sceNgsSystemSetFlags, system, system_flags);
+    if (!emuenv.cfg.current_config.ngs_enable) {
+        return 0;
+    }
+
+    if (!system)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+
+    system->flags = system_flags;
+    LOG_DEBUG("sceNgsSystemSetFlags: flags={:#X}", system_flags);
+
+    return SCE_NGS_OK;
 }
 
 EXPORT(int, sceNgsSystemSetParamErrorCallback) {
@@ -423,7 +616,6 @@ EXPORT(SceUInt32, sceNgsSystemUpdate, ngs::System *system) {
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
     }
-
     system->voice_scheduler.update(emuenv.kernel, emuenv.mem, thread_id);
 
     return SCE_NGS_OK;
@@ -611,6 +803,109 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetTemplate1) {
     return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_NORMAL_PLAYER);
 }
 
+/*
+static bool ngsVoiceHasActivePatch(const ngs::Voice *voice, MemState &mem) {
+    for (const auto &patches : voice->patches) {
+        for (const auto &patch_ptr : patches) {
+            if (patch_ptr && patch_ptr.get(mem)->output_sub_index != -1) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool ngsVoiceHasAudibleOutput(const ngs::Voice *voice, const int granularity) {
+    const float *source_data = reinterpret_cast<const float *>(voice->products[0].data);
+
+    for (int i = 0; i < granularity * 2; i++) {
+        if (std::abs(source_data[i]) > 0.0001f) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+static ngs::Voice *ngsFindMasterVoice(ngs::System *system, MemState &mem) {
+    if (!system) {
+        return nullptr;
+    }
+
+    for (ngs::Rack *rack : system->racks) {
+        if (rack && rack->vdef && rack->vdef->type == ngs::BussType::BUSS_MASTER && !rack->voices.empty()) {
+            return rack->voices[0].get(mem);
+        }
+    }
+
+    return nullptr;
+}
+
+static bool ngsTryReplaceImplicitMasterPatch(ngs::Voice *source, ngs::Voice *dest, SceNgsPatchSetupInfo *patch_info, Ptr<ngs::Patch> *handle, MemState &mem) {
+    if (!source || !dest || !patch_info || !handle || !source->rack || !source->rack->system) {
+        return false;
+    }
+
+    if (patch_info->source_output_index < 0 || patch_info->source_output_index >= static_cast<SceInt32>(source->patches.size())) {
+        return false;
+    }
+
+    ngs::Voice *master_voice = ngsFindMasterVoice(source->rack->system, mem);
+    if (!master_voice || dest == master_voice) {
+        return false;
+    }
+
+    Ptr<ngs::Patch> implicit_master_patch;
+    int active_patch_count = 0;
+
+    for (const Ptr<ngs::Patch> &patch_ptr : source->patches[patch_info->source_output_index]) {
+        if (!patch_ptr) {
+            continue;
+        }
+
+        ngs::Patch *patch = patch_ptr.get(mem);
+        if (!patch || patch->output_sub_index == -1) {
+            continue;
+        }
+
+        active_patch_count++;
+
+        if (patch->dest == master_voice) {
+            implicit_master_patch = patch_ptr;
+            continue;
+        }
+
+        return false;
+    }
+
+    if (!implicit_master_patch || active_patch_count != 1) {
+        return false;
+    }
+
+    ngs::Patch *patch = implicit_master_patch.get(mem);
+    if (patch_info->source_output_subindex != -1 && patch->output_sub_index != patch_info->source_output_subindex) {
+        return false;
+    }
+
+    const SceInt32 previous_subindex = patch->output_sub_index;
+    patch->output_sub_index = -1;
+
+    *handle = source->rack->system->voice_scheduler.patch(mem, patch_info);
+    if (!*handle) {
+        patch->output_sub_index = previous_subindex;
+        return false;
+    }
+
+    //("NGS patch create replaced implicit MASTER route: {} {}:{} -> {} in={}",
+    //    ngsBussTypeName(source->rack->vdef->type), patch_info->source_output_index, patch_info->source_output_subindex,
+    //    ngsBussTypeName(dest->rack->vdef->type), patch_info->dest_input_index);
+
+    return true;
+}
+*/
+
 static SceUInt32 ngsVoiceStateFromHLEState(const ngs::Voice *voice) {
     SceUInt32 state;
     switch (voice->state) {
@@ -774,6 +1069,19 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
     }
 
     if (init_flags & SCE_NGS_VOICE_INIT_ROUTING) {
+        /*      uint32_t active_patch_count = 0;
+                for (const auto &patches : voice->patches) {
+                    for (const auto &patch : patches) {
+                        if (patch && patch.get(emuenv.mem)->output_sub_index != -1) {
+                            active_patch_count++;
+                        }
+                    }
+                }
+
+                if (active_patch_count > 0) {
+                    // LOG_DEBUG("NGS voice routing reset: buss={} active_patches={}", ngsBussTypeName(voice->rack->vdef->type), active_patch_count);
+                }
+        */
         // reset all patches
         for (auto &patches : voice->patches) {
             for (auto &patch : patches) {
@@ -782,6 +1090,50 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
                 }
             }
         }
+
+        /*
+                if (voice->rack && voice->rack->vdef) {
+                    const auto type = voice->rack->vdef->type;
+                    const bool should_route_to_master = type == ngs::BussType::BUSS_COMPRESSOR
+                        || type == ngs::BussType::BUSS_SIDE_CHAIN_COMPRESSOR
+                        || type == ngs::BussType::BUSS_DELAY
+                        || type == ngs::BussType::BUSS_DISTORTION
+                        || type == ngs::BussType::BUSS_ENVELOPE
+                        || type == ngs::BussType::BUSS_EQUALIZATION
+                        || type == ngs::BussType::BUSS_MIXER
+                        || type == ngs::BussType::BUSS_PAUSER
+                        || type == ngs::BussType::BUSS_PITCH_SHIFT
+                        || type == ngs::BussType::BUSS_REVERB
+                        || type == ngs::BussType::BUSS_SAS_EMULATION;
+
+                    if (should_route_to_master) {
+                        ngs::Rack *master_rack = nullptr;
+                        for (ngs::Rack *candidate : voice->rack->system->racks) {
+                            if (candidate && candidate->vdef && candidate->vdef->type == ngs::BussType::BUSS_MASTER) {
+                                master_rack = candidate;
+                                break;
+                            }
+                        }
+
+                        if (master_rack && !master_rack->voices.empty()) {
+                            ngs::Voice *master_voice = master_rack->voices[0].get(emuenv.mem);
+                            bool already_routed_to_master = false;
+
+                            for (const auto &patch : voice->patches[0]) {
+                                if (patch && patch.get(emuenv.mem)->output_sub_index != -1 && patch.get(emuenv.mem)->dest == master_voice) {
+                                    already_routed_to_master = true;
+                                    break;
+                                }
+                            }
+
+                            if (!already_routed_to_master) {
+                                voice->patch(emuenv.mem, 0, -1, 0, master_voice);
+                                LOG_DEBUG("Re-routed NGS voice to MASTER after routing reset: buss={}", ngsBussTypeName(type));
+                            }
+                        }
+                    }
+                }
+        */
     }
 
     if (init_flags & SCE_NGS_VOICE_INIT_PRESET) {
@@ -810,19 +1162,16 @@ EXPORT(SceInt32, sceNgsVoiceKeyOff, ngs::Voice *voice) {
     if (!emuenv.cfg.current_config.ngs_enable) {
         return SCE_NGS_OK;
     }
-
     if (!voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
     voice->is_keyed_off = true;
-    voice->rack->system->voice_scheduler.off(emuenv.mem, voice);
+    if (!voice->rack->system->voice_scheduler.off(emuenv.mem, voice)) {
+        voice->is_keyed_off = false;
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
+    }
 
-    // call the finish callback, I got no idea what the module id should be in this case
-    voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
-
-    voice->is_keyed_off = false;
-    voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
     return SCE_NGS_OK;
 }
 
@@ -903,8 +1252,16 @@ EXPORT(SceInt32, sceNgsVoicePatchSetVolumesMatrix, ngs::Patch *patch, const SceN
     if (!emuenv.cfg.current_config.ngs_enable)
         return 0;
 
-    if (!patch || patch->output_sub_index == -1)
+    /*
+        if (!patch && g_last_created_patch && g_last_created_patch->output_sub_index != -1) {
+            LOG_DEBUG_ONCE("sceNgsVoicePatchSetVolumesMatrix: patch is null, using last created patch");
+            patch = g_last_created_patch;
+        }
+    */
+    if (!patch || patch->output_sub_index == -1) {
+        // LOG_DEBUG("NGS patch set volume matrix failed: patch={} output_sub_index={}", patch != nullptr, patch ? patch->output_sub_index : -2);
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    }
 
     memcpy(patch->volume_matrix, matrix->matrix, sizeof(matrix->matrix));
 
@@ -943,6 +1300,7 @@ EXPORT(SceUInt32, sceNgsVoicePlay, ngs::Voice *voice) {
 
     voice->is_pending = true;
     if (!voice->rack->system->voice_scheduler.play(emuenv.mem, voice)) {
+        voice->is_pending = false;
         return RET_ERROR(SCE_NGS_ERROR);
     }
     voice->is_pending = false;
@@ -959,9 +1317,6 @@ EXPORT(int, sceNgsVoiceResume, ngs::Voice *voice) {
     if (!voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
-
-    if (!voice->is_paused)
-        return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
 
     if (!voice->rack->system->voice_scheduler.resume(emuenv.mem, voice)) {
         return RET_ERROR(SCE_NGS_ERROR);
@@ -1021,6 +1376,9 @@ EXPORT(SceInt32, sceNgsVoiceSetParamsBlock, ngs::Voice *voice, const SceNgsModul
         *pNumErrors = num_errors;
     }
 
+    if (voice->rack->system->flags & 0)
+        return SCE_NGS_OK;
+
     if (num_errors == 0)
         return SCE_NGS_OK;
     else
@@ -1055,6 +1413,11 @@ EXPORT(SceInt32, sceNgsVoiceUnlockParams, ngs::Voice *voice, const SceUInt32 mod
 
     if (!data) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    }
+
+    if (voice->rack->system->flags & 0) {
+        data->unlock_params(emuenv.mem);
+        return SCE_NGS_OK;
     }
 
     if (!data->unlock_params(emuenv.mem)) {

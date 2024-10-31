@@ -22,9 +22,19 @@
 #include <gxm/functions.h>
 #include <renderer/functions.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include <util/log.h>
 
 namespace renderer::vulkan {
+
+static float sanitize_depth_clear_value(float depth) {
+    if (!std::isfinite(depth))
+        return 1.0f;
+
+    return std::clamp(depth, 0.0f, 1.0f);
+}
 
 void sync_clipping(VKContext &context) {
     if (!context.render_target)
@@ -111,7 +121,7 @@ void sync_depth_data(VKContext &context) {
         return;
 
     vk::ClearDepthStencilValue clear_value{
-        .depth = context.record.depth_stencil_surface.background_depth
+        .depth = sanitize_depth_clear_value(context.record.depth_stencil_surface.background_depth)
     };
     vk::ClearAttachment clear_attachment{
         .aspectMask = vk::ImageAspectFlagBits::eDepth,
@@ -120,7 +130,7 @@ void sync_depth_data(VKContext &context) {
     vk::ClearRect clear_rect{
         .rect = vk::Rect2D{
             .offset = { 0, 0 },
-            .extent = { context.render_target->width, context.render_target->height } },
+            .extent = { context.current_framebuffer_width, context.current_framebuffer_height } },
         .baseArrayLayer = 0,
         .layerCount = 1
     };
@@ -141,7 +151,7 @@ void sync_stencil_data(VKContext &context, const MemState &mem) {
     vk::ClearRect clear_rect{
         .rect = vk::Rect2D{
             .offset = { 0, 0 },
-            .extent = { context.render_target->width, context.render_target->height } },
+            .extent = { context.current_framebuffer_width, context.current_framebuffer_height } },
         .baseArrayLayer = 0,
         .layerCount = 1
     };

@@ -67,6 +67,10 @@ void set_viewport_real(State &state, Context *ctx, float xOffset, float yOffset,
         zOffset, xScale, yScale, zScale);
 }
 
+void set_viewport_w(State &state, Context *ctx, bool w_buffering, bool w_clamping, float w_clamp_value) {
+    renderer::add_state_set_command(ctx, renderer::GXMState::ViewportW, w_buffering, w_clamping, w_clamp_value);
+}
+
 void set_viewport_flat(State &state, Context *ctx) {
     renderer::add_state_set_command(ctx, renderer::GXMState::Viewport, true);
 }

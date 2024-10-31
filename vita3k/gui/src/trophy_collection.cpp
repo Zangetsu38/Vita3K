@@ -401,7 +401,7 @@ void draw_trophy_collection(GuiState &gui, EmuEnvState &emuenv) {
 
     const auto TROPHY_PATH{ emuenv.pref_path / "ux0/user" / emuenv.io.user_id / "trophy" };
 
-    const auto BG_PATH = "NPXS10008";
+    const auto BG_PATH = "vs0:app/NPXS10008";
     const auto is_12_hour_format = emuenv.cfg.sys_time_format == SCE_SYSTEM_PARAM_TIME_FORMAT_12HOUR;
 
     ImGui::SetNextWindowPos(WINDOW_POS, ImGuiCond_Always);

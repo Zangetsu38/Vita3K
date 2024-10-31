@@ -146,6 +146,9 @@ typedef Ptr<const void> StreamData;
 
 struct GxmViewport {
     SceGxmViewportMode enable = SCE_GXM_VIEWPORT_ENABLED;
+    SceGxmWBufferMode w_buffer = SCE_GXM_WBUFFER_DISABLED;
+    SceGxmWClampMode w_clamp = SCE_GXM_WCLAMP_MODE_DISABLED;
+    float w_clamp_value = 0.0f;
     SceFVector3 offset;
     SceFVector3 scale;
 };

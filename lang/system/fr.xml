@@ -90,15 +90,26 @@
 	</app_context>
 
 	<common>
+		<activities>Activités</activities>
+		<has_earned_platinum_trophy>a obtenu un trophée platine dans "{}" !</has_earned_platinum_trophy>
+		<has_earned_trophy>a obtenu un trophée dans "{}" !</has_earned_trophy>
+		<like>J'aime</like>
+		<likes_this>{} aime ça.</likes_this>
+		<and_like_this>{} et {} aiment ça.</and_like_this>
+		<people_like_this>{} personnes aiment ça.</people_like_this>
+		<first_time_playing>joue à "{}" pour la première fois.</first_time_playing>
 		<an_error_occurred>Une erreur est survenue.
 Code d'erreur: {}</an_error_occurred>
 		<cancel>Annuler</cancel>
+		<comments>Commentaires {}</comments>
 		<connecting_please_wait>Connexion en cours...
 Merci de patienter.</connecting_please_wait>
 		<close>Fermer</close>
 		<could_not_load>Le chargement du fichier a échoué.</could_not_load>
 		<could_not_save>La sauvegarde du fichier a échoué.</could_not_save>
 		<delete>Supprimer</delete>
+		<delete_activity>Cette activité va être supprimée.</delete_activity>
+		<delete_comment>Ce commentaire va être supprimé.</delete_comment>
 		<error>Erreur</error>
 		<file_corrupted>Le fichier est corrompu.</file_corrupted>
 		<microphone_disabled>Activez le microphone.</microphone_disabled>
@@ -107,8 +118,11 @@ Merci de patienter.</connecting_please_wait>
 		<search>Recherche</search>
 		<select_all>Sélectionner tout</select_all>
 		<select>Sélectionner</select>
-		<yes>Oui</yes>
+		<send>Envoyer</send>
+		<sending>Envoi en cours...</sending>
+		<unlike>Je n'aime plus</unlike>
 		<could_not_connect_server>La connexion au serveur a échoué.</could_not_connect_server>	
+		<download_failed>Le téléchargement a échoué.</download_failed>
 		<must_sign_in_vita3k_network>Vous devez vous connecter à Vita3K Network pour utiliser cette fonctionnalité.</must_sign_in_vita3k_network>
 		<could_not_connect_internet>La connexion à Internet a échoué.</could_not_connect_internet>
 		<vita3k_network_connection_lost>La connexion à Vita3K Network a été interrompue.</vita3k_network_connection_lost>
@@ -226,6 +240,9 @@ Merci de patienter.</connecting_please_wait>
 		<silver>Argent</silver>
 		<hours_ago>Il y a {} heures</hours_ago>
 		<minutes_ago>Il y a {} minutes</minutes_ago>
+		<write_comment>Rédiger un commentaire</write_comment>
+		<yes>Oui</yes>
+		<is_now_friends_with>est désormais ami avec {}</is_now_friends_with>
 	</common>
 
 	<compatibility name="Compatibilité">
@@ -240,6 +257,26 @@ Merci de patienter.</connecting_please_wait>
 			<state id = "6">Jouable</state>
 		</states>
 	</compatibility>
+
+	<contact_pa>
+		<activities_of>Activités de {}</activities_of>
+		<anyone>Tout le monde</anyone>
+		<no_one>Personne</no_one>
+		<cannot_display>Impossible d'afficher plus de pages.</cannot_display>
+		<friends_of_friends>Amis d'amis</friends_of_friends>
+		<friends_only>Amis uniquement</friends_only>
+		<share_range>Niveau de partage :</share_range>
+	</contact_pa>
+
+	<contacts_pa>
+		<activities_of>Activités de {}</activities_of>
+		<anyone>Tout le monde</anyone>
+		<no_one>Personne</no_one>
+		<cannot_display>Impossible d'afficher plus de pages.</cannot_display>
+		<friends_of_friends>Amis d'amis</friends_of_friends>
+		<friends_only>Amis uniquement</friends_only>
+		<share_range>Niveau de partage :</share_range>
+	</contacts_pa>
 
 	<content_manager name="Gestionnaire de contenu">
 		<application name="Applications">
@@ -304,6 +341,55 @@ Ne pas éteindre le système, ni fermer l'application.</warning_saving>
 		</save_data>
 	</dialog>
 
+	<friend>
+		<accept>Accepter</accept>
+		<players_blocked>Joueurs bloqués</players_blocked>
+		<friend_request_already_canceled>Cette demande d'ami a déjà été annulée.</friend_request_already_canceled>
+		<search_for_player>Rechercher un joueur Vita3K Network et afficher son profil, ou envoyer une demande d'ami.</search_for_player>
+		<friend_requests>Demandes d'ami</friend_requests>
+		<friends>Amis</friends>
+		<could_not_find_online_id>L'ID en ligne est introuvable.</could_not_find_online_id>
+		<there_are_no_players>Aucun joueur.</there_are_no_players>
+		<no_players_found>Aucun joueur trouvé.</no_players_found>
+		<online_id>ID en ligne</online_id>
+		<enter_from_3_to_16_characters>Saisissez entre 3 et 16 caractères.</enter_from_3_to_16_characters>
+		<online_status>État en ligne</online_status>
+		<received>Reçues</received>
+		<search>Recherche</search>
+		<sent>Envoyées</sent>
+		<sign_in>Connexion</sign_in>
+		<waiting_for_friend_response>En attente d'une réponse d'un ami.</waiting_for_friend_response>
+	</friend>
+
+	<friend_profile>
+		<about_me>Mon profil</about_me>
+		<accept>Accepter</accept>
+	 	<activity>Activité</activity>
+		<warn_block_player>Si vous bloquez ce joueur, vous ne pourrez plus recevoir de messages de sa part.
+Continuer ?</warn_block_player>
+	    <warn_block_friend>Si vous bloquez ce joueur, il sera supprimé de votre liste d'amis. Vous ne pourrez plus recevoir de message de sa part.
+Continuer ?</warn_block_friend>
+		<block>Bloquer</block>
+		<blocked>Bloqué.</blocked>
+        <cancel_friend_request>Annuler la demande d'ami</cancel_friend_request>
+		<friend_request_canceled>La demande d'ami va être annulée.</friend_request_canceled>
+		<delete_request>Supprimer la demande</delete_request>
+		<edit_profile>Modifier le profil</edit_profile>
+		<friend_request_already_canceled>Cette demande d'ami a déjà été annulée.</friend_request_already_canceled>
+		<friends>Amis</friends>
+		<level>Niveau</level>
+		<not_a_friend_yet>Pas encore ami.</not_a_friend_yet>
+		<remove_from_friends>Supprimer de la liste d'amis</remove_from_friends>
+		<player_removed_from_friends>Ce joueur sera supprimé de votre liste d'amis.</player_removed_from_friends>
+		<send_friend_request>Envoyer la demande d'ami</send_friend_request>
+		<trophies>Trophées</trophies>
+		<unblock>Débloquer</unblock>
+		<unblock_player>Débloquer ce joueur.</unblock_player>
+		<waiting_friend_response>En attente d'une réponse d'un ami.</waiting_friend_response>
+		<friend_request_from_player>Ce joueur vous a envoyé une demande d'ami.</friend_request_from_player>
+		<you_have_friend_requests>Vous avez reçu des demandes d'ami.</you_have_friend_requests>
+	</friend_profile>
+
 	<game_data>
 		<app_close>L'application suivante va être fermée.</app_close>
 		<data_delete>Données à supprimer :</data_delete>
@@ -331,13 +417,32 @@ Ne pas éteindre le système, ni fermer l'application.</warning_saving>
 
 	<indicator>
 		<app_added_home>L'application a été ajoutée à l'écran d'accueil.</app_added_home>
+		<cancel_download>Annuler le téléchargement ?</cancel_download>
+		<cancel_install>Annuler l'installation ?
+Si vous annulez, les fichiers téléchargés pour cette installation seront également supprimés.</cancel_install>
 		<delete_all>Supprimer tout</delete_all>
 		<notif_deleted>Les notifications vont être supprimées.</notif_deleted>
+		<waiting_download>En attente du téléchargement...</waiting_download>
+		<downloading_complete>Téléchargement terminé.</downloading_complete>
 		<install_failed>L'installation a échoué.</install_failed>
+		<player_is_online>{} est maintenant en ligne.</player_is_online>
+		<waiting_install>En attente de l'installation...</waiting_install>
 		<install_complete>Installation terminée.</install_complete>
 		<installing>Installation en cours...</installing>
+		<minutes_left>{} minutes restantes</minutes_left>
 		<no_notif>Aucune notification.</no_notif>
+		<commented_on_activity>Quelqu'un a commenté l'activité de {}.</commented_on_activity>
+		<commented_on_your_activity>Quelqu'un a commenté votre activité.</commented_on_your_activity>
+		<commented_and_likes_your_activity>Quelqu'un a commenté votre activité et l'aime.</commented_and_likes_your_activity>
+		<likes_your_activity>Quelqu'un aime votre activité.</likes_your_activity>
+		<pause_all>Tout en pause</pause_all>
+		<pause>Pause</pause>
+		<paused>En pause</paused>
+		<resume_all>Tout reprendre</resume_all>
+		<resume>Reprendre</resume>
+		<seconds_left>{} secondes restantes</seconds_left>
 		<trophy_earned>Vous avez obtenu un trophée !</trophy_earned>
+		<friend_requests>Vous avez reçu des demandes d'ami.</friend_requests>
 	</indicator>
 
 	<initial_setup>
@@ -398,6 +503,17 @@ Appuyez sur 'Autoriser l'accès' pour continuer.</storage_file_permissions>
 		<upload>Téléchargement en amont</upload>
 		<uploaded>Téléchargée en amont</uploaded>
 	</online_storage>
+
+	<patch_check>
+		<new_app_version_available>Une nouvelle version de l'application est disponible.</new_app_version_available>
+		<latest_version_installed>La version la plus récente de l'application est déjà installée.</latest_version_installed>
+		<downloading_app_update>Téléchargement du fichier de mise à jour de l'application...
+Vous pouvez vérifier la progression du téléchargement dans la liste des notifications.</downloading_app_update>
+		<download>Télécharger</download>
+		<not_enough_space>Le téléchargement a échoué.
+Espace libre insuffisant sur la carte mémoire. Libérez au moins {} sur la carte mémoire, puis essayez de relancer le téléchargement.</not_enough_space>
+		<version>Version {}</version>
+	</patch_check>
 
 	<settings name="Paramètres">
 		<sound_display name="Son et affichage">

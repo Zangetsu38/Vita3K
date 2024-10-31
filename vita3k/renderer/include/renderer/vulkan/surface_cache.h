@@ -60,6 +60,8 @@ struct Framebuffer {
     vk::Framebuffer shader_interlock;
     // base color image used by the framebuffer
     vkutil::Image *base_image;
+    // base depth/stencil image used by the framebuffer
+    vkutil::Image *base_depth_stencil_image;
 };
 
 struct CastedTexture {
@@ -91,6 +93,9 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // same image with a different view(swizzle) used for sampling
     vk::ImageView alternate_view = nullptr;
+
+    // same image with a raw unsigned integer view, used for F16 NaN preservation
+    vk::ImageView raw_view = nullptr;
 
     // only used when upscaling is enabled, to downscale the image first
     std::unique_ptr<vkutil::Image> blit_image;
@@ -153,6 +158,8 @@ struct TextureLookupResult {
 // result when trying to retrieve a surface from the surface cache
 struct SurfaceRetrieveResult {
     vk::ImageView view;
+    vk::ImageView storage_view = nullptr;
+    vk::ImageView raw_view = nullptr;
     vkutil::Image *base_image;
 };
 
@@ -208,7 +215,7 @@ public:
     std::optional<TextureLookupResult> retrieve_depth_stencil_as_texture(const SceGxmTexture &texture, TextureViewport *texture_viewport);
 
     Framebuffer &retrieve_framebuffer_handle(MemState &mem, SceGxmColorSurface *color, SceGxmDepthStencilSurface *depth_stencil,
-        vk::RenderPass standard_render_pass, vk::RenderPass interlock_render_pass, vk::ImageView &color_view, vk::ImageView &ds_view);
+        vk::RenderPass standard_render_pass, vk::RenderPass interlock_render_pass, vk::ImageView &color_view, vk::ImageView &storage_color_view, vk::ImageView &raw_color_view, vk::ImageView &ds_view);
 
     // Check if the address is one of a used surface
     // If it is the case, this function returns true, moves the callback

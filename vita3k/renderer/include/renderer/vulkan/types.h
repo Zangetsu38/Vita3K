@@ -238,6 +238,8 @@ struct VKContext : public renderer::Context {
 
     vk::DescriptorImageInfo vertex_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     vk::DescriptorImageInfo fragment_textures[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+    bool vertex_textures_are_cube[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+    bool fragment_textures_are_cube[SCE_GXM_MAX_TEXTURE_UNITS] = {};
 
     bool vertex_uniform_storage_allocated = false;
     bool fragment_uniform_storage_allocated = false;
@@ -288,10 +290,14 @@ struct VKContext : public renderer::Context {
 
     vk::Framebuffer current_framebuffer;
     vk::Framebuffer current_shader_interlock_framebuffer = nullptr;
+    uint32_t current_framebuffer_width = 0;
+    uint32_t current_framebuffer_height = 0;
     // we need the format or image for some cases
     vkutil::Image *current_color_base_image;
     vk::Format current_color_format;
     vk::ImageView current_color_view;
+    vk::ImageView current_color_storage_view;
+    vk::ImageView current_color_raw_view;
     vk::ImageView current_ds_view;
 
     bool is_recording = false;
@@ -367,3 +373,4 @@ struct VKFragmentProgram : public renderer::FragmentProgram {
     uint64_t blending_hash;
 };
 } // namespace renderer::vulkan
+

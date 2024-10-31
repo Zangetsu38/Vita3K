@@ -122,6 +122,13 @@ depending on its size and your hardware.</delete_app_description>
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>has earned a platinum trophy in "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>has earned a trophy in "{}"!</has_earned_trophy>
+		<like>Like</like>
+		<likes_this>{} likes this.</likes_this>
+		<and_like_this>{} and {} like this.</and_like_this>
+		<people_like_this>{} people like this.</people_like_this>
+		<first_time_playing>is playing "{}" for the first time.</first_time_playing>
 		<an_error_occurred>An error occurred.
 Error code: {}</an_error_occurred>
 		<cancel>Cancel</cancel>
@@ -254,6 +261,7 @@ Error code: {}</an_error_occurred>
 		<silver>Silver</silver>
 		<hours_ago>{} Hours Ago</hours_ago>
 		<minutes_ago>{} Minutes Ago</minutes_ago>
+		<write_comment>Write Comment</write_comment>
 	</common>
 
 	<compatibility name="Compatibility">
@@ -289,6 +297,16 @@ Error code: {}</an_error_occurred>
 		<pipelines_compiled>{} pipelines compiled</pipelines_compiled>
 		<shaders_compiled>{} shaders compiled</shaders_compiled>
 	</compile_shaders>
+
+	<contacts_pa>
+		<activities_of>{}'s Activities</activities_of>
+		<anyone>Anyone</anyone>
+		<no_one>No One</no_one>
+		<cannot_display>Cannot display any more pages.</cannot_display>
+		<friends_of_friends>Friends of Friends</friends_of_friends>
+		<friends_only>Friends Only</friends_only>
+		<share_range>Share Range:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Content Manager">
 		<application name="Application">
@@ -569,6 +587,17 @@ Check vita3k.log to see console output for details.
 		<overlay_show_touch_switch>Show front/back touchscreen switch button.</overlay_show_touch_switch>
 		<l2_r2_triggers>L2/R2 triggers will be displayed only if PSTV mode is enabled.</l2_r2_triggers>
 	</overlay>
+
+	<patch_check>
+		<new_app_version_available>A new version of the application is available.</new_app_version_available>
+		<latest_version_installed>The latest version of the application is already installed.</latest_version_installed>
+		<downloading_app_update>Downloading the application update file...
+You can check the progress of the download in the notification list.</downloading_app_update>
+		<download>Download</download>
+		<not_enough_space>Could not download.
+There is not enough free space on the memory card.Create at least {} free space on the memory card, and then try to download again.</not_enough_space>
+		<version>Version {}</version>
+	</patch_check>
 
 	<performance_overlay>
 		<avg>Avg</avg>

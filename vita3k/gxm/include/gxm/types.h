@@ -111,6 +111,16 @@ enum SceGxmViewportMode : uint32_t {
     SCE_GXM_VIEWPORT_ENABLED = 0x00000000u
 };
 
+enum SceGxmWBufferMode : uint32_t {
+    SCE_GXM_WBUFFER_DISABLED = 0x00000000u,
+    SCE_GXM_WBUFFER_ENABLED = 0x00004000u
+};
+
+enum SceGxmWClampMode : uint32_t {
+    SCE_GXM_WCLAMP_MODE_DISABLED = 0x00000000u,
+    SCE_GXM_WCLAMP_MODE_ENABLED = 0x00008000u
+};
+
 enum SceGxmCullMode : uint32_t {
     SCE_GXM_CULL_NONE = 0x00000000u,
     SCE_GXM_CULL_CW = 0x00000001u,

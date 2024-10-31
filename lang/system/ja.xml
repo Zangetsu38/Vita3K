@@ -100,6 +100,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>さんが"{}"でプラチナトロフィーを獲得しました！</has_earned_platinum_trophy>
+		<has_earned_trophy>さんが"{}"でトロフィーを獲得しました！</has_earned_trophy>
+		<like>いいね</like>
+		<likes_this>{}さんがいいねと言っています。</likes_this>
+		<and_like_this>{}さんと{}さんがいいねと言っています。</and_like_this>
+		<people_like_this>{}人がいいねと言っています。</people_like_this>
+		<first_time_playing>さんが"{}"を初めてプレイしています。</first_time_playing>
 		<an_error_occurred>エラーが起きました。
 エラーコード：{}</an_error_occurred>
 		<cancel>キャンセル</cancel>
@@ -231,6 +238,7 @@
 		<silver>シルバー</silver>
 		<hours_ago>{}時間前</hours_ago>
 		<minutes_ago>{}分前</minutes_ago>
+		<write_comment>コメントを書く</write_comment>
 	</common>
 
 	<compatibility name="互換性">
@@ -260,6 +268,16 @@
 
 {} 件のアプリケーションがリストされています！</download_app_listed>
 	</compat_db>
+
+	<contacts_pa>
+		<activities_of>{}さんのアクティビティー</activities_of>
+		<anyone>誰にでも</anyone>
+		<no_one>公開しない</no_one>
+		<cannot_display>これ以上のページは表示できません。</cannot_display>
+		<friends_of_friends>フレンドのフレンドまで</friends_of_friends>
+		<friends_only>フレンドまで</friends_only>
+		<share_range>公開範囲:</share_range>
+	</contacts_pa>
 
 	<content_manager name="コンテンツ管理">
 		<application name="アプリケーション">

@@ -16,6 +16,8 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <v3kn/account.h>
+#include <v3kn/friend.h>
+#include <v3kn/messages.h>
 #include <v3kn/state.h>
 
 #include <config/state.h>
@@ -72,71 +74,82 @@ bool wait_for_v3kn_login(uint32_t timeout_ms) {
 }
 
 std::string get_v3kn_error_message(EmuEnvState &emuenv, const net_utils::WebResponse &response) {
-    std::string error_msg;
-    if (response.body.starts_with("ERR:") || !response.body.starts_with("OK:")) {
-        if (response.body == "ERR:MissingToken")
-            error_msg = emuenv.common_dialog.lang.common["must_sign_in_vita3k_network"];
-        else if (response.body == "ERR:InvalidToken")
-            error_msg = "Your session on Vita3K Network has expired. Please sign in again.";
-        else if (response.body == "ERR:MissingTitleID")
-            error_msg = "V3KN get error Missing title ID.";
-        else if (response.body == "ERR:UserExists")
-            error_msg = "V3KN create account error User already exists.";
-        else if (response.body == "ERR:MissingPassword")
-            error_msg = "V3KN get error Missing password.";
-        else if (response.body == "ERR:InvalidOnlineID")
-            error_msg = "Invalid Online ID for V3KN.\nMake sure it follows the required format.";
-        else if (response.body == "ERR:InvalidPassword")
-            error_msg = "V3KN login/change password/delete error Invalid password.";
-        else if (response.body == "ERR:ServerError")
-            error_msg = "V3KN server error.";
-        else if (response.body == "ERR:QuotaExceeded")
-            error_msg = "V3KN error Quota exceeded.";
-        else if (response.body == "ERR:UserNotFound")
-            error_msg = "V3KN login error User not found.";
-        else if (response.body == "ERR:InvalidType")
-            error_msg = "V3KN error Invalid type of download file.";
-        else if (response.body == "ERR:InvalidID")
-            error_msg = "V3KN error Invalid ID of App.";
-        else if (response.body == "ERR:FileNotFound")
-            error_msg = "V3KN error File not found.";
-        else if (response.body == "ERR:MissingNewPassword")
-            error_msg = "V3KN change password error Missing new password.";
-        else if (response.body == "ERR:MissingOldPassword")
-            error_msg = "V3KN change password error Missing old password.";
-        else if (response.body == "ERR:SamePassword")
-            error_msg = "V3KN change password error New password cannot be same as the old password.";
-        else if (response.body == "ERR:MissingTargetOnlineId")
-            error_msg = "V3KN error Missing target online ID.";
-        else if (response.body == "ERR:AlreadyFriends")
-            error_msg = "V3KN error Already friends with this user.";
-        else if (response.body == "ERR:RequestAlreadySent")
-            error_msg = "V3KN error Friend request already sent to this user.";
-        else if (response.body == "ERR:NoRequestFound")
-            error_msg = "V3KN error No friend request found from this user.";
-        else if (response.body == "ERR:CannotAddYourself")
-            error_msg = "V3KN error Cannot add yourself as a friend.";
-        else if (response.body == "ERR:AboutMeTooLong")
-            error_msg = "V3KN error 'About Me' text is too long.";
-        else if (response.body == "ERR:OutdatedClient")
-            error_msg = "Outdated client version. Please update Vita3K to the latest version.";
-        else if (response.body.empty()) {
-            if (response.curl_res == 3)
-                error_msg = "V3KN get error Malformed URL, check server URL.";
-            else if (response.curl_res == 6)
-                error_msg = emuenv.common_dialog.lang.common["could_not_connect_internet"];
-            else if (response.curl_res == 7)
-                error_msg = emuenv.common_dialog.lang.common["could_not_connect_server"];
-            else if ((response.curl_res == 55) || (response.curl_res == 56))
-                error_msg = emuenv.common_dialog.lang.common["vita3k_network_connection_lost"];
-            else
-                error_msg = fmt::format("V3KN get Unexpected server error: {}", response.curl_res);
-        } else {
-            error_msg = fmt::format("V3KN: Unexpected server response: {}", response.body);
+    // 1. HTTP errors (Cloudflare, server down, etc.)
+    if (response.http_code / 100 != 2) {
+        if (response.http_code == 530)
+            return emuenv.common_dialog.lang.common["could_not_connect_server"];
+
+        return fmt::format("V3KN server returned HTTP error {}", response.http_code);
+    }
+
+    // 2. V3KN OK responses
+    if (response.body.starts_with("OK:"))
+        return ""; // no error
+
+    // 3. V3KN errors (ERR:xxx)
+    const auto &b = response.body;
+
+    if (b == "ERR:MissingToken")
+        return emuenv.common_dialog.lang.common["must_sign_in_vita3k_network"];
+    if (b == "ERR:InvalidToken")
+        return "Your session on Vita3K Network has expired. Please sign in again.";
+    if (b == "ERR:MissingTitleID")
+        return "V3KN get error Missing title ID.";
+    if (b == "ERR:UserExists")
+        return "V3KN create account error User already exists.";
+    if (b == "ERR:MissingPassword")
+        return "V3KN get error Missing password.";
+    if (b == "ERR:InvalidOnlineID")
+        return "Invalid Online ID for V3KN.\nMake sure it follows the required format.";
+    if (b == "ERR:InvalidPassword")
+        return "V3KN login/change password/delete error Invalid password.";
+    if (b == "ERR:ServerError")
+        return "V3KN server error.";
+    if (b == "ERR:QuotaExceeded")
+        return "V3KN error Quota exceeded.";
+    if (b == "ERR:UserNotFound")
+        return "V3KN login error User not found.";
+    if (b == "ERR:InvalidType")
+        return "V3KN error Invalid type of download file.";
+    if (b == "ERR:InvalidID")
+        return "V3KN error Invalid ID of App.";
+    if (b == "ERR:FileNotFound")
+        return "V3KN error File not found.";
+    if (b == "ERR:MissingNewPassword")
+        return "V3KN change password error Missing new password.";
+    if (b == "ERR:MissingOldPassword")
+        return "V3KN change password error Missing old password.";
+    if (b == "ERR:SamePassword")
+        return "V3KN change password error New password cannot be same as the old password.";
+    if (b == "ERR:MissingTargetOnlineId")
+        return "V3KN error Missing target online ID.";
+    if (b == "ERR:AlreadyFriends")
+        return "V3KN error Already friends with this user.";
+    if (b == "ERR:RequestAlreadySent")
+        return "V3KN error Friend request already sent to this user.";
+    if (b == "ERR:NoRequestFound")
+        return "V3KN error No friend request found from this user.";
+    if (b == "ERR:CannotAddYourself")
+        return "V3KN error Cannot add yourself as a friend.";
+    if (b == "ERR:AboutMeTooLong")
+        return "V3KN error 'About Me' text is too long.";
+    if (b == "ERR:OutdatedClient")
+        return "Outdated client version. Please update Vita3K to the latest version.";
+
+    // 4. Curl errors (network)
+    if (b.empty()) {
+        switch (response.curl_res) {
+        case 3: return "V3KN get error Malformed URL, check server URL.";
+        case 6: return emuenv.common_dialog.lang.common["could_not_connect_internet"];
+        case 7: return emuenv.common_dialog.lang.common["could_not_connect_server"];
+        case 55:
+        case 56: return emuenv.common_dialog.lang.common["vita3k_network_connection_lost"];
+        default: return fmt::format("V3KN get Unexpected server error: {}", response.curl_res);
         }
     }
 
-    return error_msg;
+    // 5 Unknown server response
+    return fmt::format("V3KN: Unexpected server response: {}", b);
 }
 
 std::string get_v3kn_server_url(const std::string &host, const std::string &path) {
@@ -259,8 +272,23 @@ void save_v3kn_user_info(EmuEnvState &emuenv) {
 }
 
 void init_v3kn_user_info(GuiState &gui, EmuEnvState &emuenv) {
+    auto &friends_state = emuenv.v3kn.friends_state;
+    stop_friend_polling(friends_state);
+
+    auto &messages_state = emuenv.v3kn.messages_state;
+    stop_messages_polling(messages_state);
+
+    // waits handled in stop_friends_polling and stop_messages_polling
+
+    cleanup_friend_state(friends_state);
+    cleanup_messages_state(messages_state);
+
     gui.v3kn_avatar = {};
+    gui.friends_avatar.clear();
     gui.v3kn_panel = {};
+    gui.friends_panel.clear();
+    friends_state.self_panel_bg_color.reset();
+    friends_state.friends_panel_bg_color.clear();
 
     auto &account_state = emuenv.v3kn.account_state;
     auto &user_info = account_state.user_info;
@@ -346,6 +374,11 @@ void init_v3kn_user_info(GuiState &gui, EmuEnvState &emuenv) {
 
     set_v3kn_logged_in(true);
 
+    load_activity_cache(emuenv);
+    flush_activity_cache(emuenv);
+    start_friend_polling(gui, emuenv);
+    start_friend_presence(gui, emuenv);
+    start_messages_polling(gui, emuenv);
     start_trophy_auto_sync(gui, emuenv);
     set_v3kn_login_init_completed(true);
     LOG_INFO("V3KN user info: successfully logged in as {}", user_info.online_id);

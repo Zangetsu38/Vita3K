@@ -18,6 +18,10 @@
 #include <config/state.h>
 #include <gui/functions.h>
 #include <io/state.h>
+#include <v3kn/friend.h>
+#include <v3kn/state.h>
+
+#include <lang/functions.h>
 
 #include <SDL3/SDL_events.h>
 
@@ -89,7 +93,7 @@ static void draw_emulation_menu(GuiState &gui, EmuEnvState &emuenv) {
         const auto app_list_is_empty = gui.time_apps[emuenv.io.user_id].empty();
         ImGui::SetNextWindowSize(ImVec2(!app_list_is_empty ? 480.f * SCALE.x : 0.f, 0.f));
         if (ImGui::BeginMenu(lang["last_apps_used"].c_str())) {
-            ImGui::SetWindowFontScale(RES_SCALE.x);
+            ImGui::SetWindowFontScale(1.2f * RES_SCALE.x);
             if (!app_list_is_empty) {
                 for (size_t i = 0; i < std::min<size_t>(8, gui.time_apps[emuenv.io.user_id].size()); i++) {
                     const auto &time_app = gui.time_apps[emuenv.io.user_id][i];
@@ -103,7 +107,9 @@ static void draw_emulation_menu(GuiState &gui, EmuEnvState &emuenv) {
         }
         if (!emuenv.cfg.display_system_apps) {
             ImGui::Separator();
-            for (const auto &app : gui.app_selector.sys_apps)
+            for (const auto &app : gui.app_selector.emu_apps)
+                draw_app(app);
+            for (const auto &app : gui.app_selector.vita_apps["vs0"])
                 draw_app(app);
         }
         ImGui::EndMenu();
@@ -128,7 +134,7 @@ static void draw_debug_menu(GuiState &gui, DebugMenuState &state) {
 
 static void draw_config_menu(GuiState &gui, EmuEnvState &emuenv) {
     auto &lang = gui.lang.main_menubar.configuration;
-    const auto CUSTOM_CONFIG_PATH{ emuenv.config_path / "config" / fmt::format("config_{}.xml", emuenv.io.app_path) };
+    const auto CUSTOM_CONFIG_PATH{ emuenv.config_path / "config" / fmt::format("config_{}.xml", fs::path(emuenv.io.app_path).stem().string()) };
     auto &settings_dialog = !emuenv.io.app_path.empty() && fs::exists(CUSTOM_CONFIG_PATH) ? gui.configuration_menu.custom_settings_dialog : gui.configuration_menu.settings_dialog;
     if (ImGui::BeginMenu(lang["title"].c_str())) {
         if (ImGui::MenuItem(gui.lang.settings_dialog.main_window["title"].c_str(), nullptr, &settings_dialog))
@@ -159,6 +165,8 @@ static void draw_help_menu(GuiState &gui) {
         if (ImGui::MenuItem(gui.lang.vita3k_update["title"].c_str(), nullptr, &gui.help_menu.vita3k_update))
             init_vita3k_update(gui);
         ImGui::MenuItem(lang["welcome"].c_str(), nullptr, &gui.help_menu.welcome_dialog);
+        // if (ImGui::MenuItem("set lang"))
+        //     lang::set_lang_string();
         ImGui::EndMenu();
     }
 }
@@ -167,7 +175,7 @@ void draw_main_menu_bar(GuiState &gui, EmuEnvState &emuenv) {
     if (ImGui::BeginMainMenuBar()) {
         const ImVec2 RES_SCALE(emuenv.gui_scale.x, emuenv.gui_scale.y);
 
-        ImGui::SetWindowFontScale(RES_SCALE.x);
+        ImGui::SetWindowFontScale(1.2f * RES_SCALE.x);
         ImGui::PushStyleColor(ImGuiCol_Text, GUI_COLOR_TEXT_MENUBAR);
 
         draw_file_menu(gui, emuenv);

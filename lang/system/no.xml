@@ -48,6 +48,13 @@
 	</app_context>
 
 	<common>
+		<has_earned_platinum_trophy>har oppnådd et platina-trophy i "{}"!</has_earned_platinum_trophy>
+		<has_earned_trophy>har oppnådd et trophy i "{}"!</has_earned_trophy>
+		<like>Liker</like>
+		<likes_this>{} liker dette.</likes_this>
+		<and_like_this>{} og {} liker dette.</and_like_this>
+		<people_like_this>{} personer liker dette.</people_like_this>
+		<first_time_playing>spiller "{}" for første gang.</first_time_playing>
 		<an_error_occurred>Det har oppstått en feil.
 Feilkode: {}</an_error_occurred>
 		<cancel>Avbryt</cancel>
@@ -177,7 +184,18 @@ Feilkode: {}</an_error_occurred>
 		<silver>Sølv</silver>
 		<hours_ago>{} timer siden</hours_ago>
 		<minutes_ago>{} minutter sidan</minutes_ago>
+		<write_comment>Skriv kommentar</write_comment>
 	</common>
+
+	<contacts_pa>
+		<activities_of>{}s Aktiviteter</activities_of>
+		<anyone>Alle</anyone>
+		<no_one>Ingen</no_one>
+		<cannot_display>Kan ikke vise flere sider.</cannot_display>
+		<friends_of_friends>Venners venner</friends_of_friends>
+		<friends_only>Kun venner</friends_only>
+		<share_range>Del med:</share_range>
+	</contacts_pa>
 
 	<content_manager name="Innholdsadministrator">
 		<application name="Programmer">

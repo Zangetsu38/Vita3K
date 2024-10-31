@@ -133,7 +133,8 @@ EXPORT(int, sceAVConfigSetDisplayColorSpaceMode) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAVConfigSetMasterVol) {
+EXPORT(int, sceAVConfigSetMasterVol, int vol) {
+    LOG_DEBUG("Setting master volume to {}", vol);
     return UNIMPLEMENTED();
 }
 

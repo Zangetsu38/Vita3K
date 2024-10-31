@@ -24,10 +24,20 @@
 #include <gxm/functions.h>
 #include <renderer/functions.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include <util/log.h>
 #include <util/overloaded.h>
 
 namespace renderer::vulkan {
+
+static float sanitize_depth_clear_value(float depth) {
+    if (!std::isfinite(depth))
+        return 1.0f;
+
+    return std::clamp(depth, 0.0f, 1.0f);
+}
 
 void VKContext::wait_thread_function(const MemState &mem) {
     // try to wait for multiple fences at the same time if possible
@@ -125,6 +135,10 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.record.is_gamma_corrected = static_cast<bool>(color_surface_fin->gamma);
     vk::Format vk_format = color::translate_format(context.record.color_base_format);
 
+    if (context.state.features.preserve_f16_nan_as_u16 && vk_format == vk::Format::eR8G8B8A8Unorm) {
+        vk_format = vk::Format::eR16G16B16A16Sfloat;
+    }
+
     if (color_surface_fin->gamma && vk_format == vk::Format::eR8G8B8A8Unorm) {
         vk_format = vk::Format::eR8G8B8A8Srgb;
     }
@@ -174,9 +188,11 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         // also retrieve / create the shader interlock pass
         context.current_shader_interlock_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, true, true, color_surface_fin == nullptr, true);
 
-    Framebuffer &framebuffer = state.surface_cache.retrieve_framebuffer_handle(mem, color_surface_fin, ds_surface_fin, context.current_render_pass, context.current_shader_interlock_pass, context.current_color_view, context.current_ds_view);
+    Framebuffer &framebuffer = state.surface_cache.retrieve_framebuffer_handle(mem, color_surface_fin, ds_surface_fin, context.current_render_pass, context.current_shader_interlock_pass, context.current_color_view, context.current_color_storage_view, context.current_color_raw_view, context.current_ds_view);
     context.current_framebuffer = framebuffer.standard;
     context.current_shader_interlock_framebuffer = framebuffer.shader_interlock;
+    context.current_framebuffer_width = std::min(framebuffer.base_image->width, framebuffer.base_depth_stencil_image->width);
+    context.current_framebuffer_height = std::min(framebuffer.base_image->height, framebuffer.base_depth_stencil_image->height);
     context.current_color_base_image = framebuffer.base_image;
 
     // make sure we are not keeping any texture from the previous pass
@@ -232,6 +248,28 @@ void VKContext::start_recording(bool first_in_scene) {
         if (!first_in_scene)
             fence_insert_it++;
         render_target->fences.insert(fence_insert_it, state.device.createFence(fence_info));
+
+        // force descriptor reallocation paths for this frame when we outgrow the planned scene count
+        for (FrameObject &frame : state.frames) {
+            frame.color_descriptor.sets.clear();
+            frame.color_descriptor.descriptors_idx = 0;
+
+            for (FrameDescriptor &descr : frame.vert_descriptors) {
+                descr.sets.clear();
+                descr.descriptors_idx = 0;
+            }
+
+            for (FrameDescriptor &descr : frame.frag_descriptors) {
+                descr.sets.clear();
+                descr.descriptors_idx = 0;
+            }
+        }
+
+        rendertarget_set = nullptr;
+        last_vert_texture_descriptor = nullptr;
+        last_frag_texture_descriptor = nullptr;
+        last_vert_texture_count = ~0;
+        last_frag_texture_count = ~0;
     }
 
     if (next_fence == nullptr) {
@@ -320,25 +358,15 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
         .framebuffer = current_framebuffer
     };
 
-    if (render_target->has_macroblock_sync && !ignore_macroblock) {
-        // set the render area to the correct macroblock
-        curr_renderpass_info.renderArea = vk::Rect2D{
-            .offset = {
-                last_macroblock_x * render_target->macroblock_width,
-                last_macroblock_y * render_target->macroblock_height },
-            .extent = { render_target->macroblock_width, render_target->macroblock_height }
-        };
-    } else {
-        curr_renderpass_info.renderArea = vk::Rect2D{
-            .offset = { 0, 0 },
-            .extent = { render_target->width, render_target->height }
-        };
-    }
+    curr_renderpass_info.renderArea = vk::Rect2D{
+        .offset = { 0, 0 },
+        .extent = { current_framebuffer_width, current_framebuffer_height }
+    };
 
     // only the depth-stencil attachment may be clear if not force loaded
     std::array<vk::ClearValue, 2> curr_clear_values{};
     curr_clear_values[1].depthStencil = vk::ClearDepthStencilValue{
-        .depth = record.depth_stencil_surface.background_depth,
+        .depth = sanitize_depth_clear_value(record.depth_stencil_surface.background_depth),
         .stencil = record.depth_stencil_surface.stencil
     };
     curr_renderpass_info.setClearValues(curr_clear_values);
@@ -361,19 +389,41 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
     // update descriptor set for the whole scene with the color attachment
     vk::DescriptorImageInfo descr_color_info{
         .sampler = nullptr,
-        .imageView = current_color_view,
+        .imageView = current_color_storage_view,
         .imageLayout = vk::ImageLayout::eGeneral,
     };
 
     const vk::DescriptorType input_type = state.features.support_shader_interlock ? vk::DescriptorType::eStorageImage : vk::DescriptorType::eInputAttachment;
-    vk::WriteDescriptorSet write_descr{
+    std::array<vk::WriteDescriptorSet, 2> write_descrs;
+    uint32_t write_descr_count = 0;
+
+    write_descrs[write_descr_count] = vk::WriteDescriptorSet{
         .dstSet = rendertarget_set,
         .dstBinding = 0,
         .dstArrayElement = 0,
         .descriptorType = input_type,
     };
-    write_descr.setImageInfo(descr_color_info);
-    state.device.updateDescriptorSets(write_descr, {});
+    write_descrs[write_descr_count].setImageInfo(descr_color_info);
+    write_descr_count++;
+
+    if (state.features.preserve_f16_nan_as_u16 && current_color_raw_view) {
+        vk::DescriptorImageInfo descr_raw_color_info{
+            .sampler = nullptr,
+            .imageView = current_color_raw_view,
+            .imageLayout = vk::ImageLayout::eGeneral,
+        };
+
+        write_descrs[write_descr_count] = vk::WriteDescriptorSet{
+            .dstSet = rendertarget_set,
+            .dstBinding = 2,
+            .dstArrayElement = 0,
+            .descriptorType = vk::DescriptorType::eStorageImage,
+        };
+        write_descrs[write_descr_count].setImageInfo(descr_raw_color_info);
+        write_descr_count++;
+    }
+
+    state.device.updateDescriptorSets(write_descr_count, write_descrs.data(), 0, nullptr);
 }
 
 void VKContext::stop_render_pass() {
@@ -609,3 +659,5 @@ void signal_sync_object(VKState &state, SceGxmSyncObject *sync_object, uint32_t 
 }
 
 } // namespace renderer::vulkan
+
+
