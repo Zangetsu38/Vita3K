@@ -16,6 +16,8 @@ endif()
 target_link_libraries(app PRIVATE audio config display gdbstub gui io ngs renderer SDL3::SDL3)
 if(WIN32)
 	target_link_libraries(app PRIVATE dwmapi)
+elseif(ANDROID)
+	target_link_libraries(app PRIVATE android adrenotools host::dialog miniz)
 endif()
 
 if (LINUX)

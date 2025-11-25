@@ -115,6 +115,10 @@ elseif (ARCHITECTURE STREQUAL "x86_64")
 	)
 endif ()
 
+if(ANDROID)
+	add_subdirectory(libadrenotools)
+endif()
+
 if(WIN32)
 	add_library(winsock INTERFACE)
 	find_library(WSOCK32 wsock32)
@@ -234,6 +238,24 @@ if(APPLE)
 	endif()
 	target_include_directories(vulkan INTERFACE "${CMAKE_BINARY_DIR}/external/MoltenVK/include")
 	set(MOLTENVK_DYLIB "${CMAKE_BINARY_DIR}/external/MoltenVK/dylib/macOS/libMoltenVK.dylib" PARENT_SCOPE)
+elseif(ANDROID AND NOT (CMAKE_BUILD_TYPE STREQUAL "Release"))
+	# add validation layer
+	if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../android/prebuilt/${ANDROID_ABI}/libVkLayer_khronos_validation.so")
+		# download it if not already done
+		if(NOT EXISTS "${CMAKE_BINARY_DIR}/external/validation_layers.zip")
+			message(STATUS "Downloading validation layer...")
+			file(DOWNLOAD https://github.com/KhronosGroup/Vulkan-ValidationLayers/releases/download/sdk-1.3.250.0/android-binaries-1.3.250.0.zip
+				"${CMAKE_BINARY_DIR}/external/validation_layers.zip" SHOW_PROGRESS)
+		endif()
+
+		if(NOT EXISTS "${CMAKE_BINARY_DIR}/external/validation_layers")
+			file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/external/validation_layers")
+			execute_process(COMMAND ${CMAKE_COMMAND} -E tar xf "${CMAKE_BINARY_DIR}/external/validation_layers.zip"
+				WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/external/validation_layers")
+		endif()
+
+		file(COPY "${CMAKE_BINARY_DIR}/external/validation_layers/${ANDROID_ABI}" DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/../android/prebuilt")
+	endif()
 endif()
 
 add_library(vma INTERFACE)
@@ -241,6 +263,9 @@ target_include_directories(vma INTERFACE
 	"${CMAKE_CURRENT_SOURCE_DIR}/VulkanMemoryAllocator-Hpp/include"
 	"${CMAKE_CURRENT_SOURCE_DIR}/VulkanMemoryAllocator-Hpp/VulkanMemoryAllocator/include")
 
+if(ANDROID)
+	set(USE_STATIC_ANDROID_FFMPEG ON)
+endif()
 add_subdirectory(ffmpeg)
 
 if(APPLE OR NOT FORCE_BUILD_OPENSSL_MAC)
@@ -343,6 +368,8 @@ if(NOT CURL_FOUND)
 		option(CURL_USE_SCHANNEL "Enable Windows native SSL/TLS" ON)
 	endif()
 	option(CURL_CA_FALLBACK "Set ON to use built-in CA store of TLS backend. Defaults to OFF" ON)
+	option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
+	option(BUILD_STATIC_LIBS "Build static libraries" ON)
 	set(CURL_DISABLE_TESTS ON)
 	FetchContent_Declare(curl
 		GIT_REPOSITORY https://github.com/curl/curl.git
@@ -425,7 +452,9 @@ target_compile_definitions(tracy PUBLIC $<$<CONFIG:Debug,RelWithDebInfo>:TRACY_E
 set(NFD_PORTAL ON)
 
 # nativefiledialog-extended
-add_subdirectory(nativefiledialog-extended)
+if(NOT ANDROID)
+	add_subdirectory(nativefiledialog-extended)
 
 # Create alias to prevent the need of multiple changes in case the target name changes
 add_library(NFDe::NFDe ALIAS nfd)
+endif()
