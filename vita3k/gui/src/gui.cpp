@@ -693,8 +693,10 @@ void pre_init(GuiState &gui, EmuEnvState &emuenv) {
 
     init_style(emuenv);
     init_font(gui, emuenv);
+    LOG_DEBUG("After init font");
     lang::init_lang(gui.lang, emuenv);
-
+    LOG_DEBUG("After init lang");
+    
     bool result = ImGui_ImplSdl_CreateDeviceObjects(gui.imgui_state.get());
     assert(result);
 }
