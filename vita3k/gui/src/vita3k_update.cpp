@@ -71,7 +71,7 @@ bool init_vita3k_update(GuiState &gui) {
     vita_area_state = {};
 
     // Get Build number of latest release
-    const auto version = net_utils::get_web_regex_result("https://api.github.com/repos/Vita3K/Vita3K/releases/latest", std::regex("Vita3K Build: (\\d+)"));
+    const auto version = net_utils::get_web_regex_result("https://api.github.com/repos/Zangetsu38/Vita3K/releases/latest", std::regex("Vita3K Build: (\\d+)"));
 
     // Check if version is empty or not all digit
     if (version.empty() || !std::all_of(version.begin(), version.end(), ::isdigit)) {
@@ -84,7 +84,7 @@ bool init_vita3k_update(GuiState &gui) {
     git_version = string_utils::stoi_def(version, 0, "git version");
 
     // Get difference between current app number and git version
-    const auto dif_from_current = static_cast<uint32_t>(std::max(git_version - app_number, 0));
+    const auto dif_from_current = static_cast<uint32_t>(std::max(git_version - app_number, 0)) + 1;
     const auto has_update = dif_from_current > 0;
     if (has_update) {
         std::thread get_commit_desc([dif_from_current]() {
@@ -113,7 +113,7 @@ bool init_vita3k_update(GuiState &gui) {
                         return;
 
                     // Create link for get commits
-                    const auto continuous_link = fmt::format(R"(https://api.github.com/repos/Vita3K/Vita3K/commits?sha=continuous&page={}&per_page={})", p + 1, std::min(dif_from_current, max_per_page));
+                    const auto continuous_link = fmt::format(R"(https://api.github.com/repos/Zangetsu38/Vita3K/commits?sha=shadow&page={}&per_page={})", p + 1, std::min(dif_from_current, max_per_page));
 
                     // Get response from github api
                     auto commits = net_utils::get_web_response(continuous_link);
@@ -200,7 +200,7 @@ static void download_update(const fs::path &base_path) {
     progress_state.download = true;
     progress_state.pause = false;
     std::thread download([base_path]() {
-        std::string download_continuous_link = "https://github.com/Vita3K/Vita3K/releases/download/continuous/";
+        std::string download_continuous_link = "https://github.com/Zangetsu38/Vita3K/releases/download/continuous/";
 #ifdef _WIN32
         download_continuous_link += "windows-latest.zip";
 #elif defined(__APPLE__)
