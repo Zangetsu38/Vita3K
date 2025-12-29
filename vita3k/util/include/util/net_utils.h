@@ -57,6 +57,7 @@ typedef std::pair<ProgressData, ProgressCallback> CallbackData;
 bool download_file(const std::string &url, const std::string &output_file_path, ProgressCallback progress_callback = nullptr);
 std::string get_web_response(const std::string &url);
 std::string get_web_regex_result(const std::string &url, const std::regex &regex);
+std::vector<std::string> get_web_regex_results(const std::string &url, const std::regex &regex);
 
 SceHttpErrorCode parse_url(const std::string &url, parsedUrl &out);
 const char *int_method_to_char(const int n);

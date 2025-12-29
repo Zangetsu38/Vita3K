@@ -1026,10 +1026,18 @@ void ScrollWhenDragging() {
     ImGuiContext &g = *ImGui::GetCurrentContext();
     ImGuiIO &io = ImGui::GetIO();
     ImGuiWindow *window = g.CurrentWindow;
-    if (g.HoveredWindow == window && ImGui::IsMouseDragging(0)) {
-        ImGui::SetScrollY(window, window->Scroll.y - io.MouseDelta.y);
-        ImGui::SetActiveID(0, window);
-    }
+
+
+    if (g.HoveredWindow != window)
+        return;
+
+    if (!ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+        return;
+
+    if (g.ActiveId != 0 && (fabsf(io.MouseDelta.y) < fabsf(io.MouseDelta.x)))
+        return;
+
+    ImGui::SetScrollY(window, window->Scroll.y - io.MouseDelta.y);
 }
 
 } // namespace ImGui
