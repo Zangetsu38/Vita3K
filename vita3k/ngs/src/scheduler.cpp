@@ -140,14 +140,14 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
         for (size_t i = 0; i < voice->rack->modules.size(); i++) {
             if (voice->rack->modules[i]) {
                 if (voice->rack->modules[i]->process(kern, mem, thread_id, voice->datas[i], scheduler_lock, voice_lock)) {
-                    finished = true;
                     finished_module = voice->rack->modules[i]->module_id();
+                    voice->transition(mem, VOICE_STATE_FINALIZING);
                 }
             }
         }
-        if (finished) {
+        if (voice->state == VOICE_STATE_FINALIZING) {
+            finished_module = voice->is_keyed_off ? 0 : finished_module;
             voice->is_keyed_off = true;
-            voice->transition(mem, VOICE_STATE_FINALIZING);
             if (voice->finished_callback) {
                 voice_lock.unlock();
                 scheduler_lock.unlock();

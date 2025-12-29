@@ -70,21 +70,37 @@ bool init_vita3k_update(GuiState &gui) {
     git_version = 0;
     vita_area_state = {};
 
-    // Get Build number of latest release
-    const auto version = net_utils::get_web_regex_result("https://api.github.com/repos/Vita3K/Vita3K/releases/latest", std::regex("Vita3K Build: (\\d+)"));
+    // Get latest release info from GitHub (commit + build number)
+    const auto results = net_utils::get_web_regex_results("https://api.github.com/repos/Zangetsu38/Vita3K/releases/latest", std::regex(R"(Corresponding commit:\s*([a-f0-9]{8})[\s\S]*?Vita3K Build:\s*(\d+))"));
 
-    // Check if version is empty or not all digit
-    if (version.empty() || !std::all_of(version.begin(), version.end(), ::isdigit)) {
-        LOG_WARN("Failed to get current git version, try again later\n{}", version);
+    // Ensure both commit and build were captured
+    if (results.size() != 2) {
+        LOG_WARN("Failed to get git version info");
         gui.help_menu.vita3k_update = false;
         return false;
     }
 
-    // Set latest git version number
+    const std::string commit = results[0];
+    const std::string version = results[1];
+
+    // Validate build number is numeric
+    if (!std::all_of(version.begin(), version.end(), ::isdigit)) {
+        LOG_WARN("Invalid build number: {}", version);
+        gui.help_menu.vita3k_update = false;
+        return false;
+    }
+
+    // Convert latest build string to integer
     git_version = string_utils::stoi_def(version, 0, "git version");
 
-    // Get difference between current app number and git version
-    const auto dif_from_current = static_cast<uint32_t>(std::max(git_version - app_number, 0));
+    // Compute difference between current build, master base, and last build commit
+    const auto dif_from_current = std::max(
+        static_cast<uint32_t>(std::max({ git_version - app_number, git_version - app_master_number, 0 })),
+        (commit != app_hash) ? 1u : 0u);
+
+    LOG_DEBUG("dif: {}, master: {}, app count: {}, app master counrt: {}", dif_from_current, git_version, app_number, app_master_number);
+
+    // Determine if an update is available
     const auto has_update = dif_from_current > 0;
     if (has_update) {
         std::thread get_commit_desc([dif_from_current]() {
@@ -113,7 +129,7 @@ bool init_vita3k_update(GuiState &gui) {
                         return;
 
                     // Create link for get commits
-                    const auto continuous_link = fmt::format(R"(https://api.github.com/repos/Vita3K/Vita3K/commits?sha=continuous&page={}&per_page={})", p + 1, std::min(dif_from_current, max_per_page));
+                    const auto continuous_link = fmt::format(R"(https://api.github.com/repos/Zangetsu38/Vita3K/commits?sha=shadow&page={}&per_page={})", p + 1, std::min(dif_from_current, max_per_page));
 
                     // Get response from github api
                     auto commits = net_utils::get_web_response(continuous_link);
@@ -200,7 +216,7 @@ static void download_update(const fs::path &base_path) {
     progress_state.download = true;
     progress_state.pause = false;
     std::thread download([base_path]() {
-        std::string download_continuous_link = "https://github.com/Vita3K/Vita3K/releases/download/continuous/";
+        std::string download_continuous_link = "https://github.com/Zangetsu38/Vita3K/releases/download/continuous/";
 #ifdef _WIN32
         download_continuous_link += "windows-latest.zip";
 #elif defined(__APPLE__)

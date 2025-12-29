@@ -81,6 +81,49 @@ void PlayerModule::on_param_change(const MemState &mem, ModuleData &data) {
     }
 }
 
+static std::string log_ascii_hex(const uint8_t *data, size_t len) {
+    std::stringstream ss;
+    size_t i = 0;
+    ss << std::endl;
+    while (i < len) {
+        ss << std::setw(8) << std::setfill('0') << std::hex << i << "  ";
+
+        for (size_t j = 0; j < 16 && i + j < len; ++j) {
+            ss << std::setw(2) << std::setfill('0') << std::hex << (int)data[i + j] << " ";
+        }
+
+        for (size_t j = len - i; j < 16; ++j) {
+            ss << "   ";
+        }
+
+        ss << " |";
+
+        for (size_t j = 0; j < 16 && i + j < len; ++j) {
+            if (data[i + j] >= 32 && data[i + j] <= 126) {
+                ss << (char)data[i + j];
+            } else {
+                ss << '.';
+            }
+        }
+
+        for (size_t j = len - i; j < 16; ++j) {
+            ss << " ";
+        }
+
+        ss << "|\n";
+
+        i += 16;
+    }
+
+    return ss.str();
+}
+
+void PlayerModule::set_default_preset(const MemState &mem, ModuleData &data) {
+    SceNgsPlayerStates *state = data.get_state<SceNgsPlayerStates>();
+
+    *state = {};
+}
+
 bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) {
     SceNgsPlayerParams *params = data.get_parameters<SceNgsPlayerParams>(mem);
     SceNgsPlayerStates *state = data.get_state<SceNgsPlayerStates>();
@@ -196,8 +239,24 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
                 // makes the value 4 bits aligned so we have no issue with decoding, adpcm or not and whether the sound is mono or stereo
                 bytes_to_send = std::min<uint32_t>(bytes_to_send, params->buffer_params[state->current_buffer].bytes_count - state->current_byte_position_in_buffer);
 
+                uint8_t *chunk = input + state->current_byte_position_in_buffer;
                 // Send buffered audio data to decoder
-                decoder->send(input + state->current_byte_position_in_buffer, bytes_to_send);
+                if (decoder->he_adpcm) {
+                    const uint32_t frame_size = 0x10 * params->channels;
+                    state->adpcm_remainder.insert(state->adpcm_remainder.end(), chunk, chunk + bytes_to_send);
+
+                    uint32_t full_frames = state->adpcm_remainder.size() / frame_size;
+
+                    if (full_frames > 0) {
+                        const auto bytes_to_send_hevag = full_frames * frame_size;
+                        decoder->send(state->adpcm_remainder.data(), bytes_to_send_hevag);
+                        state->adpcm_remainder.erase(
+                            state->adpcm_remainder.begin(),
+                            state->adpcm_remainder.begin() + bytes_to_send_hevag);
+                    }
+                } else {
+                    decoder->send(chunk, bytes_to_send);
+                }
 
                 state->current_byte_position_in_buffer += bytes_to_send;
                 state->bytes_consumed_since_key_on += bytes_to_send;
@@ -264,7 +323,7 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
                     data.extra_storage.resize(current_count + samples_count.samples * sizeof(float) * 2);
 
                     // Receive the samples processed by the decoder and append them to the buffer of already processed samples
-                    decoder->receive(current_count + data.extra_storage.data(), nullptr);
+                    decoder->receive(data.extra_storage.data() + current_count, nullptr);
                 }
             }
 

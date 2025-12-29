@@ -787,7 +787,11 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
 
     if (init_flags & SCE_NGS_VOICE_INIT_PRESET) {
         if (!preset) {
-            STUBBED("Default preset not implemented");
+            LOG_DEBUG("Voice init: Default preset setubed with reset state");
+            for (size_t i = 0; i < voice->rack->modules.size(); i++) {
+                if (voice->rack->modules[i])
+                    voice->rack->modules[i]->set_default_preset(emuenv.mem, voice->datas[i]);
+            }
         } else if (!voice->set_preset(emuenv.mem, preset)) {
             return RET_ERROR(SCE_NGS_ERROR);
         }
@@ -815,11 +819,18 @@ EXPORT(SceInt32, sceNgsVoiceKeyOff, ngs::Voice *voice) {
     voice->is_keyed_off = true;
     voice->rack->system->voice_scheduler.off(emuenv.mem, voice);
 
-    // call the finish callback, I got no idea what the module id should be in this case
-    voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
+    for (auto &module : voice->rack->modules) {
+        if (module->module_id() == 0x5CE6) {
+            // call the finish callback, I got no idea what the module id should be in this case
+            voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
 
-    voice->is_keyed_off = false;
-    voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
+            voice->is_keyed_off = false;
+            voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
+
+            break;
+        }
+    }
+
     return SCE_NGS_OK;
 }
 

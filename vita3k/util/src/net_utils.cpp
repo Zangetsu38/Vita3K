@@ -368,7 +368,15 @@ std::string get_web_response(const std::string &url) {
 }
 
 std::string get_web_regex_result(const std::string &url, const std::regex &regex) {
-    std::string result;
+    const auto result = get_web_regex_results(url, regex);
+    if (result.empty())
+        return {};
+
+    return result.back();
+}
+
+std::vector<std::string> get_web_regex_results(const std::string &url, const std::regex &regex) {
+    std::vector<std::string> results;
 
     // Get the response of the web
     const auto response = get_web_response(url);
@@ -378,12 +386,13 @@ std::string get_web_regex_result(const std::string &url, const std::regex &regex
         std::smatch match;
         // Check if the response matches the regex
         if (std::regex_search(response, match, regex)) {
-            result = match[1];
+            for (size_t i = 1; i < match.size(); ++i)
+                results.push_back(match[i].str());
         } else
             LOG_ERROR("No success found regex: {}", response);
     }
 
-    return result;
+    return results;
 }
 
 static uint64_t get_current_time_ms() {
