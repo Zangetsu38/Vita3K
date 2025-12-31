@@ -653,7 +653,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
                 if (emuenv.cfg.gpu_idx == 0)
                     config.custom_driver_name = "";
 
-                if (ImGui::Button("Add custom driver")) {
+                if (ImGui::Button("安装驱动程序")) {
                     app::add_custom_driver(emuenv);
                     // also set it to stock after
                     emuenv.cfg.gpu_idx = 0;
@@ -664,7 +664,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
                     config.custom_driver_name = gpu_list_str[emuenv.cfg.gpu_idx];
 
                     ImGui::SameLine();
-                    if (ImGui::Button("Remove custom driver")) {
+                    if (ImGui::Button("移除驱动程序")) {
                         app::remove_custom_driver(emuenv, config.custom_driver_name);
                         // set back to stock
                         emuenv.cfg.gpu_idx = 0;
@@ -757,7 +757,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::SameLine(0, 5.f * SCALE.x);
         ImGui::PushItemWidth(-100.f * SCALE.x);
         int slider_position = static_cast<int>(config.resolution_multiplier * 4);
-        if (ImGui::SliderInt("##res_scal", &slider_position, 2, 32, fmt::format("{}x", config.resolution_multiplier).c_str(), ImGuiSliderFlags_None)) {
+        if (ImGui::SliderInt("##res_scal", &slider_position, 2, 32, fmt::format("{}倍", config.resolution_multiplier).c_str(), ImGuiSliderFlags_None)) {
             config.resolution_multiplier = static_cast<float>(slider_position) / 4.0f;
             if (config.resolution_multiplier != 1.0f && !is_vulkan)
                 config.disable_surface_sync = true;
@@ -801,7 +801,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
             ImGui::EndDisabled();
         ImGui::SameLine(0, 5 * SCALE.x);
         ImGui::PushItemWidth(-100.f * SCALE.x);
-        if (ImGui::SliderInt("##aniso_filter", &current_aniso_filter_log, 0, max_aniso_filter_log, fmt::format("{}x", config.anisotropic_filtering).c_str()))
+        if (ImGui::SliderInt("##aniso_filter", &current_aniso_filter_log, 0, max_aniso_filter_log, fmt::format("{}倍", config.anisotropic_filtering).c_str()))
             config.anisotropic_filtering = 1 << current_aniso_filter_log;
         ImGui::PopItemWidth();
         SetTooltipEx(lang.gpu["anisotropic_filtering_description"].c_str());
@@ -854,11 +854,11 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
                 ImGui::BeginDisabled();
 
             std::vector<const char *> mapping_methods_strings = {
-                "Disabled",
-                "Double buffer",
-                "External host",
-                "Page table",
-                "Native buffer"
+                "禁用",
+                "双重缓冲",
+                "外部主机",
+                "页表",
+                "原生缓冲"
             };
             std::vector<std::string_view> mapping_methods_indexes = {
                 "disabled",
@@ -894,10 +894,10 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
 #ifdef __ANDROID__
         if (emuenv.renderer->support_custom_drivers()) {
             ImGui::Spacing();
-            ImGui::Checkbox("Enable Turbo Mode", &emuenv.cfg.turbo_mode);
+            ImGui::Checkbox("启用加速模式", &emuenv.cfg.turbo_mode);
 
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Provides a way to force the GPU to run at the maximum possible clocks (thermal constraints will still be applied)");
+                ImGui::SetTooltip("强制GPU以最大频率运行（温控仍会生效）");
             }
         }
 #endif
@@ -1013,8 +1013,8 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Checkbox(lang.emulator["check_for_updates"].c_str(), &emuenv.cfg.check_for_updates);
         SetTooltipEx(lang.emulator["check_for_updates_description"].c_str());
         ImGui::Spacing();
-        ImGui::SliderInt("File Loading Delay", &config.file_loading_delay, 0, 30, "%d ms", ImGuiSliderFlags_AlwaysClamp);
-        SetTooltipEx("File loading delay in milliseconds.\nThis is required for some games to load files too quickly compared to real hardware (e.g., Silent Hill).\nDefault is 0 ms.");
+        ImGui::SliderInt("文件加载延迟", &config.file_loading_delay, 0, 30, "%d 毫秒", ImGuiSliderFlags_AlwaysClamp);
+        SetTooltipEx("文件加载延迟，单位为毫秒。\n部分游戏相比实机加载文件过快（例如《寂静岭》），需要设置此项。\n默认值为0毫秒。");
         ImGui::Separator();
         TextColoredCentered(GUI_COLOR_TEXT_TITLE, lang.emulator["performance_overlay"].c_str());
         ImGui::Spacing();
@@ -1058,7 +1058,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         }
         ImGui::Spacing();
 #ifdef __ANDROID__
-        ImGui::TextColored(GUI_COLOR_TEXT, "%s", "Using a different path requires additional permissions");
+        ImGui::TextColored(GUI_COLOR_TEXT, "%s", "使用其他路径需要额外权限");
         ImGui::Spacing();
 #endif
         ImGui::Separator();
@@ -1216,7 +1216,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Spacing();
 
         // PSN
-        TextColoredCentered(GUI_COLOR_TEXT_MENUBAR, "PlayStation Network");
+        TextColoredCentered(GUI_COLOR_TEXT_MENUBAR, "PlayStation网络");
         ImGui::Spacing();
         ImGui::Checkbox(lang.network["psn_signed_in"].c_str(), &config.psn_signed_in);
         SetTooltipEx(lang.network["psn_signed_in_description"].c_str());
@@ -1225,7 +1225,7 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        TextColoredCentered(GUI_COLOR_TEXT_MENUBAR, "Adhoc");
+        TextColoredCentered(GUI_COLOR_TEXT_MENUBAR, "Adhoc点对点模式");
         ImGui::Spacing();
 
         std::vector<std::string> addrsStrings;
@@ -1325,37 +1325,27 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
 #ifdef TRACY_ENABLE
         // Tracy profiler settings
         ImGui::Spacing();
-        ImGui::TextColored(GUI_COLOR_TEXT_TITLE, "Tracy Profiler");
+        ImGui::TextColored(GUI_COLOR_TEXT_TITLE, "Tracy性能分析器");
 
-        ImGui::Text("The Tracy profiler implementation in the emulator allows among other\n"
-                    "things to track the functions that a game calls in real-time\n"
-                    "and visualize them in a timeline with timings for every frame and audio buffer.");
+        ImGui::Text("模拟器中的Tracy性能分析器实现允许您实时跟踪游戏调用的函数，\n"
+                    "并在时间轴中以每帧和音频缓冲区的计时方式可视化这些函数调用。");
 
         // Primitive Tracy implementation
-        ImGui::Checkbox("Primitive implementation", &emuenv.cfg.tracy_primitive_impl);
-        SetTooltipEx("The primitive Tracy implementation for HLE modules allows for\n"
-                     "all HLE module calls to be logged without manual instrumentation needed.\n"
-                     "However it is just a general workaround that doesn't count for statistic\n"
-                     "analysis neither for trace searching on Tracy.\n\n"
-                     "Due to the amount of functions being logged due to this implementation\n"
-                     "Tracy logs can become gigabytes long in a matter of minutes. Because of this\n"
-                     "it is only recommended to be used when the module(s) to debug aren't available for\n"
-                     "advanced profiling or a more general overview of the function calls is needed and\n"
-                     "in a PC with at least 12GB (Linux) or 16GB (Windows) of RAM.");
+        ImGui::Checkbox("原始实现", &emuenv.cfg.tracy_primitive_impl);
+        SetTooltipEx("HLE模块的原始Tracy实现允许记录所有HLE模块调用，无需手动插桩。\n"
+                     "但这只是一种通用解决方案，既无法用于统计分析，也无法在 Tracy 中进行轨迹搜索。\n\n"
+                     "由于此实现会记录大量函数调用，Tracy 日志可能在几分钟内达到数 GB。因此，\n"
+                     "仅建议在以下情况下使用：要调试的模块不支持高级性能分析，或需要更通用的函数调用概览，n"
+                     "并且电脑至少拥有 12GB（Linux）或 16GB（Windows）内存。");
 
         // ImGui::Text("The Tracy profiler is not available in Release builds, please compile Vita3K\nfrom source using"
         // " either the RelWithDebInfo or Debug builds in order to use it.");
 
         // Text to display along the modules list
-        const char *tracy_modules_list_label = "Available modules for advanced profiling\n\n"
-                                               "Modules enabled for advanced profiling don't\n"
-                                               "only provide function call timings but\n"
-                                               "also log the arguments they were called\n"
-                                               "with for every single function call\n"
-                                               "except arguments driving a large amount\n"
-                                               "of data such as large sized arrays.\n\n"
-                                               "Advanced profiling requires functions to\n"
-                                               "be manually instrumented in source code.";
+        const char *tracy_modules_list_label = "可用于高级性能分析的模块\n\n"
+                                               "启用高级性能分析的模块不仅提供函数调用计时，\n"
+                                               "还会记录每次函数调用时传入的参数（除驱动大量数据的参数外例如大型数组）。\n"
+                                               "高级性能分析需要在源代码中手动插桩函数。";
 
         // Tracy modules list
         if (ImGui::BeginListBox(tracy_modules_list_label, { 0.0f, ImGui::GetTextLineHeightWithSpacing() * 8.25f + ImGui::GetStyle().FramePadding.y * 2.0f })) {

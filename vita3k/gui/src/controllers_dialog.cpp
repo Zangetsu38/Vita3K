@@ -359,12 +359,12 @@ void draw_controllers_dialog(GuiState &gui, EmuEnvState &emuenv) {
                     ImGui::Spacing();
                     ImGui::Separator();
                     ImGui::Spacing();
-                    TextColoredCentered(GUI_COLOR_TEXT_TITLE, "Analog Stick Multiplier");
+                    TextColoredCentered(GUI_COLOR_TEXT_TITLE, "模拟摇杆倍率");
                     ImGui::Spacing();
                     auto &mult = emuenv.cfg.controller_analog_multiplier;
                     if (ImGui::SliderFloat("##analog_multiplier", &mult, 0.1f, 2.f, "%.1fx", ImGuiSliderFlags_AlwaysClamp))
                         config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
-                    SetTooltipEx("Analog multipiler can be used to change the sensitivity of your stick movements.");
+                    SetTooltipEx("模拟摇杆倍率可用于调整摇杆移动的灵敏度。");
                     ImGui::Spacing();
                     ImGui::Separator();
                     ImGui::Spacing();
@@ -442,7 +442,7 @@ void draw_controllers_dialog(GuiState &gui, EmuEnvState &emuenv) {
     } else if (emuenv.motion.has_device_motion_support) {
         ImGui::Spacing();
         ImGui::PushTextWrapPos(ImGui::GetWindowWidth() - (ImGui::GetStyle().WindowPadding.x * 2.f));
-        ImGui::TextColored(GUI_COLOR_TEXT_TITLE, "%s", "Using builtin device motion sensors");
+        ImGui::TextColored(GUI_COLOR_TEXT_TITLE, "%s", "使用内置的运动传感器");
         ImGui::PopTextWrapPos();
     }
 

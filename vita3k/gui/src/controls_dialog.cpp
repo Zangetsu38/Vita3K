@@ -121,7 +121,7 @@ void draw_controls_dialog(GuiState &gui, EmuEnvState &emuenv) {
     const ImVec2 display_size(emuenv.logical_viewport_size.x, emuenv.logical_viewport_size.y);
     const ImVec2 RES_SCALE(emuenv.gui_scale.x, emuenv.gui_scale.y);
     ImGui::SetNextWindowPos(ImVec2(emuenv.logical_viewport_pos.x + (display_size.x / 2.f), emuenv.logical_viewport_pos.y + (display_size.y / 2.f)), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::Begin("Overlay", &gui.controls_menu.controls_dialog, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::Begin("布局", &gui.controls_menu.controls_dialog, ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::SetWindowFontScale(RES_SCALE.x);
 
     if (!gui.controls_menu.controls_dialog) {
@@ -131,29 +131,29 @@ void draw_controls_dialog(GuiState &gui, EmuEnvState &emuenv) {
 
     ImGui::Spacing();
 
-    const auto gmpd = ImGui::CalcTextSize("Gamepad Overlay").x;
+    const auto gmpd = ImGui::CalcTextSize("按键布局").x;
     ImGui::SetCursorPosX((ImGui::GetWindowWidth() / 2.f) - (gmpd / 2.f));
-    ImGui::TextColored(GUI_COLOR_TEXT_MENUBAR, "Gamepad Overlay");
+    ImGui::TextColored(GUI_COLOR_TEXT_MENUBAR, "按键布局");
     ImGui::Spacing();
-    if (ImGui::Checkbox("Show gamepad overlay ingame", &emuenv.cfg.enable_gamepad_overlay))
+    if (ImGui::Checkbox("显示虚拟按键", &emuenv.cfg.enable_gamepad_overlay))
         config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
 
-    const char *overlay_edit_text = overlay_editing ? "Hide Gamepad Overlay" : "Modify Gamepad Overlay";
+    const char *overlay_edit_text = overlay_editing ? "保存布局" : "编辑按键布局";
     if (ImGui::Button(overlay_edit_text)) {
         overlay_editing = !overlay_editing;
         set_controller_overlay_state(overlay_editing ? get_overlay_display_mask(emuenv.cfg) : 0, overlay_editing);
     }
     ImGui::Spacing();
-    if (overlay_editing && ImGui::SliderFloat("Overlay scale", &emuenv.cfg.overlay_scale, 0.25f, 4.0f, "%.3f", ImGuiSliderFlags_NoInput | ImGuiSliderFlags_NoRoundToFormat | ImGuiSliderFlags_Logarithmic)) {
+    if (overlay_editing && ImGui::SliderFloat("按键大小缩放", &emuenv.cfg.overlay_scale, 0.25f, 4.0f, "%.3f", ImGuiSliderFlags_NoInput | ImGuiSliderFlags_NoRoundToFormat | ImGuiSliderFlags_Logarithmic)) {
         set_controller_overlay_scale(emuenv.cfg.overlay_scale);
         config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
     }
     ImGui::Spacing();
-    if (overlay_editing && ImGui::SliderInt("Overlay opacity", &emuenv.cfg.overlay_opacity, 0, 100, "%d%%")) {
+    if (overlay_editing && ImGui::SliderInt("按键不透明度", &emuenv.cfg.overlay_opacity, 0, 100, "%d%%")) {
         set_controller_overlay_opacity(emuenv.cfg.overlay_opacity);
         config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
     }
-    if (overlay_editing && ImGui::Button("Reset Gamepad")) {
+    if (overlay_editing && ImGui::Button("重置布局")) {
         set_controller_overlay_state(get_overlay_display_mask(emuenv.cfg), true, true);
         emuenv.cfg.overlay_scale = 1.0f;
         emuenv.cfg.overlay_opacity = 100;
@@ -163,11 +163,11 @@ void draw_controls_dialog(GuiState &gui, EmuEnvState &emuenv) {
     }
     ImGui::Spacing();
     ImGui::Separator();
-    if (emuenv.cfg.enable_gamepad_overlay && ImGui::Checkbox("Show front/back touchscreen switch button.", &emuenv.cfg.overlay_show_touch_switch)) {
+    if (emuenv.cfg.enable_gamepad_overlay && ImGui::Checkbox("显示主屏幕/背屏切换按钮。", &emuenv.cfg.overlay_show_touch_switch)) {
         config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
         set_controller_overlay_state(get_overlay_display_mask(emuenv.cfg), overlay_editing);
     }
-    ImGui::Text("L2/R2 triggers will be displayed only if PSTV mode is enabled.");
+    ImGui::Text("仅当PSTV模式启用时，才会显示L2/R2键。");
 
     ImGui::End();
 }

@@ -239,7 +239,7 @@ void draw_manual(GuiState &gui, EmuEnvState &emuenv) {
 
     // Draw esc button
     ImGui::SetCursorPos(ImVec2(5.0f * SCALE.x, 10.0f * SCALE.y));
-    if ((!hidden_button && ImGui::Button("Esc", BUTTON_SIZE)) || ImGui::IsKeyPressed(static_cast<ImGuiKey>(emuenv.cfg.keyboard_button_psbutton)))
+    if ((!hidden_button && ImGui::Button("退出", BUTTON_SIZE)) || ImGui::IsKeyPressed(static_cast<ImGuiKey>(emuenv.cfg.keyboard_button_psbutton)))
         gui::close_system_app(gui, emuenv);
 
     const auto BUTTON_POS = ImVec2(10.f * SCALE.x, display_size.y - (10.f * SCALE.y) - BUTTON_SIZE.y);
@@ -279,8 +279,8 @@ void draw_manual(GuiState &gui, EmuEnvState &emuenv) {
         }
     }
 
-    ImGui::SetCursorPos(ImVec2(display_size.x - BUTTON_POS.x - (BUTTON_SIZE.x * 2.f) - (36.f * SCALE.x), BUTTON_POS.y));
-    if ((!hidden_button && ImGui::Button("Book", BUTTON_SIZE)) || ImGui::IsKeyPressed(static_cast<ImGuiKey>(emuenv.cfg.keyboard_leftstick_right)))
+    ImGui::SetCursorPos(ImVec2(display_size.x - BUTTON_POS.x - (BUTTON_SIZE.x * 2.f) - (20.f * SCALE.x), BUTTON_POS.y));
+    if ((!hidden_button && ImGui::Button("阅读模式", BUTTON_SIZE)) || ImGui::IsKeyPressed(static_cast<ImGuiKey>(emuenv.cfg.keyboard_leftstick_right)))
         is_book_mode = !is_book_mode;
 
     // Draw right button
