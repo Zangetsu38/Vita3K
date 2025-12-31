@@ -1108,7 +1108,7 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
         const auto search_pos = ImVec2((manual_exist ? 633.f : 578.f) * SCALE.x, 505.0f * SCALE.y);
         const auto pos_scal_search = ImVec2(WINDOW_SIZE.x - search_pos.x, WINDOW_SIZE.y - search_pos.y);
         const ImVec2 SEARCH_WIDGET_POS_MIN(WINDOW_POS.x + pos_scal_search.x, WINDOW_POS.y + pos_scal_search.y);
-        const char *SEARCH_STR = "Search";
+        const char *SEARCH_STR = "搜索";
         const auto SEARCH_SCAL_SIZE = ImVec2((ImGui::CalcTextSize(SEARCH_STR).x * scal_widget_font_size) * SCALE.x, (ImGui::CalcTextSize(SEARCH_STR).y * scal_widget_font_size) * SCALE.y);
         const auto POS_STR_SEARCH = ImVec2(SEARCH_WIDGET_POS_MIN.x + ((widget_scal_size.x / 2.f) - (SEARCH_SCAL_SIZE.x / 2.f)),
             SEARCH_WIDGET_POS_MIN.y + ((widget_scal_size.x / 2.f) - (SEARCH_SCAL_SIZE.y / 2.f)));
@@ -1122,7 +1122,7 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
             const auto manual_pos = ImVec2(520.f * SCALE.x, 505.0f * SCALE.y);
             const auto pos_scal_manual = ImVec2(WINDOW_SIZE.x - manual_pos.x, WINDOW_SIZE.y - manual_pos.y);
 
-            const char *MANUAL_STR = "Manual";
+            const char *MANUAL_STR = "手册";
             const auto MANUAL_STR_SCAL_SIZE = ImVec2((ImGui::CalcTextSize(MANUAL_STR).x * scal_widget_font_size) * SCALE.x, (ImGui::CalcTextSize(MANUAL_STR).y * scal_widget_font_size) * SCALE.y);
             const ImVec2 MANUAL_WIDGET_POS_MIN(WINDOW_POS.x + pos_scal_manual.x, WINDOW_POS.y + pos_scal_manual.y);
             const auto MANUAL_STR_POS = ImVec2(MANUAL_WIDGET_POS_MIN.x + ((widget_scal_size.x / 2.f) - (MANUAL_STR_SCAL_SIZE.x / 2.f)),
@@ -1137,7 +1137,7 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
         const auto update_pos = ImVec2((manual_exist ? 408.f : 463.f) * SCALE.x, 505.0f * SCALE.y);
         const auto pos_scal_update = ImVec2(WINDOW_SIZE.x - update_pos.x, WINDOW_SIZE.y - update_pos.y);
 
-        const auto UPDATE_STR = "Update";
+        const auto UPDATE_STR = "更新";
         const auto UPDATE_STR_SCAL_SIZE = ImVec2((ImGui::CalcTextSize(UPDATE_STR).x * scal_widget_font_size) * SCALE.x, (ImGui::CalcTextSize(UPDATE_STR).y * scal_widget_font_size) * SCALE.y);
         const ImVec2 UPDATE_WIDGET_POS_MIN(WINDOW_POS.x + pos_scal_update.x, WINDOW_POS.y + pos_scal_update.y);
         const auto UPDATE_STR_POS = ImVec2(UPDATE_WIDGET_POS_MIN.x + ((widget_scal_size.x / 2.f) - (UPDATE_STR_SCAL_SIZE.x / 2.f)),
@@ -1155,10 +1155,10 @@ void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv) {
     if (!gui.vita_area.content_manager && !gui.vita_area.manual) {
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 6.f * SCALE.x);
         ImGui::SetCursorPos(ImVec2(WINDOW_SIZE.x - (60.0f * SCALE.x) - BUTTON_SIZE.x, 12.0f * SCALE.y));
-        if (ImGui::Button("Esc", BUTTON_SIZE))
+        if (ImGui::Button("退出", BUTTON_SIZE))
             close_live_area_app(gui, emuenv, app_path);
         ImGui::SetCursorPos(ImVec2(60.f * SCALE.x, 12.0f * SCALE.y));
-        if (ImGui::Button("Help", BUTTON_SIZE))
+        if (ImGui::Button("帮助", BUTTON_SIZE))
             ImGui::OpenPopup("Live Area Help");
         ImGui::SetNextWindowPos(ImVec2(WINDOW_SIZE.x / 2.f, WINDOW_SIZE.y / 2.f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         if (ImGui::BeginPopupModal("Live Area Help", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings)) {
