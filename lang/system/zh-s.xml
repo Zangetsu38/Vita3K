@@ -56,8 +56,8 @@
 		<open_state_report>打开状态报告</open_state_report>
 		<create_state_report>创建状态报告</create_state_report>
 		<update_database>更新数据库</update_database>
-		<copy_app_info>复制应用程序信息</copy_app_info>
-		<name_and_id>名称和标题ID</name_and_id>
+		<copy_app_info>复制应用信息</copy_app_info>
+		<name_and_id>名称和编号</name_and_id>
 		<app_summary>应用程序摘要</app_summary>
 		<custom_config>自定义配置</custom_config>
 		<create>创建</create>
@@ -73,27 +73,27 @@
 		<update_history>更新历史记录</update_history>
 		<history_version>{}版本</history_version>
 		<delete>
-			<app_delete>删除此应用程序及所有相关数据，包括保存数据。</app_delete>
+			<app_delete>删除此应用程序及所有相关数据，包括存档。</app_delete>
 			<app_delete_description>删除应用程序可能需要一段时间，
 取决于它的大小和您的硬件。</app_delete_description>
 			<addcont_delete>要删除此追加内容吗？</addcont_delete>
 			<license_delete>要删除此授权吗？</license_delete>
-			<saved_data_delete>要删除此保存数据吗？</saved_data_delete>
+			<saved_data_delete>要删除此存档吗？</saved_data_delete>
 		</delete>
 		<info name="信息">
-			<eligible>有权</eligible>
-			<ineligible>无权</ineligible>
+			<eligible>可解锁</eligible>
+			<ineligible>不可解锁</ineligible>
 			<level>级别</level>
 			<name>名称</name>
 			<trophy_earning>获得奖杯</trophy_earning>
-			<parental_controls>视听者限制</parental_controls>
-			<updated>升级日期</updated>
+			<parental_controls>分级限制</parental_controls>
+			<updated>更新日期</updated>
 			<size>大小</size>
 			<version>版本</version>
-			<title_id>标题ID</title_id>
-			<last_time_used>最近使用时间</last_time_used>
-			<time_used>使用时间</time_used>
-			<never>从来没有</never>
+			<title_id>编号</title_id>
+			<last_time_used>最近玩过</last_time_used>
+			<time_used>游戏时间</time_used>
+			<never>从未玩过</never>
 		</info>
 		<time_used>
 			<time_used_seconds>{}秒</time_used_seconds>
@@ -269,15 +269,15 @@
 
 	<content_manager name="内容管理">
 		<application name="应用程序">
-			<delete>即将删除选择的应用程序及所有相关数据，包括保存数据。</delete>
+			<delete>即将删除选择的应用程序及所有相关数据，包括存档。</delete>
 			<no_item>没有内容。</no_item>
 		</application>
-		<saved_data name="保存数据">
-			<delete>所选择的保存数据将被删除。</delete>
-			<no_saved_data>保存数据不存在。</no_saved_data>
+		<saved_data name="存档">
+			<delete>所选择的存档将被删除。</delete>
+			<no_saved_data>存档不存在。</no_saved_data>
 		</saved_data>
 		<theme>主题</theme>
-		<free_space>空余容量</free_space>
+		<free_space>剩余容量</free_space>
 		<clear_all>全部清除</clear_all>
 	</content_manager>
 
@@ -317,8 +317,8 @@
 		<cross_button>交叉键</cross_button>
 		<circle_button>圆形键</circle_button>
 		<triangle_button>三角键</triangle_button>
-		<start_button>Start键</start_button>
-		<select_button>Select键</select_button>
+		<start_button>开始键</start_button>
+		<select_button>选择键</select_button>
 		<ps_button>PS键</ps_button>
 		<l1_button>L1键</l1_button>
 		<r1_button>R1键</r1_button>
@@ -347,31 +347,31 @@
 			<delete>
 				<cancel_deleting>要取消删除吗？</cancel_deleting>
 				<deletion_complete>删除完毕。</deletion_complete>
-				<delete_saved_data>要删除此保存数据吗？</delete_saved_data>
+				<delete_saved_data>要删除此存档吗？</delete_saved_data>
 			</delete>
 			<info>
 				<details>详细信息</details>
-				<updated>升级日期</updated>
+				<updated>更新日期</updated>
 			</info>
 			<load name="读取">
 				<cancel_loading>要取消读取吗？</cancel_loading>
-				<no_saved_data>保存数据不存在。</no_saved_data>
+				<no_saved_data>存档不存在。</no_saved_data>
 				<load_complete>读取完毕。</load_complete>
 				<loading>正在读取…</loading>
-				<load_saved_data>要读取此保存数据吗？</load_saved_data>
+				<load_saved_data>要读取此存档吗？</load_saved_data>
 			</load>
 			<save name="保存">
 				<cancel_saving>要取消保存吗？</cancel_saving>
 				<could_not_save>无法保存文件。
-存储卡没有足够的空余容量。</could_not_save>
-				<not_free_space>存储卡没有足够的空余容量。</not_free_space>
-				<new_saved_data>新建保存数据</new_saved_data>
+存储卡没有足够的剩余容量。</could_not_save>
+				<not_free_space>存储卡没有足够的剩余容量。</not_free_space>
+				<new_saved_data>新建存档</new_saved_data>
 				<saving_complete>保存完毕。</saving_complete>
-				<save_the_data>要保存数据吗？</save_the_data>
+				<save_the_data>要保存存档吗？</save_the_data>
 				<saving>正在保存…</saving>
 				<warning_saving>正在保存…
 请勿关闭电源或关闭应用程序。</warning_saving>
-				<overwrite_saved_data>要覆盖此保存数据吗？</overwrite_saved_data>
+				<overwrite_saved_data>要覆盖此存档吗？</overwrite_saved_data>
 			</save>
 		</save_data>
 	</dialog>
@@ -393,7 +393,7 @@
 		<by_type>按类型</by_type>
 		<commercial>商业</commercial>
 		<homebrew>自制</homebrew>
-		<by_compatibility_state>按兼容性状态</by_compatibility_state>
+		<by_compatibility_state>按兼容性</by_compatibility_state>
 		<ver>版本</ver>
 		<cat>类别</cat>
 		<comp>兼容性</comp>
@@ -414,7 +414,7 @@
 
 	<initial_setup>
 		<back>返回</back>
-		<completed_setup>初始设定已完成。
+		<completed_setup>初始设置已完成。
 请尽情享受Vita3K吧。</completed_setup>
 		<select_language>请选择语言。</select_language>
 		<select_pref_path>请选择存放路径。</select_pref_path>
@@ -426,7 +426,7 @@
 		<installed>已安装：</installed>
 		<download_font_package>下载字体包</download_font_package>
 		<install_firmware_file>安装固件文件</install_firmware_file>
-		<select_interface_settings>请选择界面设定。</select_interface_settings>
+		<select_interface_settings>请选择界面设置。</select_interface_settings>
 		<show_info_bar>信息栏可见</show_info_bar>
 		<info_bar_description>勾选此项在应用程序选择页面内显示信息栏。
 信息栏是时间、电量以及信息中心。</info_bar_description>
@@ -487,7 +487,7 @@
 	</install_dialog>
 
 	<live_area>
-		<start>开始</start>
+		<start>启动</start>
 		<continue>继续</continue>
 		<help>
 			<control_setting>在控制设置中使用键盘配置</control_setting>
@@ -508,7 +508,7 @@
 			<hide_show>隐藏/显示按钮</hide_show>
 			<hide_show_control>点击左键或按三角键</hide_show_control>
 			<exit_manual>退出说明书</exit_manual>
-			<exit_manual_control>点击Esc或按PS键</exit_manual_control>
+			<exit_manual_control>点击退出或按PS键</exit_manual_control>
 		</help>
 	</live_area>
 
@@ -526,7 +526,7 @@
 		<max>最高</max>
 	</performance_overlay>
 
-	<settings name="设定">
+	<settings name="设置">
 		<theme_background name="主题&背景">
 			<default>原始</default>
 			<theme name="主题">
@@ -534,7 +534,7 @@
 				<information name="信息">
 					<name>名称</name>
 					<provider>提供者</provider>
-					<updated>升级日期</updated>
+					<updated>更新日期</updated>
 					<size>大小</size>
 					<version>版本</version>
 					<content_id>内容ID</content_id>
@@ -636,8 +636,8 @@
 			<internal_resolution_upscaling>内部分辨率放大</internal_resolution_upscaling>
 			<internal_resolution_upscaling_description>为Vita3K启用放大效果。
 实验性：不保证游戏能在超过1倍时正确渲染。</internal_resolution_upscaling_description>
-			<anisotropic_filtering>各向异性过滤</anisotropic_filtering>
-			<anisotropic_filtering_description>各向异性过滤是一种提高表面图像质量的技术，
+			<anisotropic_filtering>各项异性过滤</anisotropic_filtering>
+			<anisotropic_filtering_description>各项异性过滤是一种提高表面图像质量的技术，
 它们相对于观察者是倾斜的，
 它没有缺点，但会影响性能。</anisotropic_filtering_description>
 			<texture_replacement>纹理替换</texture_replacement>
@@ -652,10 +652,10 @@
 			<spirv_shader_description>将生成的Spir-V着色器直接传递给驱动程序。
 请注意，一些有益的扩展功能将被禁用，
 并非所有显卡都与此兼容。</spirv_shader_description>
-			<clean_shaders>清除着色器缓存以及日志</clean_shaders>
-			<fps_hack>FPS修改</fps_hack>
-			<fps_hack_description>游戏修改允许一些以30FPS运行的游戏在模拟器上以60FPS的速度运行。
-请注意这只是一个修改，仅适用于某些游戏。
+			<clean_shaders>清除着色器缓存和日志</clean_shaders>
+			<fps_hack>帧率优化</fps_hack>
+			<fps_hack_description>游戏优化允许一些以30帧运行的游戏在模拟器上以
+60帧的速度运行。请注意此修改，仅适用于部分游戏。
 在其他游戏中，它可能没有效果或使其出现两倍速。</fps_hack_description>
 		</gpu>
 		<audio name="音频">
@@ -692,7 +692,7 @@
 			<select_log_level>选择您喜欢的日志级别。</select_log_level>
 			<archive_log>归档日志</archive_log>
 			<archive_log_description>勾选此项启用归档日志。</archive_log_description>
-			<discord_rich_presence>启用Discord Rich Presence以在Discord上展示您正在运行的应用程序。</discord_rich_presence>
+			<discord_rich_presence>启用Discord Rich Presence以在Discord上显示您正在运行的应用程序。</discord_rich_presence>
 			<texture_cache>纹理缓存</texture_cache>
 			<texture_cache_description>取消勾选此项禁用纹理缓存。</texture_cache_description>
 			<show_compile_shaders>显示编译着色器</show_compile_shaders>
@@ -703,14 +703,14 @@
 			<log_compat_warn_description>勾选此项启用对GitHub议题的兼容性警告的记录。</log_compat_warn_description>
 			<check_for_updates>检查更新</check_for_updates>
 			<check_for_updates_description>启动时自动检查更新。</check_for_updates_description>
-			<performance_overlay>性能图层</performance_overlay>
-			<performance_overlay_description>在屏幕上以图层的形式显示性能信息。</performance_overlay_description>
+			<performance_overlay>显示帧率</performance_overlay>
+			<performance_overlay_description>在屏幕上显示性能信息。</performance_overlay_description>
 			<minimum>最少</minimum>
 			<low>少</low>
 			<medium>中等</medium>
 			<maximum>最多</maximum>
 			<detail>细节</detail>
-			<select_detail>选择您喜欢的性能图层细节。</select_detail>
+			<select_detail>选择您喜欢的性能信息的细节。</select_detail>
 			<top_left>左上</top_left>
 			<top_center>顶部中间</top_center>
 			<top_right>右上</top_right>
@@ -718,7 +718,7 @@
 			<bottom_center>底部中间</bottom_center>
 			<bottom_right>右下</bottom_right>
 			<position>位置</position>
-			<select_position>选择您喜欢的性能图层位置。</select_position>
+			<select_position>选择您喜欢的性能信息的位置。</select_position>
 			<case_insensitive>勾选以在区分大小写的文件系统上启用不区分大小写的路径查找。
 重启时复位</case_insensitive>
 			<case_insensitive_description>允许模拟器尝试在非Windows平台上不区分大小写的文件搜索。</case_insensitive_description>
@@ -833,10 +833,10 @@
 
 	<sys_apps_title>
 		<browser>浏览器</browser>
-		<internet_browser>互联网浏览器</internet_browser>
-		<trophies>Trophy（奖杯）</trophies>
-		<trophy_collection>Trophy（奖杯）收藏</trophy_collection>
-		<settings>设定</settings>
+		<internet_browser>浏览器</internet_browser>
+		<trophies>奖杯</trophies>
+		<trophy_collection>奖杯收藏</trophy_collection>
+		<settings>设置</settings>
 		<content_manager>内容管理</content_manager>
 	</sys_apps_title>
 
@@ -850,14 +850,14 @@
 		<no_trophies>找不到奖杯。
 您可通过游玩支持奖杯功能的应用程序获得奖杯。</no_trophies>
 		<not_earned>未获得</not_earned>
-		<original>原始</original>
-		<sort>排列</sort>
+		<original>默认</original>
+		<sort>排序</sort>
 		<trophies>奖杯数</trophies>
-		<grade>Grade（等级）</grade>
-		<progress>达成率</progress>
-		<updated>升级日期</updated>
+		<grade>等级</grade>
+		<progress>进度</progress>
+		<updated>更新日期</updated>
 		<advance>高级</advance>
-		<show_hidden>展示隐藏奖杯</show_hidden>
+		<show_hidden>显示隐藏奖杯</show_hidden>
 	</trophy_collection>
 
 	<user_management>
@@ -870,7 +870,7 @@
 		<delete_user>删除用户</delete_user>
 		<user_delete>请选择要删除的用户。</user_delete>
 		<user_delete_msg>将删除以下用户。</user_delete_msg>
-		<user_delete_message>若删除用户，该用户的保存数据、奖杯也会一并被删除。</user_delete_message>
+		<user_delete_message>若删除用户，该用户的存档、奖杯也会一并被删除。</user_delete_message>
 		<user_delete_warn>用户将被删除。
 确定要继续吗？</user_delete_warn>
 		<user_deleted>用户已删除。</user_deleted>
