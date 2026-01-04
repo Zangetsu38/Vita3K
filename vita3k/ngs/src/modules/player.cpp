@@ -81,43 +81,6 @@ void PlayerModule::on_param_change(const MemState &mem, ModuleData &data) {
     }
 }
 
-static std::string log_ascii_hex(const uint8_t *data, size_t len) {
-    std::stringstream ss;
-    size_t i = 0;
-    ss << std::endl;
-    while (i < len) {
-        ss << std::setw(8) << std::setfill('0') << std::hex << i << "  ";
-
-        for (size_t j = 0; j < 16 && i + j < len; ++j) {
-            ss << std::setw(2) << std::setfill('0') << std::hex << (int)data[i + j] << " ";
-        }
-
-        for (size_t j = len - i; j < 16; ++j) {
-            ss << "   ";
-        }
-
-        ss << " |";
-
-        for (size_t j = 0; j < 16 && i + j < len; ++j) {
-            if (data[i + j] >= 32 && data[i + j] <= 126) {
-                ss << (char)data[i + j];
-            } else {
-                ss << '.';
-            }
-        }
-
-        for (size_t j = len - i; j < 16; ++j) {
-            ss << " ";
-        }
-
-        ss << "|\n";
-
-        i += 16;
-    }
-
-    return ss.str();
-}
-
 void PlayerModule::set_default_preset(const MemState &mem, ModuleData &data) {
     SceNgsPlayerStates *state = data.get_state<SceNgsPlayerStates>();
 
