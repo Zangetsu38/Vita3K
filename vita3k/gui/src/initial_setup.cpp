@@ -176,7 +176,7 @@ void draw_initial_setup(GuiState &gui, EmuEnvState &emuenv) {
         }();
 
         if (!has_all_files_access) {
-            TextColoredCentered(ImVec4(0.98f, 0.01f, 0.20f, 1.0f), lang["storage_file_permissions"].c_str());
+            TextColoredCentered(ImVec4(0.98f, 0.01f, 0.20f, 1.0f), lang["storage_file_permissions"].c_str(), 20.f * SCALE.x);
             ImGui::SetCursorPos(BIG_BUTTON_POS);
             if (ImGui::Button(lang["grant_access"].c_str(), BIG_BUTTON_SIZE)) {
                 JNIEnv *env = reinterpret_cast<JNIEnv *>(SDL_GetAndroidJNIEnv());
