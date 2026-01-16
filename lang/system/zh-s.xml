@@ -788,7 +788,6 @@
 			<reset_emu_path>重置模拟器路径</reset_emu_path>
 			<reset_emu_path_description>重置Vita3K模拟器为默认路径。
 您需要手动将旧文件夹移动到新位置。</reset_emu_path_description>
-			<storage_folder_permissions>使用不同路径需要额外权限</storage_folder_permissions>
 			<custom_config_settings>自定义配置设置</custom_config_settings>
 			<clear_custom_config>清除自定义配置</clear_custom_config>
 			<screenshot_image_type>截图图像类型</screenshot_image_type>
