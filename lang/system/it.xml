@@ -278,6 +278,8 @@ Non spegnere il sistema né chiudere l'applicazione.</warning_saving>
 		<completed_setup>Hai finito la configurazione iniziale.
 Il tuo sistema Vita3K è pronto per l'uso!</completed_setup>
 		<select_language>Seleziona una lingua.</select_language>
+		<storage_file_permissions>Vita3K richiede accesso completo ai file per funzionare correttamente, tocca 'Concedi Accesso' per continuare.</storage_file_permissions>
+		<grant_access>Concedi Accesso</grant_access>
 		<install_firmware>Installa il Firmware.</install_firmware>
 		<next>Seguente</next>
 	</initial_setup>

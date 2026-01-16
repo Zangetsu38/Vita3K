@@ -447,6 +447,8 @@
 请尽情享受Vita3K吧。</completed_setup>
 		<select_language>请选择语言。</select_language>
 		<select_pref_path>请选择存放路径。</select_pref_path>
+		<storage_file_permissions>Vita3K需要完整的文件访问权限才能正常工作，点击"授予访问权限"以继续。</storage_file_permissions>
+		<grant_access>授予访问权限</grant_access>
 		<current_emu_path>当前模拟器路径</current_emu_path>
 		<change_emu_path>更改模拟器路径</change_emu_path>
 		<reset_emu_path>重置模拟器路径</reset_emu_path>
