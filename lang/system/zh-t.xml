@@ -788,7 +788,6 @@
 			<reset_emu_path>重置模擬器路徑</reset_emu_path>
 			<reset_emu_path_description>重置Vita3K模擬器為預設路徑。
 您需要手動將舊資料夾移動到預設位置。</reset_emu_path_description>
-			<storage_folder_permissions>使用不同路徑需要額外權限</storage_folder_permissions>
 			<custom_config_settings>自訂組態設定</custom_config_settings>
 			<clear_custom_config>清除自訂組態</clear_custom_config>
 			<screenshot_image_type>截圖圖像類型</screenshot_image_type>
