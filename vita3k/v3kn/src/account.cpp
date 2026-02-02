@@ -302,6 +302,9 @@ void save_v3kn_user_info(EmuEnvState &emuenv) {
 }
 
 void init_v3kn_user_info(GuiState &gui, EmuEnvState &emuenv) {
+    gui.v3kn_avatar = {};
+    gui.v3kn_panel = {};
+
     auto &account_state = emuenv.v3kn.account_state;
     auto &user_info = account_state.user_info;
     user_info = {};
@@ -333,6 +336,13 @@ void init_v3kn_user_info(GuiState &gui, EmuEnvState &emuenv) {
     user_info.online_id = user_node.child("online_id").text().as_string();
     user_info.password = user_node.child("password").text().as_string();
     user_info.token = user_node.child("token").text().as_string();
+    if (user_info.online_id.empty()) {
+        user_info.online_id = user_node.child("NPID").text().as_string();
+        if (!user_info.online_id.empty()) {
+            save_v3kn_user_info(emuenv);
+            LOG_INFO("V3KN user info: migrated legacy npid field to online_id for {}", user_info.online_id);
+        }
+    }
 
     account_state.selected_server_index = static_cast<uint32_t>(vector_utils::find_index(V3KN_SERVER_LIST_URL, user_info.host));
     if (account_state.selected_server_index == static_cast<uint32_t>(-1))
@@ -379,6 +389,7 @@ void init_v3kn_user_info(GuiState &gui, EmuEnvState &emuenv) {
     set_v3kn_logged_in(true);
     init_v3kn_avatar(gui, emuenv, user_info);
 
+    start_trophy_auto_sync(gui, emuenv);
     set_v3kn_login_init_completed(true);
     LOG_INFO("V3KN user info: successfully logged in as {}", user_info.online_id);
 }
