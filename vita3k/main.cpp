@@ -19,28 +19,45 @@
 #include "interface.h"
 
 #include <app/functions.h>
+#include <app/session_controller.h>
 #include <config/functions.h>
+#include <config/state.h>
 #include <config/version.h>
+#include <display/state.h>
+#include <emuenv/app_launch_request.h>
 #include <emuenv/state.h>
+#ifdef HAS_QT
 #include <gui-qt/gui_language.h>
 #include <gui-qt/gui_settings.h>
 #include <gui-qt/log_widget.h>
 #include <gui-qt/main_window.h>
 #include <gui-qt/persistent_settings.h>
-#include <include/cpu.h>
-#include <include/environment.h>
+#endif
+#include <bgm_player/functions.h>
+#include <gui/functions.h>
+#include <gui/imgui_impl_sdl.h>
+#include <gui/state.h>
 #include <io/state.h>
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <modules/module_parent.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
+#include <renderer/functions.h>
+#include <renderer/state.h>
+#include <sdl-frontend/session.h>
 #include <shader/spirv_recompiler.h>
 #include <util/log.h>
 #include <util/string_utils.h>
+#include <util/sysinfo.h>
 
+#ifdef HAS_QT
 #include <QApplication>
 #include <QMessageBox>
+#include <QSysInfo>
+#endif
 
 #if USE_DISCORD
 #include <app/discord.h>
@@ -48,6 +65,9 @@
 
 #ifdef _WIN32
 #include <combaseapi.h>
+#endif
+
+#if defined(_WIN32) && defined(HAS_QT)
 #define SDL_MAIN_HANDLED
 #endif
 
@@ -55,26 +75,38 @@
 #include <tracy/Tracy.hpp>
 #endif
 
+#ifdef HAS_QT
 #include "gui-qt/qt_utils.h"
+#endif
 
 #include <SDL3/SDL_cpuinfo.h>
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_platform.h>
+#include <SDL3/SDL_video.h>
 
+#include <array>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
+#include <thread>
 
 int main(int argc, char *argv[]) {
+#ifdef HAS_QT
 #ifdef __APPLE__
     qputenv("QT_MTL_NO_TRANSACTION", "1");
     qputenv("QT_MAC_NO_CONTAINER_LAYER", "1");
 #endif
-
-    QApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("Vita3K"));
     QCoreApplication::setApplicationName(QStringLiteral("Vita3K"));
+#else
+    (void)argc;
+    (void)argv;
+#endif
 
 #ifdef TRACY_ENABLE
     ZoneScoped; // Tracy - Track main function scope
@@ -85,11 +117,6 @@ int main(int argc, char *argv[]) {
 
     if (!fs::exists(root_paths.get_vita_fs_path())) {
         fs::create_directories(root_paths.get_vita_fs_path());
-    }
-
-    LogWidget::register_callback();
-    if (logging::init(root_paths, true) != Success) {
-        return InitConfigFailed;
     }
 
     // Check admin privs before init starts to avoid creating of file as other user by accident
@@ -121,6 +148,31 @@ int main(int argc, char *argv[]) {
     Config cfg{};
     EmuEnvState emuenv;
     const auto config_err = config::init_config(cfg, argc, argv, root_paths, portable);
+    const bool is_sdl_frontend = cfg.frontend == Frontend::sdl;
+
+#ifdef HAS_QT
+    const bool is_imgui_frontend = !is_sdl_frontend
+        && (cfg.frontend == Frontend::imgui || cfg.gui_backend != "Qt");
+    std::optional<QApplication> qt_app;
+    if (!is_sdl_frontend)
+        qt_app.emplace(argc, argv);
+#else
+    const bool is_imgui_frontend = !is_sdl_frontend;
+#endif
+
+#ifdef HAS_QT
+    if (qt_app && !is_imgui_frontend)
+        LogWidget::register_callback();
+#endif
+
+#if defined(_WIN32) && !defined(__ANDROID__)
+    if (is_imgui_frontend)
+        app::init_console();
+#endif
+
+    if (logging::init(root_paths, true) != Success) {
+        return InitConfigFailed;
+    }
 
     if (config_err != Success) {
         if (config_err == QuitRequested) {
@@ -158,7 +210,10 @@ int main(int argc, char *argv[]) {
 
     fs::create_directories(cfg.get_vita_fs_path());
 
-    gui::i18n::apply_ui_language(app, cfg.user_lang, emuenv.static_assets_path);
+#ifdef HAS_QT
+    if (qt_app && !is_imgui_frontend)
+        gui::i18n::apply_ui_language(*qt_app, cfg.user_lang, emuenv.static_assets_path);
+#endif
 
 #ifdef _WIN32
     {
@@ -171,8 +226,6 @@ int main(int argc, char *argv[]) {
         if (logging::init(root_paths, false) != Success)
             return InitConfigFailed;
     } else {
-        std::atexit(SDL_Quit);
-
         // Joystick events on background thread
         SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
         // Enable HIDAPI rumble for DS4/DS
@@ -181,16 +234,37 @@ int main(int argc, char *argv[]) {
         SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH, "1");
         SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_JOY_CONS, "1");
 
-        if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_HAPTIC | SDL_INIT_SENSOR | SDL_INIT_CAMERA)) {
-            LOG_ERROR("SDL initialisation failed: {}", SDL_GetError());
-            QMessageBox::critical(nullptr, "Error", "SDL initialisation failed.");
-            return SDLInitFailed;
+        if (!is_sdl_frontend) {
+            static constexpr std::array LIST_LOG_LEVEL = SPDLOG_LEVEL_NAMES;
+            LOG_INFO("log-level: {}", LIST_LOG_LEVEL[cfg.log_level]);
+
+            auto sdl_init_flags = SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_HAPTIC | SDL_INIT_SENSOR;
+            if (is_imgui_frontend)
+                sdl_init_flags |= SDL_INIT_VIDEO;
+
+            if (!SDL_Init(sdl_init_flags)) {
+                LOG_ERROR("SDL initialisation failed: {}", SDL_GetError());
+#ifdef HAS_QT
+                if (qt_app && !is_imgui_frontend)
+                    QMessageBox::critical(nullptr, "Error", "SDL initialisation failed.");
+#endif
+                return SDLInitFailed;
+            }
+            if (!SDL_InitSubSystem(SDL_INIT_CAMERA))
+                LOG_WARN("SDL camera initialisation failed, continuing without it: {}", SDL_GetError());
         }
     }
 
     LOG_INFO("{}", window_title);
-    LOG_INFO("OS: {}", CppCommon::Environment::OSVersion());
-    LOG_INFO("CPU: {} | {} Threads | {} GHz", CppCommon::CPU::Architecture(), CppCommon::CPU::LogicalCores(), static_cast<float>(CppCommon::CPU::ClockSpeed()) / 1000.f);
+#ifdef HAS_QT
+    if (!is_imgui_frontend && !is_sdl_frontend) {
+        LOG_INFO("OS: {}", QSysInfo::prettyProductName().toStdString());
+    } else
+#endif
+    {
+        LOG_INFO("OS: {}", SDL_GetPlatform());
+    }
+    LOG_INFO("CPU: {}", util::get_system_info());
     LOG_INFO("Available ram memory: {} MiB", SDL_GetSystemRAM());
 
     app::AppRunType run_type = app::AppRunType::Unknown;
@@ -198,7 +272,12 @@ int main(int argc, char *argv[]) {
         run_type = app::AppRunType::Extracted;
 
     if (!app::init(emuenv, cfg, root_paths)) {
-        QMessageBox::critical(nullptr, "Error", "Emulated environment initialization failed.");
+#ifdef HAS_QT
+        if (qt_app && !is_imgui_frontend)
+            QMessageBox::critical(nullptr, "Error", "Emulated environment initialization failed.");
+        else
+#endif
+            LOG_ERROR("Emulated environment initialization failed.");
         return 1;
     }
 
@@ -254,19 +333,38 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
-    auto gui_settings = std::make_shared<GuiSettings>(gui_configs_dir);
-    auto persistent_settings = std::make_shared<PersistentSettings>(gui_configs_dir);
+    if (emuenv.cfg.frontend == Frontend::sdl) {
+        if (!emuenv.cfg.run_app_path) {
+            LOG_ERROR("The SDL frontend needs an installed app to run, given with -r");
+            return 1;
+        }
+        app::AppSessionController session(emuenv);
+        const int exit_code = sdl_frontend::run(emuenv, session, AppLaunchRequest{ .app_path = *emuenv.cfg.run_app_path });
+#ifdef _WIN32
+        CoUninitialize();
+#endif
+        return exit_code;
+    }
 
-    MainWindow mainwindow(emuenv, gui_settings, persistent_settings, admin_priv);
+    ExitCode frontend_exit_code = Success;
+#ifdef HAS_QT
+    if (!is_imgui_frontend) {
+        const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
+        auto gui_settings = std::make_shared<GuiSettings>(gui_configs_dir, emuenv.static_assets_path / "themes");
+        auto persistent_settings = std::make_shared<PersistentSettings>(gui_configs_dir);
 
-    mainwindow.show();
-    if (mainwindow.prompt_startup_warnings())
-        app.exec();
+        MainWindow mainwindow(emuenv, gui_settings, persistent_settings, admin_priv);
+
+        mainwindow.show();
+        if (mainwindow.prompt_startup_warnings())
+            qt_app->exec();
+    } else
+#endif
+        frontend_exit_code = gui::run_frontend(emuenv, argv);
 
 #ifdef _WIN32
     CoUninitialize();
 #endif
 
-    return Success;
+    return frontend_exit_code;
 }

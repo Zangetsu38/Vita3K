@@ -58,7 +58,6 @@ typedef std::map<SceUID, CodecEngineBlock> CodecEngineBlocks;
 typedef std::map<SceUID, Ptr<Ptr<void>>> SlotToAddress;
 typedef std::map<SceUID, ThreadStatePtr> ThreadStatePtrs;
 typedef std::map<SceUID, SceKernelModulePtr> SceKernelModuleInfoPtrs;
-typedef std::map<SceUID, CallbackPtr> CallbackPtrs;
 typedef unordered_map_fast<uint32_t, Address> ExportNids;
 // A NID hashes the function name alone, so same-named exports from different libraries collide.
 typedef unordered_map_fast<uint64_t, Address> LibExportNids;
@@ -120,17 +119,8 @@ struct KernelState {
     Ptr<const void> thread_event_end = Ptr<const void>(0);
     Address thread_event_end_arg = 0;
 
-    SimpleEventPtrs simple_events;
-    TimerPtrs timers;
-    SemaphorePtrs semaphores;
-    CondvarPtrs condvars;
-    CondvarPtrs lwcondvars;
-    MutexPtrs mutexes;
-    MutexPtrs lwmutexes; // also Mutexes for now
-    RWLockPtrs rwlocks;
-    EventFlagPtrs eventflags;
-    MsgPipePtrs msgpipes;
-    CallbackPtrs callbacks;
+    // Thread manager objects other than threads, by UID
+    KernelObjects objects;
 
     ThreadStatePtrs threads;
     void *jni_env;
@@ -184,9 +174,17 @@ struct KernelState {
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
 
     ThreadStatePtr get_thread(SceUID thread_id);
+
+    // Creates a callback owned by thread and returns its UID.
+    SceUID create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
+    // Deletes the callback with this UID, so it never runs again. Returns false if there is none.
+    bool delete_callback(SceUID id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
-    bool is_threads_paused() { return !paused_threads_status.empty(); }
+    bool is_threads_paused() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return threads_paused;
+    }
     void pause_threads();
     void resume_threads();
 
@@ -204,4 +202,5 @@ struct KernelState {
 private:
     std::atomic<SceUID> next_uid{ 1 };
     std::map<SceUID, ThreadStatus> paused_threads_status;
+    bool threads_paused = false;
 };

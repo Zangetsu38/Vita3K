@@ -50,8 +50,21 @@
 #define SCE_KERNEL_ATTR_TH_FIFO 0x00000000U
 #define SCE_KERNEL_ATTR_TH_PRIO 0x00002000U
 
+// Lets sceKernelOpen* find the object by name
+#define SCE_KERNEL_ATTR_OPENABLE 0x00000080U
+// Lets several threads wait on an event flag at once
+#define SCE_EVENT_WAITMULTIPLE 0x00001000U
+
 #define SCE_KERNEL_EVENT_ATTR_MANUAL_RESET 0x00000000U
 #define SCE_KERNEL_EVENT_ATTR_AUTO_RESET 0x00000100U
+
+// System events of a simple event: set when it is created, reported to waits for it when it is
+// deleted, and the result of a wait that ends with an error
+#define SCE_KERNEL_EVENT_CREATE 0x00000004U
+#define SCE_KERNEL_EVENT_DELETE 0x00000008U
+#define SCE_KERNEL_EVENT_ERROR 0x00000010U
+// The bits of a simple event a game may set and clear, the others are system events
+#define SCE_KERNEL_EVENT_USER_DEFINED_MASK 0xFF000000U
 
 #define SCE_KERNEL_ATTR_NOTIFY_CB_ALL 0x00000000U
 #define SCE_KERNEL_ATTR_NOTIFY_CB_WAKEUP_ONLY 0x00000800U
@@ -59,7 +72,20 @@
 #define SCE_KERNEL_MUTEX_ATTR_RECURSIVE 0x2U
 #define SCE_KERNEL_MUTEX_ATTR_CEILING 0x4U
 
+#define SCE_KERNEL_RW_LOCK_ATTR_RECURSIVE 0x2U
+#define SCE_KERNEL_RW_LOCK_ATTR_CEILING 0x4U
+
+#define SCE_KERNEL_RW_LOCK_CANCEL_WITH_WRITE_LOCK 0x1U
+
 #define SCE_KERNEL_EVENT_TIMER 0x00008000U
+
+#define SCE_KERNEL_TIMER_TYPE_SET_EVENT 0
+#define SCE_KERNEL_TIMER_TYPE_PULSE_EVENT 1
+
+#define SCE_KERNEL_MSG_PIPE_TYPE_USER_MAIN 0x00000040U
+
+// The bits that order the threads waiting on a message pipe, separately for senders and receivers
+#define SCE_KERNEL_MSG_PIPE_ATTR_TH_MASK 0x0000000FU
 
 #define SCE_KERNEL_MSG_PIPE_MODE_ASAP 0x00000000U
 #define SCE_KERNEL_MSG_PIPE_MODE_FULL 0x00000001U
@@ -71,6 +97,35 @@
 
 #define SCE_KERNEL_LW_MUTEX_ATTR_TH_FIFO SCE_KERNEL_ATTR_TH_FIFO
 #define SCE_KERNEL_LW_MUTEX_ATTR_TH_PRIO SCE_KERNEL_ATTR_TH_PRIO
+
+#define SCE_KERNEL_THREAD_STATUS_RUNNING 0x00000001U
+#define SCE_KERNEL_THREAD_STATUS_READY 0x00000002U
+#define SCE_KERNEL_THREAD_STATUS_STANDBY 0x00000004U
+#define SCE_KERNEL_THREAD_STATUS_WAITING 0x00000008U
+#define SCE_KERNEL_THREAD_STATUS_DORMANT 0x00000010U
+#define SCE_KERNEL_THREAD_STATUS_DELETED 0x00000020U
+#define SCE_KERNEL_THREAD_STATUS_DEAD 0x00000040U
+#define SCE_KERNEL_THREAD_STATUS_STAGNANT 0x00000080U
+#define SCE_KERNEL_THREAD_STATUS_SUSPENDED 0x00000100U
+
+#define SCE_KERNEL_WAITTYPE_DELAY 0x00000001U
+#define SCE_KERNEL_WAITTYPE_WAITTHEND 0x00000002U
+#define SCE_KERNEL_WAITTYPE_SIGNAL 0x00000004U
+#define SCE_KERNEL_WAITTYPE_WAITTHSUSPEND 0x00000008U
+#define SCE_KERNEL_WAITTYPE_EVENTFLAG 0x00000010U
+#define SCE_KERNEL_WAITTYPE_SEMAPHORE 0x00000020U
+#define SCE_KERNEL_WAITTYPE_MUTEX 0x00000040U
+#define SCE_KERNEL_WAITTYPE_RW_LOCK 0x00000080U
+#define SCE_KERNEL_WAITTYPE_COND_SIGNAL 0x00000100U
+#define SCE_KERNEL_WAITTYPE_COND_MUTEX 0x00000200U
+#define SCE_KERNEL_WAITTYPE_FAST_MUTEX 0x00001000U
+#define SCE_KERNEL_WAITTYPE_FAST_MUTEX_SPIN 0x00002000U
+#define SCE_KERNEL_WAITTYPE_EVENT 0x00010000U
+#define SCE_KERNEL_WAITTYPE_MP_EVENTS 0x00020000U
+#define SCE_KERNEL_WAITTYPE_MSG_PIPE 0x00040000U
+#define SCE_KERNEL_WAITTYPE_LW_MUTEX 0x00100000U
+#define SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL 0x00200000U
+#define SCE_KERNEL_WAITTYPE_LW_COND_LW_MUTEX 0x00400000U
 
 #define KERNELOBJECT_MAX_NAME_LENGTH 31
 
@@ -402,7 +457,6 @@ enum SceKernelErrorCode : uint32_t {
     SCE_KERNEL_ERROR_PRELOAD_FIOS2_FAILED = 0x8002D0F2,
     SCE_KERNEL_ERROR_AUTHFAIL = 0x8002F000,
     SCE_KERNEL_ERROR_NO_AUTH = 0x8002F001,
-    SCE_KERNEL_ERROR_MPP_EMPTY = 0x800201b4
 };
 
 enum SceEventFlagWaitTypes {
@@ -678,7 +732,6 @@ struct SceKernelLMOption {
     SceSize size;
 };
 
-// We only use workarea for uid
 struct SceKernelLwMutexWork {
     std::uint32_t owner;
     std::uint32_t unknown0;
@@ -687,7 +740,6 @@ struct SceKernelLwMutexWork {
     SceUID uid;
     std::uint32_t unknown1[3];
 };
-
 static_assert(sizeof(SceKernelLwMutexWork) == 32, "Incorrect size");
 
 struct SceKernelLwMutexInfo {
@@ -702,12 +754,11 @@ struct SceKernelLwMutexInfo {
     SceUInt32 numWaitThreads; /**< Number of threads waiting for the lightweight mutex */
 };
 
-// We only use workarea for uid
 struct SceKernelLwCondWork {
     SceUID uid;
-
-    std::uint8_t padding[28];
+    std::uint8_t padding[12];
 };
+static_assert(sizeof(SceKernelLwCondWork) == 16, "Incorrect size");
 
 struct SceKernelCreateLwMutex_opt {
     int init_count;

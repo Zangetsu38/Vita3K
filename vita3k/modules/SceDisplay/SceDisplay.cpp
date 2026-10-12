@@ -23,7 +23,6 @@
 #include <kernel/state.h>
 #include <packages/functions.h>
 #include <renderer/state.h>
-#include <util/lock_and_find.h>
 #include <util/types.h>
 
 #include <util/tracy.h>
@@ -31,6 +30,8 @@ TRACY_MODULE_NAME(SceDisplay);
 
 static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const bool is_since_setbuf, const bool is_cb) {
     const auto &thread = emuenv.kernel.get_thread(thread_id);
+    if (is_cb)
+        thread->process_callbacks();
 
     if (emuenv.display.fps_hack)
         // a game can use a vcount of 2 to render as 30fps
@@ -50,7 +51,7 @@ static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const
         target_vcount = thread->last_vblank_waited;
     }
 
-    wait_vblank(emuenv.display, emuenv.kernel, thread, target_vcount, is_cb);
+    wait_vblank(emuenv.display, thread, target_vcount, is_cb);
 
     if (emuenv.display.abort.load())
         return SCE_DISPLAY_ERROR_NO_PIXEL_DATA;
@@ -199,7 +200,7 @@ EXPORT(int, sceDisplayGetVcountInternal) {
 EXPORT(SceInt32, sceDisplayRegisterVblankStartCallback, SceUID uid) {
     TRACY_FUNC(sceDisplayRegisterVblankStartCallback, uid);
 
-    const auto cb = lock_and_find(uid, emuenv.kernel.callbacks, emuenv.kernel.mutex);
+    const auto cb = emuenv.kernel.objects.find<Callback>(uid);
     if (!cb)
         return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_VALUE);
 

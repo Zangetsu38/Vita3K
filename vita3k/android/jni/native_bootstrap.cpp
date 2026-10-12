@@ -27,9 +27,13 @@
 #include <modules/module_parent.h>
 #include <renderer/functions.h>
 #include <util/log.h>
+#include <util/sysinfo.h>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <fmt/format.h>
+
+#include <sys/system_properties.h>
 
 #include <filesystem>
 #include <span>
@@ -48,6 +52,17 @@ std::string format_app_version() {
     version += "-";
     version += app_hash;
     return version;
+}
+
+std::string get_system_property(const char *key) {
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get(key, value);
+    return value;
+}
+
+std::string get_os_version() {
+    return fmt::format("Android {} (API {})", get_system_property("ro.build.version.release"),
+        get_system_property("ro.build.version.sdk"));
 }
 
 bool initialize_session(const fs::path &storage_path, Root &root_paths, std::unique_ptr<EmuEnvState> &emuenv) {
@@ -76,6 +91,10 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
             return false;
 
         LOG_INFO("{}", window_title);
+        LOG_INFO("OS: {}", get_os_version());
+        LOG_INFO("Device: {} {}", get_system_property("ro.product.manufacturer"), get_system_property("ro.product.model"));
+        LOG_INFO("CPU: {}", util::get_system_info());
+        LOG_INFO("Available ram memory: {} MiB", SDL_GetSystemRAM());
 
         emuenv = std::make_unique<EmuEnvState>();
 
@@ -185,6 +204,13 @@ Java_org_vita3k_emulator_NativeLib_init(JNIEnv *env, jclass, jstring storage_pat
 JNIEXPORT jboolean JNICALL
 Java_org_vita3k_emulator_NativeLib_isInitialized(JNIEnv *, jclass) {
     return get_emuenv() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_org_vita3k_emulator_NativeLib_getGuiBackend(JNIEnv *env, jclass) {
+    const auto *emuenv = get_emuenv();
+    const auto &backend = emuenv ? emuenv->cfg.gui_backend : std::string("Compose");
+    return env->NewStringUTF(backend.c_str());
 }
 
 JNIEXPORT jboolean JNICALL

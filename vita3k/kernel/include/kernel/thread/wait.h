@@ -20,34 +20,23 @@
 #include <kernel/types.h>
 
 #include <chrono>
+#include <expected>
 
-// Returned instead of a result when the waiting thread is being deleted. The guest never sees it.
+// Returned instead of a result when the waiting thread exits or is being deleted. The guest never sees it.
 struct ThreadExiting {};
 
 // Result of a wait: a guest return code, or ThreadExiting.
-class [[nodiscard]] WaitResult {
-public:
-    WaitResult(SceInt32 code)
-        : code(code) {}
-    WaitResult(ThreadExiting)
-        : exiting(true) {}
-
-    // False when the thread is exiting.
-    explicit operator bool() const {
-        return !exiting;
-    }
-
-    // The guest return code, only valid when the thread is not exiting.
-    SceInt32 operator*() const {
-        return code;
-    }
-
-private:
-    SceInt32 code = SCE_KERNEL_OK;
-    bool exiting = false;
-};
+using WaitResult = std::expected<SceInt32, ThreadExiting>;
 
 using Deadline = std::chrono::steady_clock::time_point;
+
+// What a waiting thread is blocked on, as sceKernelGetThreadInfo reports it.
+struct WaitTarget {
+    // One of SCE_KERNEL_WAITTYPE_*, or 0 if not waiting
+    SceUInt32 type = 0;
+    // UID of the object waited on, or 0 if there is none
+    SceUID id = 0;
+};
 
 // Converts a guest timeout in microseconds into a deadline. A null timeout waits forever.
 inline Deadline deadline_from(const SceUInt32 *timeout) {
@@ -66,7 +55,7 @@ inline void writeback_timeout(SceUInt32 *timeout, Deadline deadline) {
 
 // Turns a wait result into the value returned to the guest.
 // ThreadExiting becomes SCE_KERNEL_OK, which the guest never sees: after the HLE call returns,
-// run_loop sees delete_requested and stops the thread before the next guest instruction.
+// run_loop sees the exit or delete request and stops the thread before the next guest instruction.
 inline SceInt32 guest_result(WaitResult r) {
-    return r ? *r : SCE_KERNEL_OK;
+    return r.value_or(SCE_KERNEL_OK);
 }

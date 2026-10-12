@@ -35,6 +35,7 @@
 #include <cctype>
 #include <exception>
 #include <iostream>
+#include <map>
 #include <vector>
 
 namespace config {
@@ -164,7 +165,9 @@ static void check_members(Config &self, const Config &rhs) {
     self.load_config = rhs.load_config;
     self.fullscreen = rhs.fullscreen;
     self.console = rhs.console;
+    self.frontend = rhs.frontend;
     self.app_args = rhs.app_args;
+    self.launch_uri = rhs.launch_uri;
     self.load_app_list = rhs.load_app_list;
     self.self_path = rhs.self_path;
 }
@@ -328,7 +331,10 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
 
     // Declare all options
     CLI::App app{ "Vita3K Command Line Interface" }; // "--help,-h" is automatically generated
+#ifdef _WIN32
+    // Elsewhere this would take absolute paths for options
     app.allow_windows_style_options();
+#endif
     app.allow_extras();
     app.enabled_by_default();
     app.get_formatter()->column_width(38);
@@ -347,8 +353,13 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
        ->default_val(false)->group("Input");
     input->add_option("--app-args,-Z", command_line.app_args, "Argument for app, use ', ' to separate arguments.")
         ->default_str("")->group("Input");
+    input->add_option("--launch-uri", command_line.launch_uri, "URI the app gets from sceAppMgrGetAppParam, as if another app launched it with it, like psgm:play?titleid=PCSA00000&arg=1")
+        ->default_str("")->group("Input");
     input->add_option("--load-app-list,-a", command_line.load_app_list, "Starts the emulator with load app list.")
        ->default_val(false)->group("Input");
+    const std::map<std::string, Frontend> frontends{ { "qt", Frontend::qt }, { "imgui", Frontend::imgui }, { "sdl", Frontend::sdl } };
+    input->add_option("--frontend", command_line.frontend, "Frontend to use: qt for the configured full interface, imgui to force ImGui, or sdl for a plain window that runs the app given by -r and quits with it")
+        ->transform(CLI::CheckedTransformer(frontends, CLI::ignore_case))->default_str("qt")->group("Input");
     input->add_option("--self,-S", command_line.self_path, "Path to the self to run inside Title ID")
         ->default_str("eboot.bin")->group("Input");
     input->add_option("--installed-path,-r", command_line.run_app_path, "Path to the installed app to run")
@@ -461,11 +472,9 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         LOG_INFO_IF(cfg.load_config, "Custom configuration file loaded successfully.");
 
         logging::set_level(static_cast<spdlog::level::level_enum>(cfg.log_level));
-        static constexpr std::array LIST_LOG_LEVEL = SPDLOG_LEVEL_NAMES;
 
         LOG_INFO_IF(cfg.content_path, "input-content-path: {}", cfg.content_path->string());
         LOG_INFO_IF(cfg.run_app_path, "input-installed-path: {}", *cfg.run_app_path);
-        LOG_INFO("log-level: {}", LIST_LOG_LEVEL[cfg.log_level]);
         LOG_INFO_IF(cfg.log_active_shaders, "log-active-shaders: enabled");
         LOG_INFO_IF(cfg.log_uniforms, "log-uniforms: enabled");
     }

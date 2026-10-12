@@ -392,18 +392,24 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         std::vector<const char *> instance_extensions;
         instance_extensions.reserve(8);
-        instance_extensions.push_back(vk::KHRSurfaceExtensionName);
-#ifdef _WIN32
-        instance_extensions.push_back(vk::KHRWin32SurfaceExtensionName);
-#elif defined(__APPLE__)
-        instance_extensions.push_back(vk::EXTMetalSurfaceExtensionName);
-#elif defined(__ANDROID__)
-        instance_extensions.push_back(vk::KHRAndroidSurfaceExtensionName);
-#else
         auto *frame_host = this->renderer::State::frame;
-        if (!select_linux_surface_extension(*this, frame_host->handle(), instance_extensions))
-            return false;
+        if (const auto *provider = frame_host->vulkan_surface_provider()) {
+            instance_extensions = provider->instance_extensions();
+            if (instance_extensions.empty()) {
+                LOG_ERROR("The window gave no Vulkan instance extensions for its surface");
+                return false;
+            }
+        } else {
+            instance_extensions.push_back(vk::KHRSurfaceExtensionName);
+#ifdef _WIN32
+            instance_extensions.push_back(vk::KHRWin32SurfaceExtensionName);
+#elif defined(__APPLE__)
+            instance_extensions.push_back(vk::EXTMetalSurfaceExtensionName);
+#elif !defined(__ANDROID__)
+            if (!select_linux_surface_extension(*this, frame_host->handle(), instance_extensions))
+                return false;
 #endif
+        }
 
         const std::set<std::string> optional_instance_extensions = {
             vk::KHRGetPhysicalDeviceProperties2ExtensionName,
@@ -914,12 +920,20 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
     }
 
     support_fsr &= static_cast<bool>(screen_renderer.surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage);
+    // The FSR storage shaders write rgba8; BGRA8 swapchain views are not format-compatible.
+    support_fsr &= screen_renderer.surface_format.format == vk::Format::eR8G8B8A8Unorm;
+    support_fsr &= static_cast<bool>(physical_device.getFormatProperties(screen_renderer.surface_format.format).optimalTilingFeatures & vk::FormatFeatureFlagBits::eStorageImage);
 
     return true;
 }
 
 void VKState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
     this->mem = &mem;
+
+    // cleanup(true) aborts the queue to stop the previous app's GPU wait thread.
+    // That thread is joined when its VKContext is destroyed; allow the next
+    // app's context to use the persistent renderer queue again.
+    request_queue.reset();
 
     bool use_high_accuracy = cfg.current_config.high_accuracy;
 
@@ -983,15 +997,13 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     texture_cache.init(true, texture_folder(), game_id);
 }
 
-void VKState::cleanup() {
+void VKState::cleanup(const bool preserve_frontend) {
     const auto release_descriptor_sets = [](FrameDescriptor &descriptor) {
         std::vector<vk::DescriptorSet>().swap(descriptor.sets);
         descriptor.descriptors_idx = 0;
     };
 
     device.waitIdle();
-
-    request_queue.abort();
 
     context = nullptr;
 
@@ -1009,9 +1021,10 @@ void VKState::cleanup() {
     for (int i = 0; i < MAX_FRAMES_RENDERING; i++)
         frames[i].destroy_queue.destroy_objects();
 
-    screen_renderer.cleanup();
-
-    overlay_renderer.destroy();
+    if (!preserve_frontend) {
+        screen_renderer.cleanup();
+        overlay_renderer.destroy();
+    }
 
     surface_cache.cleanup();
 
@@ -1034,53 +1047,67 @@ void VKState::cleanup() {
     mapped_memories.clear();
     buffer_trapping.trapped_buffers.clear();
 
-    default_image.destroy();
-    default_buffer.destroy();
+    // These fallback resources belong to the persistent Vulkan device and are
+    // reused by later app sessions when the frontend is preserved.
+    if (!preserve_frontend) {
+        default_image.destroy();
+        default_buffer.destroy();
+    }
 
     for (auto &pool : frame_descriptor_pools)
         device.destroy(pool);
     frame_descriptor_pools.clear();
 
-    for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
-        device.destroy(frames[i].render_pool);
-        frames[i].render_pool = nullptr;
-        device.destroy(frames[i].prerender_pool);
-        frames[i].prerender_pool = nullptr;
+    if (!preserve_frontend) {
+        for (int i = 0; i < MAX_FRAMES_RENDERING; i++) {
+            device.destroy(frames[i].render_pool);
+            frames[i].render_pool = nullptr;
+            device.destroy(frames[i].prerender_pool);
+            frames[i].prerender_pool = nullptr;
+        }
+
+        device.destroy(general_command_pool);
+        general_command_pool = nullptr;
+        device.destroy(transfer_command_pool);
+        transfer_command_pool = nullptr;
+        device.destroy(multithread_command_pool);
+        multithread_command_pool = nullptr;
+
+        allocator.destroy();
+
+        vkutil::deinit();
+
+        device.destroy();
+
+        if (debug_messenger) {
+            instance.destroyDebugUtilsMessengerEXT(debug_messenger);
+            debug_messenger = nullptr;
+        }
+        if (debug_report) {
+            instance.destroyDebugReportCallbackEXT(debug_report);
+            debug_report = nullptr;
+        }
+
+        instance.destroy();
     }
-
-    device.destroy(general_command_pool);
-    general_command_pool = nullptr;
-    device.destroy(transfer_command_pool);
-    transfer_command_pool = nullptr;
-    device.destroy(multithread_command_pool);
-    multithread_command_pool = nullptr;
-
-    allocator.destroy();
-
-    vkutil::deinit();
-
-    device.destroy();
-
-    if (debug_messenger) {
-        instance.destroyDebugUtilsMessengerEXT(debug_messenger);
-        debug_messenger = nullptr;
-    }
-    if (debug_report) {
-        instance.destroyDebugReportCallbackEXT(debug_report);
-        debug_report = nullptr;
-    }
-
-    instance.destroy();
 
     gxp_ptr_map.clear();
     shaders_cache_hashs.clear();
-    request_queue.reset();
+    if (!preserve_frontend)
+        request_queue.reset();
+    else
+        request_queue.abort();
     current_frame_idx = 1;
     last_scene_id = 0;
     shaders_count_compiled = 0;
     programs_count_pre_compiled = 0;
     should_display = false;
     render_abort = false;
+    precompile_queue.clear();
+    precompile_requested = false;
+    precompile_complete.store(false, std::memory_order_relaxed);
+    precompile_progress = 0;
+    precompile_total = 0;
 }
 
 void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) {
@@ -1109,6 +1136,7 @@ void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
 
     // store viewport for touch
     {
+        std::lock_guard<std::mutex> lock(display.viewport_mutex);
         const float fb_w = static_cast<float>(screen_renderer.extent.width);
         const float fb_h = static_cast<float>(screen_renderer.extent.height);
         display.viewport_drawable_w = static_cast<int>(fb_w);
@@ -1788,6 +1816,23 @@ BufferTrapping::BufferTrapping(VKState &state)
     : state(state) {}
 
 TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemState &mem, bool always_trap, bool cover_everything) {
+    // The declared size is an upper bound, not what the game allocated: copy the part that is
+    // mapped rather than refusing the whole buffer
+    {
+        auto mem_it = state.mapped_memories.lower_bound(addr);
+        if (mem_it == state.mapped_memories.end() || mem_it->first + mem_it->second.size <= addr) {
+            LOG_ERROR("Buffer at address {} is not mapped", log_hex(addr));
+            temp_buffer.size = 0;
+            temp_buffer.extra = ~0;
+            return &temp_buffer;
+        }
+        const uint32_t available = mem_it->first + mem_it->second.size - addr;
+        if (size > available) {
+            LOG_WARN_ONCE("Buffer at address {} ({} bytes) runs past its mapped block, copying the {} bytes that are mapped", log_hex(addr), size, available);
+            size = available;
+        }
+    }
+
     const bool is_buffer_small = (size < 3 * KiB(4));
 
     if (is_buffer_small && always_trap) {

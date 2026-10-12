@@ -20,6 +20,7 @@
 #include <emuenv/window.h>
 #include <util/fs.h>
 
+#include <array>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -35,6 +36,7 @@ struct SfoAppInfo;
 
 namespace renderer {
 enum class Backend : uint32_t;
+class FrameHost;
 struct State;
 struct VulkanDeviceInfo;
 } // namespace renderer
@@ -45,6 +47,10 @@ struct State;
 
 struct Config;
 struct CompatState;
+
+inline constexpr std::array<float, 3> FontScaleCandidates = { 1.f, 1.5f, 2.f };
+inline constexpr int FontScaleCandidatesSize = static_cast<int>(FontScaleCandidates.size());
+
 struct MemState;
 struct CtrlState;
 struct TouchState;
@@ -62,6 +68,7 @@ struct DialogState;
 struct Ime;
 struct License;
 struct RegMgrState;
+struct V3KNState;
 struct SfoFile;
 struct GDBState;
 struct HTTPState;
@@ -109,6 +116,7 @@ private:
     std::unique_ptr<Ime> _ime;
     std::unique_ptr<License> _license;
     std::unique_ptr<RegMgrState> _regmgr;
+    std::unique_ptr<V3KNState> _v3kn;
     std::unique_ptr<SfoFile> _sfo_handle;
     std::unique_ptr<GDBState> _gdb;
     std::unique_ptr<HTTPState> _http;
@@ -116,6 +124,9 @@ private:
     std::unique_ptr<CompatState> _compat;
     mutable std::mutex _launch_request_mutex;
     std::optional<AppLaunchRequest> _pending_launch_request;
+    // The URI the running app was launched with, until sceAppMgrGetAppParam takes it
+    mutable std::mutex _launch_uri_mutex;
+    std::optional<std::string> _launch_uri;
 
 public:
     // App info contained in its `param.sfo` file
@@ -145,8 +156,16 @@ public:
     uint32_t current_fps_offset = 0;
     uint32_t ms_per_frame = 0;
     renderer::Backend backend_renderer{};
+    WindowPtr window{ nullptr, nullptr };
+    std::unique_ptr<renderer::FrameHost> frame_host;
     RendererPtr renderer{};
     std::unique_ptr<renderer::VulkanDeviceInfo> vulkan_device_info;
+    FVector2 window_size = { 0.f, 0.f };
+    FVector2 drawable_size = { 0.f, 0.f };
+    FVector2 logical_viewport_pos = { 0.f, 0.f };
+    FVector2 logical_viewport_size = { 0.f, 0.f };
+    FVector2 drawable_viewport_pos = { 0.f, 0.f };
+    FVector2 drawable_viewport_size = { 0.f, 0.f };
     bool drop_inputs{};
     MemState &mem;
     CtrlState &ctrl;
@@ -166,6 +185,7 @@ public:
     Ime &ime;
     License &license;
     RegMgrState &regmgr;
+    V3KNState &v3kn;
     SfoFile &sfo_handle;
     NIDSet missing_nids;
     float system_dpi_scale = 1.f;
@@ -198,6 +218,22 @@ public:
     void clear_app_launch_request() {
         std::scoped_lock lock(_launch_request_mutex);
         _pending_launch_request.reset();
+    }
+
+    void set_launch_uri(std::string uri) {
+        std::scoped_lock lock(_launch_uri_mutex);
+        _launch_uri = std::move(uri);
+    }
+
+    // Returns the launch URI to the first caller only
+    std::optional<std::string> take_launch_uri() {
+        std::scoped_lock lock(_launch_uri_mutex);
+        return std::exchange(_launch_uri, std::nullopt);
+    }
+
+    void clear_launch_uri() {
+        std::scoped_lock lock(_launch_uri_mutex);
+        _launch_uri.reset();
     }
 
     Root get_root_paths() const {

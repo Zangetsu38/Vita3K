@@ -64,9 +64,6 @@ target_include_directories(stb INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/stb")
 add_library(ddspp INTERFACE)
 target_include_directories(ddspp INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/ddspp")
 
-add_library(cppcommon STATIC CppCommon/source/cpu.cpp CppCommon/source/environment.cpp)
-target_include_directories(cppcommon PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/CppCommon")
-
 add_library(glad STATIC "${CMAKE_CURRENT_SOURCE_DIR}/glad/src/glad.c")
 target_include_directories(glad PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/glad/include")
 
@@ -79,6 +76,25 @@ add_library(concurrentqueue INTERFACE)
 target_include_directories(concurrentqueue INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/concurrentqueue")
 
 add_subdirectory(libfat16)
+
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.cpp")
+	message(FATAL_ERROR "ImGui submodule is not initialized. Run: git submodule update --init -- external/imgui")
+endif()
+
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/imgui_club/imgui_memory_editor/imgui_memory_editor.h")
+	message(FATAL_ERROR "imgui_club submodule is not initialized. Run: git submodule update --init -- external/imgui_club")
+endif()
+
+add_library(imgui STATIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui_draw.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui_tables.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui_widgets.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/imgui/misc/cpp/imgui_stdlib.cpp")
+target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_DEMO_WINDOWS)
+target_include_directories(imgui PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/imgui"
+	"${CMAKE_CURRENT_SOURCE_DIR}/imgui_club/imgui_memory_editor/")
 
 add_library(miniz STATIC miniz/miniz.c miniz/miniz.h)
 target_include_directories(miniz PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/miniz")

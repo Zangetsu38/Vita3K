@@ -24,8 +24,8 @@
 #include <mem/block.h>
 #include <mem/ptr.h>
 
-#include <concepts>
 #include <condition_variable>
+#include <list>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -40,11 +40,12 @@ typedef std::unique_ptr<CPUState, std::function<void(CPUState *)>> CPUStatePtr;
 typedef std::function<void(CPUState &, uint32_t, SceUID)> CallImport;
 typedef std::function<std::string(Address)> ResolveNIDName;
 
-enum class ThreadStatus {
-    run, // Running
-    dormant, // Waiting for a job
-    suspend, // Suspended by debugger
-    wait, // Waiting to be awaken by sync object or operation
+// Values are what sceKernelGetThreadInfo reports
+enum class ThreadStatus : SceUInt32 {
+    running = SCE_KERNEL_THREAD_STATUS_RUNNING,
+    waiting = SCE_KERNEL_THREAD_STATUS_WAITING, // Waiting to be awaken by sync object or operation
+    dormant = SCE_KERNEL_THREAD_STATUS_DORMANT, // Waiting for a job
+    suspended = SCE_KERNEL_THREAD_STATUS_SUSPENDED, // Suspended by debugger
 };
 
 struct ThreadState {
@@ -61,13 +62,12 @@ struct ThreadState {
     SceInt32 affinity_mask;
     uint64_t start_tick;
     uint64_t last_vblank_waited;
-    // set to true if thread is processing kernel callbacks
-    bool is_processing_callbacks = false;
 
     CPUStatePtr cpu;
     ThreadStatus status = ThreadStatus::dormant;
+    // What the thread waits on while waiting, empty otherwise
+    WaitTarget wait_target;
 
-    std::vector<CallbackPtr> callbacks;
     std::condition_variable status_cond;
     uint32_t returned_value = 0;
 
@@ -93,27 +93,38 @@ struct ThreadState {
     uint32_t run_guest_function(Address callback_address, SceSize args = 0, const Ptr<void> argp = Ptr<void>{});
 
     // Blocks this thread until the deadline passes.
-    WaitResult delay_until(Deadline deadline);
+    [[nodiscard]] WaitResult delay_until(Deadline deadline, bool callbacks);
     // Blocks this thread until a signal is sent to it.
-    WaitResult wait_for_signal();
+    [[nodiscard]] WaitResult wait_for_signal(bool callbacks);
     // Sends a signal to this thread. Fails if the previous one was not consumed yet.
     SceInt32 send_signal();
     // Blocks waiter until this thread becomes dormant, then writes its exit status to exit_status.
-    WaitResult wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status);
+    [[nodiscard]] WaitResult wait_for_thread_end(const ThreadStatePtr &waiter, SceInt32 *exit_status, Deadline deadline, bool callbacks);
 
-    // Waits until woken by wake(), deleted, or the deadline passes.
-    // A stale wake can end it early, so callers must recheck their condition.
-    WaitResult wait(Deadline deadline);
+    // Waits on target until woken by wake(), the thread exits or is deleted, or the deadline passes.
+    // With callbacks, it also returns after running callbacks that were notified meanwhile.
+    // A stale wake or callbacks can end it early, so callers must recheck their condition.
+    [[nodiscard]] WaitResult wait(WaitTarget target, Deadline deadline, bool callbacks);
     // Wakes this thread from wait().
     void wake();
 
+    // Runs the notified callbacks of this thread and returns how many ran. Called by the thread itself.
+    SceUInt32 process_callbacks();
+    // Tells this thread that one of its callbacks was notified, so a wait with callbacks runs it.
+    void notify_callbacks();
+    // Adds a callback this thread created. Called by the thread itself.
+    void add_callback(const CallbackPtr &cb);
+
     void suspend();
     void resume(bool step = false);
+    // Pause/resume the emulator without changing a thread's wait state.
+    ThreadStatus pause();
+    void resume_from_pause(ThreadStatus previous_status);
     std::string log_stack_traceback() const;
 
 private:
-    // Waits until done() holds, the thread is being deleted, or the deadline passes.
-    WaitResult wait_until(Deadline deadline, std::predicate auto done);
+    // Whether the thread is exiting or being deleted. Called with mutex held.
+    bool exiting() const { return exit_requested || delete_requested; }
 
     void push_arguments(const std::vector<uint32_t> &args);
     void dispatch_abort(CPUState &cpu);
@@ -125,8 +136,11 @@ private:
     bool exit_requested = false;
     // sceKernelExitDeleteThread (or external kill): will return from top-level run_loop(), then host thread joins.
     bool delete_requested = false;
-    // Set by suspend(), consumed in run_loop() to transition to ThreadStatus::suspend.
+    // Set by suspend(), consumed in run_loop() to transition to ThreadStatus::suspended.
     bool suspend_requested = false;
+    // Emulator pause is separate from a guest wait or debugger suspension.
+    bool pause_requested = false;
+    bool pause_suspended = false;
     // Single stepping mode.
     bool single_stepping = false;
 
@@ -145,6 +159,12 @@ private:
     bool signal_pending = false;
     // Set by wake() and consumed by the next wait().
     bool wake_pending = false;
+    // Set by notify_callbacks() and cleared when the callbacks run.
+    bool callbacks_pending = false;
+    // Set while the thread runs its callbacks. They don't nest.
+    bool is_processing_callbacks = false;
+    // Callbacks this thread created, in creation order. The kernel owns them. Only this thread touches the list.
+    std::list<std::weak_ptr<Callback>> callbacks;
 
     // Notified under mutex whenever a condition a wait may be blocked on changes.
     std::condition_variable wait_cv;

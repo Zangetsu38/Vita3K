@@ -146,6 +146,17 @@ ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
     return lock_and_find(thread_id, threads, mutex);
 }
 
+SceUID KernelState::create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common) {
+    const CallbackPtr cb = std::make_shared<Callback>(thread, name, func, common);
+    const SceUID uid = objects.add(cb, get_next_uid());
+    thread->add_callback(cb);
+    return uid;
+}
+
+bool KernelState::delete_callback(SceUID id) {
+    return objects.remove<Callback>(id);
+}
+
 ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point) {
     return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
 }
@@ -158,6 +169,8 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     {
         const std::lock_guard<std::mutex> lock(mutex);
         threads.emplace(thread->id, thread);
+        if (threads_paused)
+            paused_threads_status[thread->id] = thread->pause();
     }
 
     ThreadParams params;
@@ -202,37 +215,32 @@ void KernelState::process_exit() {
 
 void KernelState::pause_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
+    // Already paused: keep the statuses recorded by the first call, they are needed to resume.
+    if (threads_paused)
+        return;
+    threads_paused = true;
+    paused_threads_status.clear();
     for (auto &[_, thread] : threads) {
-        paused_threads_status[thread->id] = thread->status;
-        if (thread->status == ThreadStatus::run)
-            thread->suspend();
+        paused_threads_status[thread->id] = thread->pause();
     }
 }
 
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
-        if (paused_threads_status[thread->id] == ThreadStatus::run)
-            thread->resume();
+        const auto previous = paused_threads_status.find(thread->id);
+        if (previous != paused_threads_status.end())
+            thread->resume_from_pause(previous->second);
     }
     paused_threads_status.clear();
+    threads_paused = false;
 }
 
 void KernelState::deinit(MemState &mem) {
     process_exit();
     threads.clear();
 
-    simple_events.clear();
-    timers.clear();
-    semaphores.clear();
-    condvars.clear();
-    lwcondvars.clear();
-    mutexes.clear();
-    lwmutexes.clear();
-    rwlocks.clear();
-    eventflags.clear();
-    msgpipes.clear();
-    callbacks.clear();
+    objects.clear();
 
     loaded_modules.clear();
     loaded_sysmodules.clear();
@@ -277,6 +285,7 @@ void KernelState::deinit(MemState &mem) {
     next_uid = 1;
 
     paused_threads_status.clear();
+    threads_paused = false;
 }
 
 SceKernelModuleInfo *KernelState::find_module_by_addr(Address address) {
