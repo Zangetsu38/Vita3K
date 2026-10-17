@@ -388,6 +388,7 @@ struct AttributeInputSource {
     std::uint32_t index;
     std::uint16_t semantic;
     bool regformat;
+    bool is_used = true;
 };
 
 struct LiteralInputSource {

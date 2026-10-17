@@ -34,7 +34,8 @@ System::System(const Ptr<void> memspace, const uint32_t memspace_size)
     : MempoolObject(memspace, memspace_size)
     , max_voices(0)
     , granularity(0)
-    , sample_rate(0) {}
+    , sample_rate(0)
+    , flags(default_system_flags) {}
 
 bool Patch::is_active() const {
     return output_sub_index != -1;

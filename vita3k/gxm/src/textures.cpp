@@ -18,6 +18,7 @@
 #include <gxm/types.h>
 #include <util/align.h>
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <map>
@@ -319,6 +320,57 @@ uint32_t texture_size_first_mip(const SceGxmTexture &texture) {
     const uint32_t block_shift = std::bit_width(block_width * block_height) - 1;
 
     return ((width * height) >> block_shift) * block_size;
+}
+
+uint64_t texture_size(const SceGxmTexture &texture) {
+    const auto type = texture.texture_type();
+    const auto format = get_base_format(get_format(texture));
+    if (type == SCE_GXM_TEXTURE_LINEAR_STRIDED
+        || format == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P2 || format == SCE_GXM_TEXTURE_BASE_FORMAT_YUV420P3)
+        return texture_size_first_mip(texture);
+
+    const uint32_t width = get_width(texture);
+    const uint32_t height = get_height(texture);
+    uint32_t layout_width = next_power_of_two(width);
+    uint32_t layout_height = next_power_of_two(height);
+    if (type == SCE_GXM_TEXTURE_LINEAR && texture.mip_count == 0xF) {
+        layout_width = width;
+        layout_height = height;
+    }
+
+    const bool is_cube = type == SCE_GXM_TEXTURE_CUBE || type == SCE_GXM_TEXTURE_CUBE_ARBITRARY;
+    const uint32_t bpp = bits_per_pixel(format);
+    auto [align_width, align_height] = get_block_size(format);
+    if (type == SCE_GXM_TEXTURE_LINEAR)
+        align_width = std::max(align_width, 8U);
+    else if (type == SCE_GXM_TEXTURE_TILED) {
+        align_width = std::max(align_width, 32U);
+        align_height = std::max(align_height, 32U);
+    }
+
+    const uint32_t levels = std::min<uint32_t>(texture.true_mip_count(), std::bit_width(std::min(width, height)));
+    uint64_t uploaded_size = 0;
+    uint64_t face_size = 0;
+    for (uint32_t level = 0; layout_width && layout_height
+        && (level < levels || (is_cube && texture.mip_count != 0xF));
+        ++level) {
+        face_size += uint64_t{ align(layout_width, align_width) } * align(layout_height, align_height) * bpp / 8;
+        if (level + 1 == levels)
+            uploaded_size = face_size;
+        layout_width /= 2;
+        layout_height /= 2;
+    }
+    if (!is_cube)
+        return uploaded_size;
+
+    uint32_t face_alignment = 4;
+    if (texture.mip_count != 0xF
+        && ((width >= 32 && height >= 32 && (bpp <= 8 || is_block_compressed_format(format)))
+            || (width >= 16 && height >= 16 && (bpp == 16 || bpp == 32))
+            || (width >= 8 && height >= 8 && bpp == 64)))
+        face_alignment = 2048;
+
+    return 5 * align(face_size, uint64_t{ face_alignment }) + uploaded_size;
 }
 
 bool is_paletted_format(SceGxmTextureBaseFormat base_format) {

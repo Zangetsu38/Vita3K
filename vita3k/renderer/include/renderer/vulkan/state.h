@@ -112,6 +112,8 @@ struct VKState : public renderer::State {
     Queue<WaitThreadRequest> request_queue;
 
     vkutil::Image default_image;
+    vkutil::Image default_cube_image;
+    vkutil::Image default_raw_image;
     vkutil::Buffer default_buffer;
 
     bool support_fsr = false;
@@ -120,6 +122,9 @@ struct VKState : public renderer::State {
     bool supports_shader_interlock = false;
     bool support_rasterized_order_access = false;
     bool support_native_rgba4_surface = false;
+    bool support_gpu_checkpoints = false;
+    // Protected by queue_mutex; report a lost device only once across renderer threads.
+    bool device_lost_reported = false;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;
 
 #ifdef __ANDROID__
@@ -133,6 +138,9 @@ struct VKState : public renderer::State {
     bool create(std::unique_ptr<renderer::State> &state, const Config &config);
     void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) override;
     void cleanup(bool preserve_frontend = false) override;
+
+    vk::Result wait_for_fences(vk::ArrayProxy<const vk::Fence> fences, uint64_t timeout);
+    void report_device_lost(std::string_view operation);
 
     TextureCache *get_texture_cache() override {
         return &texture_cache;

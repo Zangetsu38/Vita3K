@@ -40,6 +40,9 @@ namespace ngs {
 // random number of bytes to make sure nothing bad happens
 constexpr uint32_t default_passthrough_parameter_size = 140;
 constexpr uint32_t default_normal_parameter_size = 100;
+constexpr uint32_t system_flag_no_module_param_checking = 0;
+constexpr uint32_t system_flag_module_param_checking = 1u << 0;
+constexpr uint32_t default_system_flags = system_flag_module_param_checking;
 
 struct State;
 struct Voice;
@@ -338,6 +341,7 @@ struct System : public MempoolObject {
     int32_t max_voices;
     int32_t granularity;
     int32_t sample_rate;
+    uint32_t flags;
 
     VoiceScheduler voice_scheduler;
 

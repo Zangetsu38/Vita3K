@@ -34,6 +34,7 @@
 
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -44,6 +45,8 @@ static const char *LOG_PATTERN = "%^[%H:%M:%S.%e] |%L| [%!]: %v%$";
 static constexpr size_t ASYNC_LOG_QUEUE_SIZE = 65536;
 static std::vector<spdlog::sink_ptr> sinks;
 static std::once_flag s_async_logging_once;
+static std::shared_ptr<spdlog::logger> s_diagnostic_logger;
+static std::mutex s_diagnostic_logger_mutex;
 
 static std::function<void(std::string, int)> s_log_callback;
 static std::mutex s_log_callback_mutex;
@@ -81,6 +84,19 @@ using callback_sink_mt = callback_sink<std::mutex>;
 void set_log_callback(std::function<void(std::string, int)> cb) {
     const std::lock_guard<std::mutex> lock(s_log_callback_mutex);
     s_log_callback = std::move(cb);
+}
+
+void log_sync(spdlog::source_loc location, spdlog::level::level_enum level, std::string_view message) {
+    std::shared_ptr<spdlog::logger> logger;
+    {
+        const std::lock_guard<std::mutex> lock(s_diagnostic_logger_mutex);
+        logger = s_diagnostic_logger;
+    }
+    if (!logger) {
+        std::cerr << "Diagnostic file logger unavailable: " << message << std::endl;
+        return;
+    }
+    logger->log(location, level, spdlog::string_view_t(message.data(), message.size()));
 }
 
 ExitCode init(const Root &root_paths, bool use_stdout) {
@@ -124,12 +140,12 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
             if (eptr) {
                 std::rethrow_exception(eptr);
             } else {
-                LOG_CRITICAL("Unhandled 'std::terminate()' call");
+                LOG_CRITICAL_SYNC("Unhandled 'std::terminate()' call");
             }
         } catch (const std::exception &e) {
-            LOG_CRITICAL("Unhandled C++ exception. {}", e.what());
+            LOG_CRITICAL_SYNC("Unhandled C++ exception. {}", e.what());
         } catch (...) {
-            LOG_CRITICAL("Unhandled C++ exception. UNKNOWN");
+            LOG_CRITICAL_SYNC("Unhandled C++ exception. UNKNOWN");
         }
         flush();
         if (old_terminate)
@@ -164,8 +180,22 @@ void rebuild_default_logger() {
     });
 
     auto duplicate_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(2));
+    std::vector<spdlog::sink_ptr> file_sinks;
     for (const auto &sink : sinks)
         duplicate_filter->add_sink(sink);
+
+    for (const auto &sink : sinks) {
+        if (std::dynamic_pointer_cast<spdlog::sinks::basic_file_sink_mt>(sink))
+            file_sinks.push_back(sink);
+    }
+    auto diagnostic_logger = std::make_shared<spdlog::logger>("vita3k diagnostic logger", file_sinks.begin(), file_sinks.end());
+    diagnostic_logger->set_pattern(LOG_PATTERN);
+    diagnostic_logger->set_level(spdlog::level::trace);
+    diagnostic_logger->flush_on(spdlog::level::trace);
+    {
+        const std::lock_guard<std::mutex> lock(s_diagnostic_logger_mutex);
+        s_diagnostic_logger.swap(diagnostic_logger);
+    }
 
     auto logger = std::make_shared<spdlog::async_logger>(
         "vita3k logger",
@@ -183,44 +213,44 @@ static LONG WINAPI exception_handler(PEXCEPTION_POINTERS pExp) noexcept {
     const unsigned ec = pExp->ExceptionRecord->ExceptionCode;
     switch (ec) {
     case EXCEPTION_ACCESS_VIOLATION:
-        LOG_CRITICAL("Exception EXCEPTION_ACCESS_VIOLATION ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_ACCESS_VIOLATION ({}). ", log_hex(ec));
         switch (pExp->ExceptionRecord->ExceptionInformation[0]) {
         case 0:
-            LOG_CRITICAL("Read violation at address {}.", log_hex(pExp->ExceptionRecord->ExceptionInformation[1]));
+            LOG_CRITICAL_SYNC("Read violation at address {}.", log_hex(pExp->ExceptionRecord->ExceptionInformation[1]));
             break;
         case 1:
-            LOG_CRITICAL("Write violation at address {}.", log_hex(pExp->ExceptionRecord->ExceptionInformation[1]));
+            LOG_CRITICAL_SYNC("Write violation at address {}.", log_hex(pExp->ExceptionRecord->ExceptionInformation[1]));
             break;
         case 8:
-            LOG_CRITICAL("DEP violation at address {}.", log_hex(pExp->ExceptionRecord->ExceptionInformation[1]));
+            LOG_CRITICAL_SYNC("DEP violation at address {}.", log_hex(pExp->ExceptionRecord->ExceptionInformation[1]));
             break;
         default:
             break;
         }
         break;
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
-        LOG_CRITICAL("Exception EXCEPTION_ARRAY_BOUNDS_EXCEEDED ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_ARRAY_BOUNDS_EXCEEDED ({}). ", log_hex(ec));
         break;
     case EXCEPTION_DATATYPE_MISALIGNMENT:
-        LOG_CRITICAL("Exception EXCEPTION_DATATYPE_MISALIGNMENT ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_DATATYPE_MISALIGNMENT ({}). ", log_hex(ec));
         break;
     case EXCEPTION_FLT_DIVIDE_BY_ZERO:
-        LOG_CRITICAL("Exception EXCEPTION_FLT_DIVIDE_BY_ZERO ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_FLT_DIVIDE_BY_ZERO ({}). ", log_hex(ec));
         break;
     case EXCEPTION_ILLEGAL_INSTRUCTION:
-        LOG_CRITICAL("Exception EXCEPTION_ILLEGAL_INSTRUCTION ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_ILLEGAL_INSTRUCTION ({}). ", log_hex(ec));
         break;
     case EXCEPTION_IN_PAGE_ERROR:
-        LOG_CRITICAL("Exception EXCEPTION_IN_PAGE_ERROR ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_IN_PAGE_ERROR ({}). ", log_hex(ec));
         break;
     case EXCEPTION_INT_DIVIDE_BY_ZERO:
-        LOG_CRITICAL("Exception EXCEPTION_INT_DIVIDE_BY_ZERO ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_INT_DIVIDE_BY_ZERO ({}). ", log_hex(ec));
         break;
     case EXCEPTION_PRIV_INSTRUCTION:
-        LOG_CRITICAL("Exception EXCEPTION_PRIV_INSTRUCTION ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_PRIV_INSTRUCTION ({}). ", log_hex(ec));
         break;
     case EXCEPTION_STACK_OVERFLOW:
-        LOG_CRITICAL("Exception EXCEPTION_STACK_OVERFLOW ({}). ", log_hex(ec));
+        LOG_CRITICAL_SYNC("Exception EXCEPTION_STACK_OVERFLOW ({}). ", log_hex(ec));
         break;
     default:
         return EXCEPTION_CONTINUE_SEARCH;

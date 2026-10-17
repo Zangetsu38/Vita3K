@@ -46,6 +46,7 @@ void PlayerModule::on_state_change(const MemState &mem, ModuleData &data, const 
         logical->decoded_pcm.clear();
         logical->rate_resampler.reset();
         logical->adpcm_buffer.clear();
+        logical->requested_initial_buffer = false;
 
         std::memset(&logical->adpcm_history, 0, sizeof(logical->adpcm_history));
     } else if (data.parent->is_keyed_off) {
@@ -111,9 +112,11 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
     const int32_t granularity = data.parent->rack->system->granularity;
 
     // fix right now because it might be set by default in SceNgsVoiceInit, which we do not support
-    if (params->channels == 0) {
-        params->channels = 2;
-    }
+    const auto normalize_channels = [&]() {
+        if (params->channels == 0)
+            params->channels = 2;
+    };
+    normalize_channels();
 
     // If decoder hasn't been initialized
     if (!runtime->decoder) {
@@ -123,10 +126,115 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
 
     logical->decoded_pcm.compact();
 
+    const auto prefer_live_params_before_first_consume = [&]() {
+        if (!(data.flags & ModuleData::PARAMS_LOCK) || state->bytes_consumed_since_key_on != 0)
+            return;
+
+        SceNgsPlayerParams *live = data.info.data.cast<SceNgsPlayerParams>().get(mem);
+        const int buffer_index = state->current_buffer;
+        if (!live || buffer_index < 0 || buffer_index >= SCE_NGS_PLAYER_MAX_BUFFERS)
+            return;
+
+        auto &snapshot_buffer = params->buffer_params[buffer_index];
+        const auto &live_buffer = live->buffer_params[buffer_index];
+        if ((!snapshot_buffer.buffer || snapshot_buffer.bytes_count <= 0) && live_buffer.buffer) {
+            std::memcpy(&snapshot_buffer, &live_buffer, sizeof(snapshot_buffer));
+            params = live;
+            normalize_channels();
+        }
+    };
+
+    const auto adopt_pre_written_pcm = [&](const int buffer_index) {
+        if (buffer_index < 0 || buffer_index >= SCE_NGS_PLAYER_MAX_BUFFERS)
+            return false;
+
+        auto &buffer = params->buffer_params[buffer_index];
+        if (!buffer.buffer || buffer.bytes_count > 0)
+            return false;
+
+        const Address buffer_address = buffer.buffer.address();
+        int raw_peak = -1;
+        constexpr uint32_t probe_frames = 4096;
+        const uint32_t probe_channels = static_cast<uint32_t>(std::clamp<int>(params->channels, 1, SCE_NGS_PLAYER_MAX_PCM_CHANNELS));
+        const uint32_t probe_samples = probe_frames * probe_channels;
+        const uint32_t probe_bytes = probe_samples * sizeof(int16_t);
+        const bool probe_address_valid = buffer_address
+            && buffer_address <= std::numeric_limits<Address>::max() - probe_bytes
+            && is_valid_addr_range(mem, buffer_address, buffer_address + probe_bytes);
+        if (params->type == ParameterAudioTypePCM && probe_address_valid) {
+            const int16_t *samples = Ptr<int16_t>(buffer_address).get(mem);
+            if (samples) {
+                raw_peak = 0;
+                for (uint32_t i = 0; i < probe_samples; ++i)
+                    raw_peak = std::max(raw_peak, std::abs(static_cast<int>(samples[i])));
+            }
+        }
+
+        if (raw_peak <= 8)
+            return false;
+
+        buffer.bytes_count = static_cast<SceInt32>(probe_bytes);
+        if (data.flags & ModuleData::PARAMS_LOCK) {
+            auto *snapshot = data.get_parameters<SceNgsPlayerParams>(mem);
+            auto &snapshot_buffer = snapshot->buffer_params[buffer_index];
+            if (&snapshot_buffer != &buffer)
+                std::memcpy(&snapshot_buffer, &buffer, sizeof(snapshot_buffer));
+        }
+        return true;
+    };
+
+    const auto request_initial_buffer = [&]() {
+        if (state->bytes_consumed_since_key_on != 0)
+            return false;
+
+        if (logical->requested_initial_buffer)
+            return adopt_pre_written_pcm(state->current_buffer);
+
+        logical->requested_initial_buffer = true;
+        const int buffer_index = state->current_buffer;
+        if (adopt_pre_written_pcm(buffer_index))
+            return true;
+
+        if (buffer_index < 0 || buffer_index >= SCE_NGS_PLAYER_MAX_BUFFERS)
+            return false;
+
+        const Address buffer_address = params->buffer_params[buffer_index].buffer.address();
+
+        if (!data.callback || !buffer_address)
+            return false;
+
+        voice_lock.unlock();
+        scheduler_lock.unlock();
+        data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_SWAPPED_BUFFER, buffer_index, buffer_address);
+        scheduler_lock.lock();
+        voice_lock.lock();
+
+        params = data.get_parameters<SceNgsPlayerParams>(mem);
+        normalize_channels();
+        prefer_live_params_before_first_consume();
+        adopt_pre_written_pcm(buffer_index);
+        return true;
+    };
+
+    prefer_live_params_before_first_consume();
+
     while (static_cast<int>(logical->decoded_pcm.available_frames()) < granularity) {
         if ((state->current_buffer == -1)
             || !params->buffer_params[state->current_buffer].buffer
             || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
+            if (state->bytes_consumed_since_key_on == 0) {
+                if (request_initial_buffer()
+                    && state->current_buffer != -1
+                    && params->buffer_params[state->current_buffer].buffer
+                    && params->buffer_params[state->current_buffer].bytes_count > 0)
+                    continue;
+
+                if (!data.callback || state->current_buffer == -1
+                    || !params->buffer_params[state->current_buffer].buffer)
+                    finished = true;
+                break;
+            }
+
             // Stop processing if no valid buffer is available or if the buffer is empty
             finished = true;
             break;

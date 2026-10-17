@@ -81,6 +81,7 @@ struct PlayerLogicalState : public ModuleLogicalState {
     std::vector<uint8_t> adpcm_buffer;
     // INTERNAL
     int8_t current_loop_count = 0;
+    bool requested_initial_buffer = false;
     // preserve HE-ADPCM predictor history so the runtime decoder can be rebuilt
     ADPCMHistory adpcm_history[SCE_NGS_PLAYER_MAX_PCM_CHANNELS] = {};
 };

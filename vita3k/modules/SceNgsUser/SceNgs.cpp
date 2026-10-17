@@ -228,15 +228,15 @@ EXPORT(int, sceNgsPatchCreateRouting, SceNgsPatchSetupInfo *patch_info, Ptr<ngs:
 
     // Make the scheduler order this right based on dependencies request
     ngs::Voice *source = patch_info->source.get(emuenv.mem);
+    ngs::Voice *dest = patch_info->dest.get(emuenv.mem);
 
-    if (!source)
+    if (!source || !dest)
         return RET_ERROR(SCE_NGS_ERROR);
 
     *handle = source->rack->system->voice_scheduler.patch(emuenv.mem, patch_info);
 
-    if (!*handle) {
+    if (!*handle)
         return RET_ERROR(SCE_NGS_ERROR);
-    }
 
     return SCE_NGS_OK;
 }
@@ -442,9 +442,18 @@ EXPORT(SceInt32, sceNgsSystemRelease, ngs::System *system) {
     return SCE_NGS_OK;
 }
 
-EXPORT(int, sceNgsSystemSetFlags) {
-    TRACY_FUNC(sceNgsSystemSetFlags);
-    return UNIMPLEMENTED();
+EXPORT(int, sceNgsSystemSetFlags, ngs::System *system, const SceUInt32 system_flags) {
+    TRACY_FUNC(sceNgsSystemSetFlags, system, system_flags);
+    if (!emuenv.cfg.current_config.ngs_enable)
+        return 0;
+
+    if (!system)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+
+    system->flags = system_flags;
+    LOG_DEBUG("sceNgsSystemSetFlags: flags={:#X}", system_flags);
+
+    return SCE_NGS_OK;
 }
 
 EXPORT(int, sceNgsSystemSetParamErrorCallback) {
@@ -1071,6 +1080,9 @@ EXPORT(SceInt32, sceNgsVoiceSetParamsBlock, ngs::Voice *voice, const SceNgsModul
         *pNumErrors = num_errors;
     }
 
+    if ((voice->rack->system->flags & ngs::system_flag_module_param_checking) == ngs::system_flag_no_module_param_checking)
+        return SCE_NGS_OK;
+
     if (num_errors == 0)
         return SCE_NGS_OK;
     else
@@ -1107,7 +1119,11 @@ EXPORT(SceInt32, sceNgsVoiceUnlockParams, ngs::Voice *voice, const SceUInt32 mod
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    if (!data->unlock_params(emuenv.mem)) {
+    const bool params_valid = data->unlock_params(emuenv.mem);
+    if ((voice->rack->system->flags & ngs::system_flag_module_param_checking) == ngs::system_flag_no_module_param_checking)
+        return SCE_NGS_OK;
+
+    if (!params_valid) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 

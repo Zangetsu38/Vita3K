@@ -48,6 +48,7 @@ static constexpr size_t TextureCacheSize = 1024;
 typedef std::array<uint32_t, 4> TextureGxmDataRepr;
 struct TextureCacheInfo {
     uint64_t hash = 0;
+    uint64_t data_hash = 0;
     SceGxmTexture texture;
     int index = 0;
     uint32_t texture_size = 0;
