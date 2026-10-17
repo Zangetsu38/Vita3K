@@ -33,7 +33,11 @@
 struct Config;
 struct EmuEnvState;
 struct AppLaunchRequest;
+struct RegMgrState;
 class Root;
+namespace pfsmgr {
+struct SavedataIdentity;
+}
 
 namespace app {
 
@@ -62,6 +66,9 @@ struct SettingsCommitResult {
 };
 
 bool init_paths(Root &root_paths);
+void recover_savedata_identity(RegMgrState &regmgr, const fs::path &vita_fs_path);
+pfsmgr::SavedataIdentity get_savedata_identity(RegMgrState &regmgr, const fs::path &vita_fs_path);
+void import_savedata_identity(RegMgrState &regmgr, const fs::path &vita_fs_path, const pfsmgr::SavedataIdentity &identity);
 bool init(EmuEnvState &state, Config &cfg, const Root &root_paths);
 void shutdown_app_runtime(EmuEnvState &state, bool preserve_renderer = false);
 void reset_app_state(EmuEnvState &state, bool update_discord_presence = true);

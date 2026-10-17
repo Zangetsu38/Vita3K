@@ -22,6 +22,7 @@
 #include <gui-qt/apps_list_table.h>
 
 #include <config/settings.h>
+#include <io/vfs.h>
 #include <util/log.h>
 
 #include <QActionGroup>
@@ -479,7 +480,7 @@ void AppsListTable::populate(const std::vector<app::AppEntry> &apps,
             new SortableItem(QString::fromStdString(app.parental_level),
                 QVariant(parental_level_sort_key(app.parental_level))));
 
-        const QString app_dir = gui::utils::to_qt_path(vita_fs_path / "ux0/app" / app.path);
+        const QString app_dir = gui::utils::to_qt_path(vfs::get_app_base_path(vita_fs_path, app.path));
         const auto size_it = m_size_cache.find(app.path);
         const quint64 cached_size = (size_it != m_size_cache.end()) ? size_it->second : 0;
         auto *size_item = new SortableItem(

@@ -204,6 +204,8 @@ internal fun SettingsCategoryBody(
     defaultStoragePath: String,
     onChangeStorageFolder: () -> Unit,
     onResetStorageFolder: () -> Unit,
+    onImportIdentity: () -> Unit = {},
+    identityImportBusy: Boolean = false,
     installedCustomDrivers: List<String>,
     customDriverBusy: Boolean,
     onInstallCustomDriver: () -> Unit,
@@ -305,6 +307,8 @@ internal fun SettingsCategoryBody(
             defaultStoragePath = defaultStoragePath,
             onChangeStorageFolder = onChangeStorageFolder,
             onResetStorageFolder = onResetStorageFolder,
+            onImportIdentity = onImportIdentity,
+            identityImportBusy = identityImportBusy,
             allowStorageFolderManagement = allowStorageFolderManagement,
             allowClearAllCustomConfigs = allowClearAllCustomConfigs,
             onClearAllCustomConfigs = onClearAllCustomConfigs,
@@ -1516,6 +1520,8 @@ private fun EmulatorSettingsSection(
     defaultStoragePath: String,
     onChangeStorageFolder: () -> Unit,
     onResetStorageFolder: () -> Unit,
+    onImportIdentity: () -> Unit,
+    identityImportBusy: Boolean,
     allowStorageFolderManagement: Boolean,
     allowClearAllCustomConfigs: Boolean,
     onClearAllCustomConfigs: () -> Unit,
@@ -1533,6 +1539,18 @@ private fun EmulatorSettingsSection(
             ),
             onShowHelp = onShowHelp
         )
+            val identityTitle = stringResource(R.string.settings_identity_title)
+            SettingsActionRow(
+                title = identityTitle,
+                onClick = onImportIdentity,
+                enabled = !identityImportBusy,
+                help = SettingsHelpEntry(
+                    title = identityTitle,
+                    body = stringResource(R.string.settings_identity_description),
+                    scope = SettingsScope.Global
+                ),
+                onShowHelp = onShowHelp
+            )
         SettingsSliderRow(
             title = stringResource(R.string.settings_emulator_file_loading_delay, cfg.fileLoadingDelay),
             valueLabel = "${cfg.fileLoadingDelay} ms",

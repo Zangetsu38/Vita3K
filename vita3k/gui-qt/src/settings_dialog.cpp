@@ -32,6 +32,7 @@
 #include <gui-qt/theme_manager.h>
 #include <io/state.h>
 #include <kernel/state.h>
+#include <packages/sfo.h>
 #include <renderer/functions.h>
 #include <renderer/state.h>
 #include <util/log.h>
@@ -141,7 +142,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     if (!m_app_path.empty()) {
         QString title_name = QString::fromStdString(m_app_path);
         for (const auto &app : emuenv.app.apps_list.apps) {
-            if (app.title_id == m_app_path) {
+            if (app.path == m_app_path || app.title_id == m_app_path) {
                 title_name = QString::fromStdString(app.title);
                 break;
             }
@@ -1137,6 +1138,30 @@ void SettingsDialog::setup_connections() {
     connect(m_ui->reset_emu_path, &QPushButton::clicked, this, [this] {
         if (emuenv.default_path != m_pending_vita_fs_path)
             set_pending_vita_fs_path(emuenv.default_path);
+    });
+
+    connect(m_ui->import_savedata_identity, &QPushButton::clicked, this, [this] {
+        if (!emuenv.io.app_path.empty()) {
+            QMessageBox::warning(this, tr("Import Savedata Identity"), tr("Close the running application before importing an identity."));
+            return;
+        }
+        const QString file = QFileDialog::getOpenFileName(this, tr("Select a savedata param.sfo"), {}, tr("SFO files (*.sfo);;All files (*)"));
+        if (file.isEmpty())
+            return;
+        if (QMessageBox::question(this, tr("Import Savedata Identity"),
+                tr("Import the OpenPSID and account ID from this save?\nThe account ID in the emulated registry will change. The current identity will be backed up. Existing saves will not be changed.")) != QMessageBox::Yes)
+            return;
+        try {
+            const auto identity = sfo::read_savedata_identity(gui::utils::to_fs_path(file));
+            app::import_savedata_identity(emuenv.regmgr, emuenv.vita_fs_path, identity);
+            QMessageBox::information(this, tr("Import Savedata Identity"), tr("Identity imported. New saves will use these identifiers."));
+        } catch (const std::runtime_error &error) {
+            LOG_ERROR("Cannot import savedata identity: {}", error.what());
+            QMessageBox::critical(this, tr("Import Savedata Identity"), QString::fromUtf8(error.what()));
+        } catch (const std::bad_alloc &) {
+            LOG_ERROR("Cannot import savedata identity: out of memory");
+            QMessageBox::critical(this, tr("Import Savedata Identity"), tr("Out of memory."));
+        }
     });
 
     connect(m_ui->clear_custom_config, &QPushButton::clicked, this, [this] {

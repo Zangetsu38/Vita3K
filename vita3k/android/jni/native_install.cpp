@@ -22,7 +22,6 @@
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
-#include <rif2zrif.h>
 #include <util/log.h>
 
 extern "C" {

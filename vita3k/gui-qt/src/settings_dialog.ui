@@ -2072,6 +2072,13 @@ QGroupBox[flat=&quot;true&quot;]::title {
                      </item>
                     </layout>
                    </item>
+                   <item>
+                    <widget class="QPushButton" name="import_savedata_identity">
+                     <property name="text">
+                      <string>Import Identity from Save SFO</string>
+                     </property>
+                    </widget>
+                   </item>
                   </layout>
                  </widget>
                 </item>

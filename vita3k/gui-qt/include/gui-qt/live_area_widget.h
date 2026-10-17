@@ -72,6 +72,7 @@ class LiveAreaWidget : public QWindow {
 public:
     explicit LiveAreaWidget(EmuEnvState &emuenv, const std::string &app_path, QWindow *parent = nullptr);
     ~LiveAreaWidget();
+    void refresh_app_contents(const std::string &app_path);
 
 signals:
     void play_clicked();
@@ -109,6 +110,7 @@ private:
 
     EmuEnvState &m_emuenv;
     std::string m_app_path;
+    std::string m_title_id;
     QString m_app_fs_path;
     QString m_contents_dir;
     std::string m_style_type;

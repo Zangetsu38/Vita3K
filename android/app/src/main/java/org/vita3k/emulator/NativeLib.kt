@@ -74,6 +74,8 @@ object NativeLib {
     external fun getCurrentEmulatorPath(): String
     /** Updates the active emulated storage folder path without changing the app storage root. */
     external fun setCurrentEmulatorPath(path: String): Boolean
+    /** Imports a savedata identity from the contents of a param.sfo. */
+    external fun importSavedataIdentity(sfo: ByteArray)
     /** Returns a fresh EmulatorConfig populated with emulator default values. */
     external fun getDefaultConfig(): EmulatorConfig
     /** Returns true when a per-app custom config file exists for [titleId]. */

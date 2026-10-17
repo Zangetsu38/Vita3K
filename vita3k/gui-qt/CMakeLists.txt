@@ -114,6 +114,7 @@ target_link_libraries(gui-qt PUBLIC
     motion
     packages
     patch
+    vfs
     renderer
     touch
     gxm
@@ -122,8 +123,6 @@ target_link_libraries(gui-qt PUBLIC
     vita_shell
 
     miniz
-    libzRIF
-    psvpfsparser
     pugixml::pugixml
     updater
     input

@@ -30,9 +30,58 @@
 #include <algorithm>
 #include <cstring>
 #include <fmt/format.h>
+#include <fstream>
 #include <limits>
+#include <stdexcept>
 
 namespace sfo {
+
+pfsmgr::SavedataIdentity read_savedata_identity(const std::filesystem::path &path) {
+    namespace fs = std::filesystem;
+    if (!fs::is_regular_file(fs::symlink_status(path)))
+        throw std::runtime_error("The selected SFO is not a regular file");
+    const auto size = fs::file_size(path);
+    if (size > 1024 * 1024)
+        throw std::runtime_error("The selected SFO is too large");
+    std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    std::ifstream input(path, std::ios::binary);
+    if (!input || (!bytes.empty() && !input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()))))
+        throw std::runtime_error("Cannot read the selected SFO");
+    return read_savedata_identity(bytes);
+}
+
+pfsmgr::SavedataIdentity read_savedata_identity(const std::vector<uint8_t> &bytes) {
+    if (bytes.size() > 1024 * 1024)
+        throw std::runtime_error("The selected SFO is too large");
+    SfoFile file;
+    if (!load(file, bytes))
+        throw std::runtime_error("Invalid SFO file");
+
+    const SfoFile::SfoEntry *account = nullptr;
+    const SfoFile::SfoEntry *params = nullptr;
+    const SfoFile::SfoEntry *category = nullptr;
+    for (const auto &entry : file.entries) {
+        auto **selected = entry.data.first == "ACCOUNT_ID" ? &account
+            : entry.data.first == "PARAMS" ? &params
+            : entry.data.first == "CATEGORY" ? &category : nullptr;
+        if (selected) {
+            if (*selected)
+                throw std::runtime_error("Duplicate savedata SFO field");
+            *selected = &entry;
+        }
+    }
+    if (!category || category->data.second != "sd" || !account || !params
+        || account->entry.data_fmt != SfoDataFormat::UTF8 || account->data.second.size() != 8
+        || account->entry.data_max_len != 8 || params->entry.data_fmt != SfoDataFormat::UTF8
+        || params->data.second.size() != 1024 || params->entry.data_max_len != 1024
+        || static_cast<uint8_t>(params->data.second[0]) != 1)
+        throw std::runtime_error("The SFO does not contain valid Vita savedata identity fields");
+
+    pfsmgr::SavedataIdentity identity{};
+    std::copy_n(params->data.second.begin() + 4, identity.open_psid.size(), identity.open_psid.begin());
+    std::copy_n(account->data.second.begin(), identity.account_id.size(), identity.account_id.begin());
+    return identity;
+}
 
 bool get_data_by_id(std::string &out_data, SfoFile &file, int id) {
     std::string key;

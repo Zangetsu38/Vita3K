@@ -5152,6 +5152,8 @@ NID(sceNetSocketAbort, 0x891C1B9B)
 NID(sceNetSocketClose, 0x29822B4D)
 NID(sceNetTerm, 0xEA3CC286)
 // Library "SceNetInternal"
+NID(SceNetInternal_F3917021, 0xF3917021)
+NID(SceNetInternal_689B9D7D, 0x689B9D7D)
 NID(sceNetInternalIcmConnect, 0x93F2FF08)
 NID(sceNetInternalInetPton, 0x916EA798)
 // Module "SceNetAdhocMatching"

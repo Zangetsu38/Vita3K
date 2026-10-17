@@ -15,7 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-#include "cpu/common.h"
+#include <cpu/common.h>
+#include <cpu/impl/aliased_thumb.h>
 #include <cpu/impl/dynarmic_cpu.h>
 #include <cpu/state.h>
 #include <util/log.h>
@@ -23,10 +24,13 @@
 #include <mem/ptr.h>
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
+#include <dynarmic/frontend/A32/a32_types.h>
 #include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <array>
 #include <bit>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -88,16 +92,20 @@ public:
     }
 };
 
-static constexpr bool LOG_INVALID_ACCESS = false;
+static constexpr bool LOG_INVALID_ACCESS = true;
+
+static Dynarmic::ExclusiveMonitor shared_monitor(MAX_CORE_COUNT);
 
 // Why the JIT halts, as the mask Run() and Step() return
 static constexpr Dynarmic::HaltReason HALT_STOP = Dynarmic::HaltReason::UserDefined1;
 static constexpr Dynarmic::HaltReason HALT_RETURN = Dynarmic::HaltReason::UserDefined2;
 static constexpr Dynarmic::HaltReason HALT_BREAKPOINT = Dynarmic::HaltReason::UserDefined3;
+static constexpr Dynarmic::HaltReason HALT_SILENT_HILL_WAIT = Dynarmic::HaltReason::UserDefined4;
 static constexpr Dynarmic::HaltReason HALT_IMPORT = Dynarmic::HaltReason::UserDefined8;
 
 class ArmDynarmicCallback : public Dynarmic::A32::UserCallbacks {
     DynarmicCPU &cpu;
+    uint8_t silent_hill_mismatch_logged = 0;
 
 public:
     explicit ArmDynarmicCallback(DynarmicCPU &cpu)
@@ -119,10 +127,65 @@ public:
         LOG_TRACE("{} ({}): {} {}", log_hex(self_), self.cpu.thread_id, log_hex(address), disassembly);
     }
 
+    static void StopForSilentHillIntro(uint64_t self_) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        self.cpu.jit->HaltExecution(HALT_SILENT_HILL_WAIT);
+    }
+
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
         if (cpu.log_code) {
             ir.CallHostFunction(&TraceInstruction, ir.Imm64(reinterpret_cast<uint64_t>(this)), ir.Imm64(pc), ir.Imm64(is_thumb));
         }
+    }
+
+    bool PreCodeReadHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
+        if (cpu.mem.trace_silent_hill && cpu.mem.silent_hill_late_wait_experiment && is_thumb && pc == 0x811AD55E) {
+            static constexpr std::array<uint8_t, 18> expected = { 0x40, 0x46, 0x77, 0xf0, 0xcd, 0xfc, 0xda, 0xf8, 0x00, 0x10, 0x50, 0x46, 0xd1, 0xf8, 0xf4, 0x11, 0x88, 0x47 };
+            if (!is_valid_addr(cpu.mem, pc) || !is_valid_addr(cpu.mem, pc + expected.size() - 1)
+                || std::memcmp(Ptr<const void>(pc).get(cpu.mem), expected.data(), expected.size()) != 0
+                || ir.current_location.IT().IsInITBlock()) {
+                if ((silent_hill_mismatch_logged & 64) == 0) {
+                    silent_hill_mismatch_logged |= 64;
+                    LOG_WARN("[SH-EXPERIMENT] Load completion at {:08X} does not match the analyzed executable; wait skipped", pc);
+                }
+            } else {
+                if (ir.block.Location() != static_cast<Dynarmic::IR::LocationDescriptor>(ir.current_location)) {
+                    ir.SetTerm(Dynarmic::IR::Term::LinkBlockFast{ ir.current_location });
+                    return false;
+                }
+                // Execute the original MOV R0, R8 before stopping at the following instruction.
+                ir.SetRegister(Dynarmic::A32::Reg::R0, ir.GetRegister(Dynarmic::A32::Reg::R8));
+                ir.UpdateUpperLocationDescriptor();
+                ir.BranchWritePC(ir.Imm32(pc + 2));
+                ir.CallHostFunction(&StopForSilentHillIntro, ir.Imm64(reinterpret_cast<uint64_t>(this)));
+                ir.SetTerm(Dynarmic::IR::Term::CheckHalt{ Dynarmic::IR::Term::ReturnToDispatch{} });
+                return false;
+            }
+        }
+        if (cpu.mem.trace_silent_hill && !cpu.mem.silent_hill_scheduler_experiment && is_thumb && pc == 0x811AD2BA) {
+            static constexpr std::array<uint8_t, 14> expected = { 0x44, 0xf2, 0x9c, 0x40, 0xc8, 0xf2, 0x7b, 0x10, 0x01, 0x78, 0x00, 0x29, 0x4d, 0xd1 };
+            if (!is_valid_addr(cpu.mem, pc) || !is_valid_addr(cpu.mem, pc + expected.size() - 1)
+                || std::memcmp(Ptr<const void>(pc).get(cpu.mem), expected.data(), expected.size()) != 0
+                || ir.current_location.IT().IsInITBlock()) {
+                if ((silent_hill_mismatch_logged & 8) == 0) {
+                    silent_hill_mismatch_logged |= 8;
+                    LOG_WARN("[SH-EXPERIMENT] Loading decision at {:08X} does not match the analyzed executable; wait skipped", pc);
+                }
+            } else {
+                if (ir.block.Location() != static_cast<Dynarmic::IR::LocationDescriptor>(ir.current_location)) {
+                    ir.SetTerm(Dynarmic::IR::Term::LinkBlockFast{ ir.current_location });
+                    return false;
+                }
+                // Execute the original MOVW before stopping at the following instruction.
+                ir.SetRegister(Dynarmic::A32::Reg::R0, ir.Imm32(0x449c));
+                ir.UpdateUpperLocationDescriptor();
+                ir.BranchWritePC(ir.Imm32(pc + 4));
+                ir.CallHostFunction(&StopForSilentHillIntro, ir.Imm64(reinterpret_cast<uint64_t>(this)));
+                ir.SetTerm(Dynarmic::IR::Term::CheckHalt{ Dynarmic::IR::Term::ReturnToDispatch{} });
+                return false;
+            }
+        }
+        return intercept_aliased_thumb(is_thumb, pc, ir, [this](uint32_t address) { return MemoryReadCode(address); }, [this, pc, &ir]() { PreCodeTranslationHook(true, pc, ir); });
     }
 
     // Logs and returns true if guest code may not access addr
@@ -131,7 +194,7 @@ public:
         if (addr >= mem.host_page_size && is_valid_addr(mem, addr))
             return false;
         const uint32_t pc = cpu.get_pc();
-        if (LOG_INVALID_ACCESS) {
+        if (LOG_INVALID_ACCESS && !mem.invalid_access_logged.test_and_set()) {
             LOG_ERROR("Invalid {} at 0x{:x}\n{}", access, addr, cpu.save_context().description());
             if (pc < mem.host_page_size)
                 LOG_CRITICAL("PC is 0x{:x}", pc);
@@ -278,8 +341,6 @@ public:
     }
 };
 
-static Dynarmic::ExclusiveMonitor shared_monitor(MAX_CORE_COUNT);
-
 std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
     Dynarmic::A32::UserConfig config{};
     config.arch_version = Dynarmic::A32::ArchVersion::v7;
@@ -289,6 +350,7 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
         config.absolute_offset_page_table = true;
     } else if (!log_mem && cpu_opt) {
         config.fastmem_pointer = std::bit_cast<uintptr_t>(mem.memory.get());
+        config.recompile_on_fastmem_failure = true;
     }
     config.hook_hint_instructions = true;
     config.global_monitor = &shared_monitor;
@@ -321,6 +383,8 @@ GuestExit DynarmicCPU::run(RunMode mode) {
             reason = jit->Run();
         } while (reason == Dynarmic::HaltReason::Step || reason == Dynarmic::HaltReason::CacheInvalidation);
     }
+    if (Dynarmic::Has(reason, HALT_SILENT_HILL_WAIT))
+        return { GuestExit::Kind::silent_hill_intro_wait, 0, step };
     // The NID is the word after the SVC. A stepped SVC reports the debugger stop with it.
     if (Dynarmic::Has(reason, HALT_IMPORT))
         return { GuestExit::Kind::import, *Ptr<uint32_t>(get_pc() + 4).get(mem), step };

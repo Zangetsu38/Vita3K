@@ -24,7 +24,6 @@
 #include <packages/pkg.h>
 #include <packages/sfo.h>
 #include <renderer/state.h>
-#include <rif2zrif.h>
 #include <touch/functions.h>
 #include <touch/state.h>
 #include <util/fs.h>
@@ -275,8 +274,7 @@ EventResult process_event(EmuEnvState &emuenv, const SDL_Event &event, bool allo
                     && (result.physical_key == emuenv.cfg.keyboard_take_screenshot
                         || result.physical_key == emuenv.cfg.keyboard_take_screenshot_alt))
                     request_screenshot(emuenv);
-                if (emuenv.window && (result.physical_key == emuenv.cfg.keyboard_gui_fullscreen
-                        || result.physical_key == emuenv.cfg.keyboard_gui_fullscreen_alt))
+                if (emuenv.window && (result.physical_key == emuenv.cfg.keyboard_gui_fullscreen || result.physical_key == emuenv.cfg.keyboard_gui_fullscreen_alt))
                     result.fullscreen_changed = set_fullscreen(emuenv, emuenv.window.get(),
                         !emuenv.display.fullscreen.load(std::memory_order_relaxed));
             }

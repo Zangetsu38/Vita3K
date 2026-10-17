@@ -16,9 +16,25 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <array>
+#include <atomic>
+#include <cerrno>
+#include <limits>
+#include <memory>
 #include <regex>
 #include <regmgr/functions.h>
+#include <set>
 #include <sstream>
+#include <system_error>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <util/bytes.h>
 #include <util/log.h>
@@ -28,6 +44,7 @@
 namespace regmgr {
 
 constexpr std::array<unsigned char, 16> xorKey = { 0x89, 0xFA, 0x95, 0x48, 0xCB, 0x6D, 0x77, 0x9D, 0xA2, 0x25, 0x34, 0xFD, 0xA9, 0x35, 0x59, 0x6E };
+static constexpr uint32_t spaceSize = 32;
 
 static std::string decryptRegistryFile(const fs::path &reg_path) {
     std::vector<char> encryptedData(0);
@@ -54,7 +71,7 @@ static std::string decryptRegistryFile(const fs::path &reg_path) {
     return decryptedData;
 }
 
-static void init_reg_template(RegMgrState &regmgr, const std::string &reg) {
+static bool init_reg_template(RegMgrState &regmgr, const std::string &reg) {
     regmgr.reg_category_template.clear();
     regmgr.reg_template.clear();
 
@@ -112,8 +129,14 @@ static void init_reg_template(RegMgrState &regmgr, const std::string &reg) {
                             values.push_back(s);
                     }
 
-                    const auto valueType = static_cast<RegType>(string_utils::stoi_def(values[0]));
-                    const auto valueSize = static_cast<uint32_t>(string_utils::stoi_def(values[1]));
+                    if (values.size() < 2)
+                        return false;
+                    const auto valueType = static_cast<RegType>(string_utils::stoi_def(values[0], -1));
+                    const auto parsedSize = string_utils::stoi_def(values[1], -1);
+                    if (parsedSize < 0 || (valueType != REG_TYPE_INT && valueType != REG_TYPE_STR && valueType != REG_TYPE_BIN)
+                        || (valueType == REG_TYPE_INT && (parsedSize < 4 || valueName.size() >= spaceSize || static_cast<size_t>(parsedSize) > spaceSize - valueName.size() - 1)))
+                        return false;
+                    const auto valueSize = static_cast<uint32_t>(parsedSize);
                     const auto valueDefault = values.back();
 
                     // Init the value depending on the type
@@ -151,13 +174,258 @@ static void init_reg_template(RegMgrState &regmgr, const std::string &reg) {
             }
         }
     }
+    return !regmgr.reg_template.empty();
 }
 
-static constexpr uint32_t spaceSize = 32;
 static uint32_t get_space_size(const uint32_t str_size) {
     const uint32_t line = 16;
 
-    return spaceSize > str_size ? spaceSize - str_size : ((str_size / line) + 1) * line - str_size;
+    return spaceSize > str_size ? spaceSize - str_size : line - str_size % line;
+}
+
+namespace {
+
+constexpr const char *account_category = "/CONFIG/NP/";
+constexpr const char *account_name = "account_id";
+
+struct CheckedRegistry {
+    std::vector<char> bytes;
+    size_t account_offset;
+    std::vector<char> *account_value;
+};
+
+// Validate the complete loaded image against the template and disk before using it.
+CheckedRegistry check_registry(RegMgrState &regmgr) {
+    if (!regmgr.system_dreg_valid || regmgr.system_dreg_path.empty() || regmgr.reg_category_template.empty() || regmgr.reg_template.empty())
+        throw std::runtime_error("Registry is not initialized");
+
+    std::ifstream file(regmgr.system_dreg_path, std::ios::binary | std::ios::ate);
+    if (!file)
+        throw std::runtime_error("Cannot open registry");
+    const auto length = file.tellg();
+    if (length < 0 || static_cast<uintmax_t>(length) > std::numeric_limits<size_t>::max())
+        throw std::runtime_error("Invalid registry size");
+    CheckedRegistry result{ std::vector<char>(static_cast<size_t>(length)), 0, nullptr };
+    file.seekg(0);
+    if (!file || (!result.bytes.empty() && !file.read(result.bytes.data(), length)))
+        throw std::runtime_error("Cannot read complete registry");
+
+    size_t offset = 0;
+    const auto consume = [&](size_t count) {
+        if (count > result.bytes.size() - offset)
+            throw std::runtime_error("Truncated registry");
+        const auto start = offset;
+        offset += count;
+        return start;
+    };
+    const auto padding = [](size_t size) -> size_t {
+        return size < spaceSize ? spaceSize - size : 16 - size % 16;
+    };
+
+    consume(spaceSize + 1);
+    std::set<std::string> categories;
+    for (const auto &category : regmgr.reg_category_template) {
+        if (!categories.insert(category).second)
+            throw std::runtime_error("Duplicate registry category");
+        const auto tmpl = regmgr.reg_template.find(category);
+        const auto values = regmgr.system_dreg.find(category);
+        if (tmpl == regmgr.reg_template.end() || values == regmgr.system_dreg.end())
+            throw std::runtime_error("Missing registry category");
+        const auto cat_offset = consume(category.size());
+        if (std::memcmp(result.bytes.data() + cat_offset, category.data(), category.size()) != 0)
+            throw std::runtime_error("Invalid registry category");
+        consume(padding(category.size()));
+        std::set<std::string> names;
+        for (const auto &entry : tmpl->second) {
+            if (!names.insert(entry.name).second || (entry.type != REG_TYPE_INT && entry.type != REG_TYPE_STR && entry.type != REG_TYPE_BIN))
+                throw std::runtime_error("Invalid registry template");
+            if (entry.type == REG_TYPE_INT && (entry.name.size() >= spaceSize || entry.size > spaceSize - entry.name.size() - 1))
+                throw std::runtime_error("Invalid integer registry entry");
+            const auto value = values->second.find(entry.name);
+            if (value == values->second.end() || value->second.size() != entry.size)
+                throw std::runtime_error("Invalid loaded registry value");
+            const auto name_offset = consume(entry.name.size());
+            if (std::memcmp(result.bytes.data() + name_offset, entry.name.data(), entry.name.size()) != 0)
+                throw std::runtime_error("Invalid registry entry name");
+            consume(entry.type == REG_TYPE_INT ? spaceSize - entry.name.size() - entry.size - 1 : padding(entry.name.size()) - 1);
+            const auto value_offset = consume(entry.size);
+            if (entry.size && std::memcmp(result.bytes.data() + value_offset, value->second.data(), entry.size) != 0)
+                throw std::runtime_error("Loaded registry differs from disk");
+            consume(entry.type == REG_TYPE_INT ? 1 : padding(entry.size) + 1);
+            if (category == account_category && entry.name == account_name) {
+                if (entry.type != REG_TYPE_BIN || entry.size != 8)
+                    throw std::runtime_error("Invalid account ID template");
+                result.account_offset = value_offset;
+                result.account_value = &value->second;
+            }
+        }
+    }
+    if (categories.size() != regmgr.reg_template.size() || !result.account_value)
+        throw std::runtime_error("Missing account ID template");
+    return result;
+}
+
+class ExclusiveRegistryFile {
+public:
+    ExclusiveRegistryFile(const fs::path &path, const fs::path &original)
+        : path_(path) {
+#ifdef _WIN32
+        DWORD needed = 0;
+        GetFileSecurityW(original.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &needed);
+        if (!needed || GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+            throw std::system_error(GetLastError(), std::system_category(), "Cannot read registry permissions");
+        std::vector<char> descriptor(needed);
+        if (!GetFileSecurityW(original.c_str(), DACL_SECURITY_INFORMATION, descriptor.data(), needed, &needed))
+            throw std::system_error(GetLastError(), std::system_category(), "Cannot read registry permissions");
+        SECURITY_ATTRIBUTES attributes{ sizeof(attributes), descriptor.data(), FALSE };
+        handle_ = CreateFileW(path.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE)
+            throw std::system_error(GetLastError(), std::system_category(), "Cannot create registry file");
+#else
+        (void)original;
+        handle_ = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (handle_ < 0)
+            throw std::system_error(errno, std::generic_category(), "Cannot create registry file");
+#endif
+    }
+
+    ExclusiveRegistryFile(const ExclusiveRegistryFile &) = delete;
+    ExclusiveRegistryFile &operator=(const ExclusiveRegistryFile &) = delete;
+
+    ~ExclusiveRegistryFile() {
+#ifdef _WIN32
+        if (handle_ != INVALID_HANDLE_VALUE)
+            CloseHandle(handle_);
+#else
+        if (handle_ >= 0)
+            close(handle_);
+#endif
+        if (remove_) {
+            std::error_code ignored;
+            fs::remove(path_, ignored);
+        }
+    }
+
+    void write_and_close(const std::vector<char> &bytes) {
+        size_t offset = 0;
+        while (offset < bytes.size()) {
+#ifdef _WIN32
+            DWORD written = 0;
+            const DWORD count = static_cast<DWORD>(std::min(bytes.size() - offset, static_cast<size_t>(std::numeric_limits<DWORD>::max())));
+            if (!WriteFile(handle_, bytes.data() + offset, count, &written, nullptr))
+                throw std::system_error(GetLastError(), std::system_category(), "Cannot write registry file");
+            if (!written)
+                throw std::runtime_error("Short registry write");
+#else
+            const auto count = std::min(bytes.size() - offset, static_cast<size_t>(std::numeric_limits<ssize_t>::max()));
+            const auto written = write(handle_, bytes.data() + offset, count);
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written < 0)
+                throw std::system_error(errno, std::generic_category(), "Cannot write registry file");
+            if (!written)
+                throw std::runtime_error("Short registry write");
+#endif
+            offset += static_cast<size_t>(written);
+        }
+#ifdef _WIN32
+        if (!FlushFileBuffers(handle_))
+            throw std::system_error(GetLastError(), std::system_category(), "Cannot flush registry file");
+        if (!CloseHandle(handle_)) {
+            const auto error = GetLastError();
+            handle_ = INVALID_HANDLE_VALUE;
+            throw std::system_error(error, std::system_category(), "Cannot close registry file");
+        }
+        handle_ = INVALID_HANDLE_VALUE;
+#else
+        if (fsync(handle_) != 0)
+            throw std::system_error(errno, std::generic_category(), "Cannot flush registry file");
+        if (close(handle_) != 0) {
+            const auto error = errno;
+            handle_ = -1;
+            throw std::system_error(error, std::generic_category(), "Cannot close registry file");
+        }
+        handle_ = -1;
+#endif
+    }
+
+    void keep() { remove_ = false; }
+
+private:
+    fs::path path_;
+    bool remove_ = true;
+#ifdef _WIN32
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+    int handle_ = -1;
+#endif
+};
+
+} // namespace
+
+std::array<uint8_t, 8> get_account_id(RegMgrState &regmgr) {
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
+    const auto registry = check_registry(regmgr);
+    std::array<uint8_t, 8> account_id;
+    std::memcpy(account_id.data(), registry.account_value->data(), account_id.size());
+    return account_id;
+}
+
+void set_account_id(RegMgrState &regmgr, const std::array<uint8_t, 8> &account_id) {
+    set_account_id(regmgr, account_id, false);
+}
+
+void set_account_id(RegMgrState &regmgr, const std::array<uint8_t, 8> &account_id, bool backup_original) {
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
+    auto registry = check_registry(regmgr);
+    if (backup_original) {
+        auto backup_path = regmgr.system_dreg_path;
+        backup_path += ".bak";
+        ExclusiveRegistryFile backup(backup_path, regmgr.system_dreg_path);
+        backup.write_and_close(registry.bytes);
+        backup.keep();
+    }
+    std::memcpy(registry.bytes.data() + registry.account_offset, account_id.data(), account_id.size());
+
+    static std::atomic<uint64_t> next_temp{ 0 };
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        auto temp_path = regmgr.system_dreg_path;
+        temp_path += ".account-id.tmp." + std::to_string(next_temp.fetch_add(1, std::memory_order_relaxed));
+        std::unique_ptr<ExclusiveRegistryFile> temp;
+        try {
+            temp = std::make_unique<ExclusiveRegistryFile>(temp_path, regmgr.system_dreg_path);
+        } catch (const std::system_error &error) {
+#ifdef _WIN32
+            if (error.code().value() != ERROR_FILE_EXISTS && error.code().value() != ERROR_ALREADY_EXISTS)
+#else
+            if (error.code().value() != EEXIST)
+#endif
+                throw;
+            continue;
+        }
+        temp->write_and_close(registry.bytes);
+#ifdef _WIN32
+            if (!MoveFileExW(temp_path.c_str(), regmgr.system_dreg_path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                throw std::system_error(GetLastError(), std::system_category(), "Cannot replace registry");
+#else
+            if (::rename(temp_path.c_str(), regmgr.system_dreg_path.c_str()) != 0)
+                throw std::system_error(errno, std::generic_category(), "Cannot replace registry");
+#endif
+        temp->keep();
+        std::memcpy(registry.account_value->data(), account_id.data(), account_id.size());
+#ifndef _WIN32
+        const int directory = open(regmgr.system_dreg_path.parent_path().c_str(), O_RDONLY | O_DIRECTORY);
+        if (directory < 0)
+            throw std::system_error(errno, std::generic_category(), "Cannot open registry directory for synchronization");
+        const int result = fsync(directory);
+        const int error = errno;
+        close(directory);
+        if (result != 0)
+            throw std::system_error(error, std::generic_category(), "Cannot synchronize registry directory");
+#endif
+        return;
+    }
+    throw std::runtime_error("Cannot allocate a registry staging file");
 }
 
 static bool load_system_dreg(RegMgrState &regmgr) {
@@ -168,15 +436,19 @@ static bool load_system_dreg(RegMgrState &regmgr) {
 
         // Skip the space
         file.read(space.data(), spaceSize + 1);
+        if (!file)
+            return false;
 
         for (const auto &cat : regmgr.reg_category_template) {
             // Read the category
             const uint32_t cat_size = static_cast<uint32_t>(cat.size());
             std::vector<char> category(cat_size);
             file.read(category.data(), cat_size);
+            if (!file)
+                return false;
             const auto category_str = std::string(category.begin(), category.end());
             if (category_str != cat) {
-                LOG_ERROR("Invalid category: {}, expected: {}", category_str, cat);
+                LOG_ERROR("Invalid registry category, expected: {}", cat);
                 return false;
             }
 
@@ -184,15 +456,19 @@ static bool load_system_dreg(RegMgrState &regmgr) {
             const auto diff_cat = get_space_size(cat_size);
             space.resize(diff_cat);
             file.read(space.data(), diff_cat);
+            if (!file)
+                return false;
 
             for (const auto &entry : regmgr.reg_template[cat]) {
                 // Read the name
                 const uint32_t name_size = static_cast<uint32_t>(entry.name.size());
                 std::vector<char> name(name_size);
                 file.read(name.data(), name_size);
+                if (!file)
+                    return false;
                 const auto name_str = std::string(name.begin(), name.end());
                 if (name_str != entry.name) {
-                    LOG_ERROR("Invalid entry name: {}, expected: {}, in category: {}", name_str, entry.name, cat);
+                    LOG_ERROR("Invalid registry entry name, expected: {} in category: {}", entry.name, cat);
                     return false;
                 }
 
@@ -200,17 +476,23 @@ static bool load_system_dreg(RegMgrState &regmgr) {
                 const auto diff_name = (entry.type == REG_TYPE_INT ? spaceSize - name_size - entry.size : get_space_size(name_size)) - 1;
                 space.resize(diff_name);
                 file.read(space.data(), diff_name);
+                if (!file)
+                    return false;
 
                 // Read the value
                 const uint32_t value_size = entry.size;
                 auto &value = regmgr.system_dreg[cat][entry.name];
                 value.resize(value_size);
                 file.read(value.data(), value_size);
+                if (!file)
+                    return false;
 
                 // Skip the space
                 const auto diff_value = (entry.type == REG_TYPE_INT) ? 1 : get_space_size(value_size) + 1;
                 space.resize(diff_value);
                 file.read(space.data(), diff_value);
+                if (!file)
+                    return false;
             }
         }
 
@@ -271,20 +553,38 @@ static void save_system_dreg(RegMgrState &regmgr) {
 }
 
 static void init_system_dreg(RegMgrState &regmgr) {
-    // Initialize the system.dreg with the default values from the template
-    for (const auto &reg : regmgr.reg_template) {
-        for (const auto &entry : reg.second) {
-            auto &value = regmgr.system_dreg[reg.first][entry.name];
-            value.resize(entry.size);
-            value = entry.init_value;
+    std::vector<char> bytes(spaceSize + 1, 0);
+    const auto append_padding = [&](size_t count) { bytes.insert(bytes.end(), count, 0); };
+    for (const auto &category : regmgr.reg_category_template) {
+        const auto cat = regmgr.reg_template.find(category);
+        if (cat == regmgr.reg_template.end() || category.size() > UINT32_MAX)
+            throw std::runtime_error("Invalid registry template");
+        bytes.insert(bytes.end(), category.begin(), category.end());
+        append_padding(get_space_size(static_cast<uint32_t>(category.size())));
+        for (const auto &entry : cat->second) {
+            if (entry.name.size() > UINT32_MAX || (entry.type == REG_TYPE_INT && (entry.name.size() >= spaceSize || entry.size > spaceSize - entry.name.size() - 1)))
+                throw std::runtime_error("Invalid registry template");
+            bytes.insert(bytes.end(), entry.name.begin(), entry.name.end());
+            append_padding(entry.type == REG_TYPE_INT ? spaceSize - entry.name.size() - entry.size - 1 : get_space_size(static_cast<uint32_t>(entry.name.size())) - 1);
+            auto value = entry.init_value;
+            value.resize(entry.size, 0);
+            bytes.insert(bytes.end(), value.begin(), value.end());
+            append_padding(entry.type == REG_TYPE_INT ? 1 : get_space_size(entry.size) + 1);
         }
     }
-
-    save_system_dreg(regmgr);
+    // No original exists yet. Exclusive creation also protects against races.
+#ifdef _WIN32
+    // A newly created registry has no source ACL to copy; use its parent directory.
+    ExclusiveRegistryFile file(regmgr.system_dreg_path, regmgr.system_dreg_path.parent_path());
+#else
+    ExclusiveRegistryFile file(regmgr.system_dreg_path, regmgr.system_dreg_path);
+#endif
+    file.write_and_close(bytes);
+    file.keep();
 }
 
 static bool reg_category_or_name_is_empty(const RegMgrState &regmgr, const std::string &category, const std::string &name) {
-    return regmgr.reg_template.empty() || category.empty() || name.empty();
+    return !regmgr.system_dreg_valid || regmgr.reg_template.empty() || category.empty() || name.empty();
 }
 
 static std::string fix_category(const std::string &category) {
@@ -380,22 +680,62 @@ void set_str_value(RegMgrState &regmgr, const std::string &category, const std::
     save_system_dreg(regmgr);
 }
 
+static void reset_regmgr_unlocked(RegMgrState &regmgr) {
+    regmgr.system_dreg.clear();
+    regmgr.system_dreg_path.clear();
+    regmgr.system_dreg_valid = false;
+    regmgr.reg_category_template.clear();
+    regmgr.reg_template.clear();
+}
+
+void reset_regmgr(RegMgrState &regmgr) {
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
+    reset_regmgr_unlocked(regmgr);
+}
+
 void init_regmgr(RegMgrState &regmgr, const fs::path &vita_fs_path) {
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
     // Load the registry template
     const auto reg = decryptRegistryFile(vita_fs_path / "os0/kd/registry.db0");
     if (reg.empty()) {
+        regmgr.system_dreg_valid = false;
+        if (regmgr.system_dreg_path != vita_fs_path / "vd0/registry/system.dreg")
+            reset_regmgr_unlocked(regmgr);
         return;
     }
 
     // Initialize the registry template
-    init_reg_template(regmgr, reg);
+    regmgr.system_dreg_valid = false;
+    if (!init_reg_template(regmgr, reg)) {
+        regmgr.system_dreg.clear();
+        regmgr.reg_category_template.clear();
+        regmgr.reg_template.clear();
+        LOG_WARN("Invalid registry template");
+        return;
+    }
 
     // Initialize the system.dreg
     regmgr.system_dreg_path = vita_fs_path / "vd0/registry/system.dreg";
     regmgr.system_dreg.clear();
-    if (!load_system_dreg(regmgr)) {
-        LOG_WARN("Failed to load system.dreg, attempting to create it");
-        init_system_dreg(regmgr);
+    regmgr.system_dreg_valid = load_system_dreg(regmgr);
+    if (!regmgr.system_dreg_valid) {
+        regmgr.system_dreg.clear();
+        std::error_code error;
+        const auto status = fs::symlink_status(regmgr.system_dreg_path, error);
+        if (error == std::errc::no_such_file_or_directory || (!error && status.type() == fs::file_type::not_found)) {
+            LOG_WARN("system.dreg not found, attempting to create it");
+            try {
+                init_system_dreg(regmgr);
+            } catch (const std::runtime_error &) {
+                LOG_WARN("Failed to create system.dreg");
+            }
+            regmgr.system_dreg.clear();
+            regmgr.system_dreg_valid = load_system_dreg(regmgr);
+            if (!regmgr.system_dreg_valid)
+                regmgr.system_dreg.clear();
+        } else {
+            LOG_WARN("Failed to load existing system.dreg; leaving it unchanged");
+        }
     }
 }
 

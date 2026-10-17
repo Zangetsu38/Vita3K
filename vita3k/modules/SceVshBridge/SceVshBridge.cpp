@@ -553,7 +553,8 @@ EXPORT(int, vshIoUmount) {
 }
 
 EXPORT(int, vshKernelCheckModelCapability) {
-    return UNIMPLEMENTED();
+    STUBBED("Assuming model capability is available");
+    return 1;
 }
 
 EXPORT(int, vshKernelDisableAutoClockDown) {
@@ -657,7 +658,8 @@ EXPORT(int, vshSblACMgrHasCapability) {
 }
 
 EXPORT(int, vshSblAimgrIsCEX) {
-    return UNIMPLEMENTED();
+    STUBBED("Returning true");
+    return 1;
 }
 
 EXPORT(int, vshSblAimgrIsDEX) {
@@ -665,7 +667,7 @@ EXPORT(int, vshSblAimgrIsDEX) {
 }
 
 EXPORT(int, vshSblAimgrIsDolce) {
-    return UNIMPLEMENTED();
+    return emuenv.cfg.current_config.pstv_mode ? 1 : 0;
 }
 
 EXPORT(int, vshSblAimgrIsGenuineDolce) {
@@ -761,7 +763,8 @@ EXPORT(int, vshSblSsIsDevelopmentMode) {
 }
 
 EXPORT(int, vshSblUtMgrHasComTestFlag) {
-    return UNIMPLEMENTED();
+    STUBBED("Returning true");
+    return 1;
 }
 
 EXPORT(int, vshSblUtMgrHasNpTestFlag) {
