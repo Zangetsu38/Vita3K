@@ -19,11 +19,14 @@
 #include <app/state.h>
 #include <config/state.h>
 #include <emuenv/state.h>
+#include <io/VitaIoDevice.h>
+#include <io/device.h>
 #include <io/state.h>
 #include <packages/sfo.h>
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/string_utils.h>
+#include <v3kn/activity.h>
 
 #include <pugixml.hpp>
 
@@ -34,19 +37,46 @@
 #include <mutex>
 #include <vector>
 
-static constexpr uint32_t CACHE_VERSION = 1;
+static constexpr uint32_t CACHE_VERSION = 2;
 
 namespace app {
 
 namespace {
 
 struct AppCacheSource {
-    std::string title_id;
+    std::string app_path;
     int64_t param_sfo_write_time{ -1 };
     int64_t icon_write_time{ -1 };
+    int64_t patch_sfo_write_time{ -1 };
+    int64_t patch_icon_write_time{ -1 };
 };
 
-static std::string get_icon_path(const EmuEnvState &emuenv, const std::string &title_id);
+static std::string get_icon_path(const EmuEnvState &emuenv, const std::string &app_path, const std::string &title_id);
+
+static std::string canonical_app_path(const std::string &app_path) {
+    if (app_path.empty())
+        return {};
+    if (device::get_device(app_path) != VitaIoDevice::_INVALID)
+        return app_path;
+    if (app_path.find(':') != std::string::npos) {
+        LOG_ERROR("Invalid application device in '{}'.", app_path);
+        return {};
+    }
+    return "ux0:app/" + app_path;
+}
+
+static std::string canonical_time_app_path(const std::string &app_path) {
+    constexpr std::array<std::string_view, 6> emulated_ids = {
+        "NPXS10003", "NPXS10006", "NPXS10008", "NPXS10014", "NPXS10015", "NPXS10026"
+    };
+    if (app_path == "NPXS19999" || app_path == "emu:vsh/shell")
+        return "vs0:vsh/shell";
+    if (std::ranges::find(emulated_ids, app_path) != emulated_ids.end())
+        return "emu:app/" + app_path;
+    if (app_path.starts_with("emu:"))
+        return app_path;
+    return canonical_app_path(app_path);
+}
 
 static fs::path get_apps_cache_path(const EmuEnvState &emuenv) {
     return emuenv.config_path / "gui-configs" / "apps-cache.xml";
@@ -66,26 +96,59 @@ static int64_t get_path_write_time(const fs::path &path) {
 
 static std::vector<AppCacheSource> collect_app_cache_sources(const EmuEnvState &emuenv) {
     const fs::path app_path{ emuenv.vita_fs_path / "ux0/app" };
-    if (!fs::exists(app_path))
-        return {};
-
     std::vector<AppCacheSource> sources;
-    for (const auto &entry : fs::directory_iterator(app_path)) {
-        if (entry.path().empty() || !fs::is_directory(entry.path()))
-            continue;
-        if (entry.path().filename().string().ends_with("_dec"))
-            continue;
-
-        const auto title_id = entry.path().filename().generic_string();
+    const auto add_source = [&](const std::string &vita_path, const fs::path &host_path, VitaIoDevice app_device, const fs::path &relative_path) {
+        const auto folder_name = relative_path.filename().string();
+        vfs::FileBuffer param;
+        sfo::SfoAppInfo info;
+        const auto actual_title_id = vfs::read_file(app_device, param, emuenv.vita_fs_path, relative_path / "sce_sys/param.sfo")
+                && sfo::get_param_info(info, param, emuenv.cfg.sys_lang) && !info.app_title_id.empty()
+            ? info.app_title_id
+            : folder_name;
+        const auto patch_path = emuenv.vita_fs_path / "ux0" / "patch" / actual_title_id / "sce_sys";
         sources.push_back({
-            .title_id = title_id,
-            .param_sfo_write_time = get_path_write_time(entry.path() / "sce_sys/param.sfo"),
-            .icon_write_time = get_path_write_time(entry.path() / "sce_sys/icon0.png"),
+            .app_path = vita_path,
+            .param_sfo_write_time = get_path_write_time(host_path / "sce_sys/param.sfo"),
+            .icon_write_time = get_path_write_time(host_path / "sce_sys/icon0.png"),
+            .patch_sfo_write_time = get_path_write_time(patch_path / "param.sfo"),
+            .patch_icon_write_time = get_path_write_time(patch_path / "icon0.png"),
         });
+    };
+    if (fs::exists(app_path)) {
+        for (const auto &entry : fs::directory_iterator(app_path)) {
+            if (entry.path().empty() || !fs::is_directory(entry.path()))
+                continue;
+            if (entry.path().filename().string().ends_with("_dec"))
+                continue;
+
+            const auto folder = entry.path().filename().generic_string();
+            add_source("ux0:app/" + folder, entry.path(), VitaIoDevice::ux0, fs::path("app") / folder);
+        }
+    }
+
+    for (const auto &vita_path : emuenv.cfg.firmware_apps) {
+        const auto app_device = device::get_device(vita_path);
+        if (app_device != VitaIoDevice::pd0 && app_device != VitaIoDevice::vs0) {
+            LOG_WARN("Ignoring firmware application with invalid device: '{}'.", vita_path);
+            continue;
+        }
+        const fs::path relative_path = device::remove_device_from_path(vita_path, app_device);
+        if (relative_path.parent_path() != fs::path("app") || relative_path.filename().empty() || relative_path.filename() == "." || relative_path.filename() == "..") {
+            LOG_WARN("Ignoring invalid firmware application path '{}'.", vita_path);
+            continue;
+        }
+        if (std::ranges::any_of(sources, [&](const AppCacheSource &source) { return source.app_path == vita_path; }))
+            continue;
+        const auto host_path = device::construct_emulated_path(app_device, relative_path, emuenv.vita_fs_path);
+        if (!fs::is_regular_file(host_path / "eboot.bin")) {
+            LOG_WARN("Firmware app not found at '{}'.", vita_path);
+            continue;
+        }
+        add_source(vita_path, host_path, app_device, relative_path);
     }
 
     std::ranges::sort(sources, [](const AppCacheSource &lhs, const AppCacheSource &rhs) {
-        return lhs.title_id < rhs.title_id;
+        return lhs.app_path < rhs.app_path;
     });
 
     return sources;
@@ -103,7 +166,7 @@ static AppEntry read_app_cache_entry(const pugi::xml_node &node, const EmuEnvSta
     app.title = node.attribute("title").as_string();
     app.title_id = node.attribute("title_id").as_string();
     app.path = node.attribute("path").as_string();
-    app.icon_path = get_icon_path(emuenv, app.title_id);
+    app.icon_path = get_icon_path(emuenv, app.path, app.title_id);
     return app;
 }
 
@@ -125,9 +188,11 @@ static std::vector<AppCacheSource> read_app_cache_sources(const pugi::xml_node &
     std::vector<AppCacheSource> sources;
     for (const auto &node : sources_node.children("source")) {
         sources.push_back({
-            .title_id = node.attribute("title_id").as_string(),
+            .app_path = node.attribute("path").as_string(),
             .param_sfo_write_time = node.attribute("param_sfo_write_time").as_llong(-1),
             .icon_write_time = node.attribute("icon_write_time").as_llong(-1),
+            .patch_sfo_write_time = node.attribute("patch_sfo_write_time").as_llong(-1),
+            .patch_icon_write_time = node.attribute("patch_icon_write_time").as_llong(-1),
         });
     }
     return sources;
@@ -138,9 +203,11 @@ static bool cache_sources_match(const std::vector<AppCacheSource> &lhs, const st
         return false;
 
     for (std::size_t i = 0; i < lhs.size(); ++i) {
-        if ((lhs[i].title_id != rhs[i].title_id)
+        if ((lhs[i].app_path != rhs[i].app_path)
             || (lhs[i].param_sfo_write_time != rhs[i].param_sfo_write_time)
-            || (lhs[i].icon_write_time != rhs[i].icon_write_time)) {
+            || (lhs[i].icon_write_time != rhs[i].icon_write_time)
+            || (lhs[i].patch_sfo_write_time != rhs[i].patch_sfo_write_time)
+            || (lhs[i].patch_icon_write_time != rhs[i].patch_icon_write_time)) {
             return false;
         }
     }
@@ -164,9 +231,11 @@ static bool write_apps_cache_file(const EmuEnvState &emuenv, const std::vector<A
     auto sources_node = root.append_child("sources");
     for (const auto &source : sources) {
         auto node = sources_node.append_child("source");
-        node.append_attribute("title_id") = source.title_id.c_str();
+        node.append_attribute("path") = source.app_path.c_str();
         node.append_attribute("param_sfo_write_time") = source.param_sfo_write_time;
         node.append_attribute("icon_write_time") = source.icon_write_time;
+        node.append_attribute("patch_sfo_write_time") = source.patch_sfo_write_time;
+        node.append_attribute("patch_icon_write_time") = source.patch_icon_write_time;
     }
 
     auto apps_node = root.append_child("apps");
@@ -208,10 +277,10 @@ static std::string resolve_existing_path(const EmuEnvState &emuenv, const fs::pa
     return {};
 }
 
-static std::string get_icon_path(const EmuEnvState &emuenv, const std::string &title_id) {
-    const auto rel = fs::path("ux0/app") / title_id / "sce_sys/icon0.png";
-    if (const auto resolved = resolve_existing_path(emuenv, rel); !resolved.empty())
-        return resolved;
+static std::string get_icon_path(const EmuEnvState &emuenv, const std::string &app_path, const std::string &title_id) {
+    const auto icon = vfs::resolve_app_path(emuenv.vita_fs_path, app_path, "sce_sys/icon0.png", title_id);
+    if (fs::exists(icon))
+        return icon.generic_string();
 
     const auto default_rel = fs::path("vs0/data/internal/common/default-icon.png");
     if (const auto resolved = resolve_existing_path(emuenv, default_rel); !resolved.empty())
@@ -271,27 +340,37 @@ static SharedAppDataUsage find_shared_app_data(
             }
 
             if (is_app_directory) {
-                vfs::FileBuffer param;
-                if (!vfs::read_app_file(param, emuenv.vita_fs_path, other_app_path, "sce_sys/param.sfo")) {
-                    LOG_WARN("Unable to read '{}'; preserving addcont and savedata because ownership cannot be verified.",
-                        it->path() / "sce_sys/param.sfo");
+                const auto param_path = it->path() / "sce_sys/param.sfo";
+                const bool has_param = fs::exists(param_path, err);
+                if (err) {
+                    LOG_WARN("Unable to inspect '{}': {}; preserving app data.", param_path, err.message());
                     return {};
                 }
+                if (!has_param) {
+                    LOG_DEBUG("Skipping app-data ownership check for '{}' without param.sfo.", it->path());
+                } else {
+                    vfs::FileBuffer param;
+                    if (!vfs::read_file(VitaIoDevice::ux0, param, emuenv.vita_fs_path, fs::path("app") / other_app_path / "sce_sys/param.sfo")) {
+                        LOG_WARN("Unable to read '{}'; preserving addcont and savedata because ownership cannot be verified.",
+                            param_path);
+                        return {};
+                    }
 
-                sfo::SfoAppInfo other_info;
-                if (!sfo::get_param_info(other_info, param, emuenv.cfg.sys_lang)) {
-                    LOG_WARN("Malformed param.sfo in '{}', preserving app data.", it->path());
-                    return {};
-                }
-                if (!is_safe_app_data_id(other_info.app_addcont) || !is_safe_app_data_id(other_info.app_savedata)) {
-                    LOG_WARN("Invalid addcont or savedata metadata in '{}'; preserving app data.", it->path());
-                    return {};
-                }
+                    sfo::SfoAppInfo other_info;
+                    if (!sfo::get_param_info(other_info, param, emuenv.cfg.sys_lang)) {
+                        LOG_WARN("Malformed param.sfo in '{}', preserving app data.", it->path());
+                        return {};
+                    }
+                    if (!is_safe_app_data_id(other_info.app_addcont) || !is_safe_app_data_id(other_info.app_savedata)) {
+                        LOG_WARN("Invalid addcont or savedata metadata in '{}'; preserving app data.", it->path());
+                        return {};
+                    }
 
-                usage.addcont = usage.addcont
-                    || string_utils::toupper(other_info.app_addcont) == string_utils::toupper(addcont_id);
-                usage.savedata = usage.savedata
-                    || string_utils::toupper(other_info.app_savedata) == string_utils::toupper(savedata_id);
+                    usage.addcont = usage.addcont
+                        || string_utils::toupper(other_info.app_addcont) == string_utils::toupper(addcont_id);
+                    usage.savedata = usage.savedata
+                        || string_utils::toupper(other_info.app_savedata) == string_utils::toupper(savedata_id);
+                }
             }
         }
 
@@ -315,15 +394,11 @@ bool init_apps_list(EmuEnvState &emuenv) {
 }
 
 bool scan_apps(EmuEnvState &emuenv) {
-    const fs::path app_path{ emuenv.vita_fs_path / "ux0/app" };
-    if (!fs::exists(app_path))
-        return false;
-
     const auto sources = collect_app_cache_sources(emuenv);
     std::vector<AppEntry> scanned;
     scanned.reserve(sources.size());
     for (const auto &source : sources)
-        scanned.push_back(read_app_info(emuenv, source.title_id));
+        scanned.push_back(read_app_info(emuenv, source.app_path));
 
     auto &state = emuenv.app.apps_list;
 
@@ -397,21 +472,37 @@ void save_apps_cache(EmuEnvState &emuenv) {
     write_apps_cache_file(emuenv, apps, sources, static_cast<uint32_t>(emuenv.cfg.sys_lang));
 }
 
-AppEntry read_app_info(EmuEnvState &emuenv, const std::string &title_id) {
+AppEntry read_app_info(EmuEnvState &emuenv, const std::string &app_path) {
+    const auto full_path = canonical_app_path(app_path);
+    const auto app_device = device::get_device(full_path);
+    if (full_path.empty() || app_device == VitaIoDevice::_INVALID) {
+        LOG_ERROR("Cannot read application info for '{}'.", app_path);
+        return {};
+    }
+    const fs::path relative_path = device::remove_device_from_path(full_path, app_device);
+    const auto folder_name = relative_path.filename().string();
     sfo::SfoAppInfo info;
     vfs::FileBuffer param;
-    if (vfs::read_app_file(param, emuenv.vita_fs_path, title_id, "sce_sys/param.sfo")
+    if (vfs::read_file(app_device, param, emuenv.vita_fs_path, relative_path / "sce_sys/param.sfo")
         && sfo::get_param_info(info, param, emuenv.cfg.sys_lang)) {
     } else {
-        info.app_title_id = title_id;
-        info.app_addcont = title_id;
-        info.app_savedata = title_id;
-        info.app_short_title = title_id;
-        info.app_title = title_id;
+        info.app_title_id = folder_name;
+        info.app_addcont = folder_name;
+        info.app_savedata = folder_name;
+        info.app_short_title = folder_name;
+        info.app_title = folder_name;
         info.app_version = "0.00";
         info.app_category = "-";
         info.app_parental_level = "0";
     }
+
+    vfs::FileBuffer patch_param;
+    sfo::SfoAppInfo patch_info;
+    const auto patch_sfo = fs::path("patch") / info.app_title_id / "sce_sys/param.sfo";
+    if (vfs::read_file(VitaIoDevice::ux0, patch_param, emuenv.vita_fs_path, patch_sfo)
+        && sfo::get_param_info(patch_info, patch_param, emuenv.cfg.sys_lang)
+        && !patch_info.app_version.empty())
+        info.app_version = patch_info.app_version;
 
     AppEntry app;
     app.app_ver = info.app_version;
@@ -423,8 +514,8 @@ AppEntry read_app_info(EmuEnvState &emuenv, const std::string &title_id) {
     app.stitle = info.app_short_title;
     app.title = info.app_title;
     app.title_id = info.app_title_id;
-    app.path = title_id;
-    app.icon_path = get_icon_path(emuenv, title_id);
+    app.path = full_path;
+    app.icon_path = get_icon_path(emuenv, full_path, info.app_title_id);
     return app;
 }
 
@@ -467,10 +558,17 @@ void load_app_times(EmuEnvState &emuenv) {
         const std::string user_id = user.attribute("id").as_string();
         for (const auto &app : user) {
             AppTime t;
-            t.app_path = app.text().as_string();
+            t.app_path = canonical_time_app_path(app.text().as_string());
             t.last_time_used = app.attribute("last-time-used").as_llong();
             t.time_used = app.attribute("time-used").as_llong();
-            state.app_times[user_id].push_back(t);
+            auto &times = state.app_times[user_id];
+            const auto existing = std::ranges::find_if(times, [&](const AppTime &entry) { return entry.app_path == t.app_path; });
+            if (existing == times.end())
+                times.push_back(t);
+            else {
+                existing->last_time_used = std::max(existing->last_time_used, t.last_time_used);
+                existing->time_used += t.time_used;
+            }
         }
     }
 }
@@ -508,18 +606,26 @@ void save_app_times(EmuEnvState &emuenv) {
 
 void update_last_time_app_used(EmuEnvState &emuenv, const std::string &app_path) {
     auto &state = emuenv.app.apps_list;
-    std::lock_guard<std::mutex> lock(state.mutex);
+    bool first_launch = false;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        const std::string &user_id = emuenv.io.user_id;
+        auto it = find_app_time(state, user_id, app_path);
 
-    const std::string &user_id = emuenv.io.user_id;
-    auto it = find_app_time(state, user_id, app_path);
+        if (it != state.app_times[user_id].end()) {
+            it->last_time_used = std::time(nullptr);
+        } else {
+            first_launch = true;
+            state.app_times[user_id].push_back({ app_path, std::time(nullptr), 0 });
+        }
 
-    if (it != state.app_times[user_id].end()) {
-        it->last_time_used = std::time(nullptr);
-    } else {
-        state.app_times[user_id].push_back({ app_path, std::time(nullptr), 0 });
+        save_app_times(emuenv);
     }
 
-    save_app_times(emuenv);
+    if (first_launch && !app_path.starts_with("vs0") && app_path.find("PCS") != std::string::npos) {
+        ActivityPostStatus status{ .type = "game_start", .title_id = emuenv.io.title_id };
+        v3kn::create_and_post_activity_status(emuenv, status);
+    }
 }
 
 void update_app_time_used(EmuEnvState &emuenv, const std::string &app_path) {
@@ -557,33 +663,48 @@ void reset_last_time_app_used(EmuEnvState &emuenv, const std::string &app_path) 
 }
 
 bool delete_app(EmuEnvState &emuenv, const std::string &app_path) {
-    AppEntry app_entry;
-    {
-        auto &state = emuenv.app.apps_list;
-        std::lock_guard<std::mutex> lock(state.mutex);
-        const auto it = std::ranges::find_if(state.apps,
-            [&](const AppEntry &app) { return app.path == app_path; });
-        if (it == state.apps.end()) {
-            LOG_WARN("'{}' not found in apps list.", app_path);
-            return false;
-        }
-        app_entry = *it;
+    const auto found = get_app(emuenv, app_path);
+    if (!found) {
+        LOG_WARN("'{}' not found in apps list.", app_path);
+        return false;
+    }
+    const AppEntry &app_entry = *found;
+    const auto app_device = device::get_device(app_entry.path);
+    const fs::path relative_path = device::remove_device_from_path(app_entry.path, app_device);
+    const auto folder_name = relative_path.filename().string();
+    if (app_device != VitaIoDevice::ux0 || relative_path.parent_path() != fs::path("app") || !is_safe_app_data_id(folder_name)) {
+        LOG_ERROR("Refusing to delete application outside ux0:app: '{}'.", app_entry.path);
+        return false;
     }
 
     const bool addcont_id_valid = is_safe_app_data_id(app_entry.addcont);
     const bool savedata_id_valid = is_safe_app_data_id(app_entry.savedata);
-    const auto addcont_id{ safe_app_data_id(app_entry.addcont, app_path) };
-    const auto savedata_id{ safe_app_data_id(app_entry.savedata, app_path) };
-    const auto title_id{ safe_app_data_id(app_entry.title_id, app_path) };
-    const auto shared_data{ find_shared_app_data(emuenv, app_path, addcont_id, savedata_id) };
+    const auto addcont_id{ safe_app_data_id(app_entry.addcont, folder_name) };
+    const auto savedata_id{ safe_app_data_id(app_entry.savedata, folder_name) };
+    const auto title_id{ safe_app_data_id(app_entry.title_id, folder_name) };
+    auto shared_data{ find_shared_app_data(emuenv, folder_name, addcont_id, savedata_id) };
+    bool shared_title = false;
+    bool shared_config = false;
+    for (const auto &other : get_apps(emuenv)) {
+        if (other.path == app_entry.path)
+            continue;
+        shared_title |= other.title_id == title_id;
+        shared_config |= fs::path(other.path).filename() == folder_name;
+        if (!other.path.starts_with("ux0:app/")) {
+            if (!is_safe_app_data_id(other.addcont) || !is_safe_app_data_id(other.savedata))
+                shared_data.verified = false;
+            shared_data.addcont |= string_utils::toupper(other.addcont) == string_utils::toupper(addcont_id);
+            shared_data.savedata |= string_utils::toupper(other.savedata) == string_utils::toupper(savedata_id);
+        }
+    }
     if (!shared_data.verified)
         LOG_WARN("Keeping addcont and savedata for '{}' because ownership could not be verified.", app_path);
 
     try {
-        fs::remove_all(emuenv.vita_fs_path / "ux0/app" / app_path);
+        fs::remove_all(emuenv.vita_fs_path / "ux0/app" / folder_name);
 
-        const auto custom_cfg{ emuenv.config_path / "config" / fmt::format("config_{}.xml", app_path) };
-        if (fs::exists(custom_cfg))
+        const auto custom_cfg{ emuenv.config_path / "config" / fmt::format("config_{}.xml", folder_name) };
+        if (!shared_config && fs::exists(custom_cfg))
             fs::remove_all(custom_cfg);
 
         const auto addcont{ emuenv.vita_fs_path / "ux0/addcont" / addcont_id };
@@ -595,11 +716,11 @@ bool delete_app(EmuEnvState &emuenv, const std::string &app_path) {
             LOG_WARN("Keeping addcont '{}' because another installed app uses it.", addcont_id);
 
         const auto license{ emuenv.vita_fs_path / "ux0/license" / title_id };
-        if (fs::exists(license))
+        if (!shared_title && fs::exists(license))
             fs::remove_all(license);
 
         const auto patch{ emuenv.vita_fs_path / "ux0/patch" / title_id };
-        if (fs::exists(patch))
+        if (!shared_title && fs::exists(patch))
             fs::remove_all(patch);
 
         const auto savedata{ emuenv.vita_fs_path / "ux0/user" / emuenv.io.user_id / "savedata" / savedata_id };
@@ -611,23 +732,23 @@ bool delete_app(EmuEnvState &emuenv, const std::string &app_path) {
             LOG_WARN("Keeping savedata '{}' because another installed app uses it.", savedata_id);
 
         const auto shader_cache{ emuenv.cache_path / "shaders" / title_id };
-        if (fs::exists(shader_cache))
+        if (!shared_title && fs::exists(shader_cache))
             fs::remove_all(shader_cache);
 
         const auto shader_log{ emuenv.cache_path / "shaderlog" / title_id };
-        if (fs::exists(shader_log))
+        if (!shared_title && fs::exists(shader_log))
             fs::remove_all(shader_log);
 
         const auto shader_log2{ emuenv.log_path / "shaderlog" / title_id };
-        if (fs::exists(shader_log2))
+        if (!shared_title && fs::exists(shader_log2))
             fs::remove_all(shader_log2);
 
         const auto export_tex{ emuenv.shared_path / "textures/export" / title_id };
-        if (fs::exists(export_tex))
+        if (!shared_title && fs::exists(export_tex))
             fs::remove_all(export_tex);
 
         const auto import_tex{ emuenv.shared_path / "textures/import" / title_id };
-        if (fs::exists(import_tex))
+        if (!shared_title && fs::exists(import_tex))
             fs::remove_all(import_tex);
 
         LOG_INFO("App successfully deleted '{}' [{}].", app_entry.title_id, app_entry.title);
@@ -640,10 +761,10 @@ bool delete_app(EmuEnvState &emuenv, const std::string &app_path) {
         auto &state = emuenv.app.apps_list;
         std::lock_guard<std::mutex> lock(state.mutex);
 
-        std::erase_if(state.apps, [&](const AppEntry &app) { return app.path == app_path; });
+        std::erase_if(state.apps, [&](const AppEntry &app) { return app.path == app_entry.path; });
 
         for (auto &[user_id, times] : state.app_times) {
-            std::erase_if(times, [&](const AppTime &t) { return t.app_path == app_path; });
+            std::erase_if(times, [&](const AppTime &t) { return t.app_path == app_entry.path; });
         }
         save_app_times(emuenv);
     }
@@ -661,9 +782,14 @@ std::vector<AppEntry> get_apps(const EmuEnvState &emuenv) {
 std::optional<AppEntry> get_app(const EmuEnvState &emuenv, const std::string &app_path) {
     const auto &state = emuenv.app.apps_list;
     std::lock_guard<std::mutex> lock(state.mutex);
-    const auto it = std::ranges::find_if(state.apps, [&](const AppEntry &app) {
-        return app.path == app_path;
+    const auto full_path = canonical_app_path(app_path);
+    auto it = std::ranges::find_if(state.apps, [&](const AppEntry &app) {
+        return app.path == full_path;
     });
+    if (it == state.apps.end() && app_path.find(':') == std::string::npos)
+        it = std::ranges::find_if(state.apps, [&](const AppEntry &app) {
+            return app.path.starts_with("ux0:app/") && app.title_id == app_path;
+        });
     if (it == state.apps.end())
         return std::nullopt;
     return *it;
@@ -688,12 +814,25 @@ std::map<std::string, AppTime> get_user_app_times(const EmuEnvState &emuenv) {
 }
 
 bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
-    const auto &state = emuenv.app.apps_list;
-    std::lock_guard<std::mutex> lock(state.mutex);
+    if (app_path == "vs0:vsh/shell") {
+        if (!fs::is_regular_file(emuenv.vita_fs_path / "vs0/vsh/shell/shell.self")) {
+            LOG_ERROR("Shell executable not found for '{}'.", app_path);
+            return false;
+        }
+        emuenv.io.app_path = app_path;
+        emuenv.io.title_id = "NPXS19999";
+        emuenv.io.addcont = emuenv.io.title_id;
+        emuenv.io.content_id.clear();
+        emuenv.io.savedata = emuenv.io.title_id;
+        emuenv.current_app_title = "PlayStation Vita OS";
+        emuenv.app_info.app_version = "1.00";
+        emuenv.app_info.app_category = "gda";
+        emuenv.app_info.app_short_title = "PS Vita OS";
+        return true;
+    }
 
-    const auto it = std::ranges::find_if(state.apps, [&](const AppEntry &app) { return app.path == app_path; });
-
-    if (it == state.apps.end()) {
+    const auto it = get_app(emuenv, app_path);
+    if (!it) {
         LOG_ERROR("{} not found in apps list.", app_path);
         return false;
     }

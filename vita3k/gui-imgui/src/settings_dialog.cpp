@@ -29,7 +29,9 @@
 #include <gui-imgui/state.h>
 #include <host/dialog/filesystem.h>
 #include <io/state.h>
+#include <io/vfs.h>
 #include <kernel/state.h>
+#include <packages/sfo.h>
 #include <renderer/functions.h>
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
@@ -49,9 +51,11 @@
 
 #include <SDL3/SDL_camera.h>
 #include <algorithm>
+#include <array>
 #include <camera/state.h>
 #include <imgui_internal.h>
 #include <pugixml.hpp>
+#include <string_view>
 #include <util/vector_utils.h>
 
 #undef ERROR
@@ -245,6 +249,7 @@ std::vector<config::RestartRequiredSetting> get_emulator_restart_required_settin
  * will be set those of the global emulator settings before getting used to set up `emuenv.cfg.current_config`.
  */
 static Config::CurrentConfig config;
+static bool experimental_appmeta = false;
 
 enum class SettingsDialogSection {
     Core,
@@ -313,12 +318,48 @@ static void change_emulator_path(GuiState &gui, EmuEnvState &emuenv) {
 static int current_aniso_filter_log, max_aniso_filter_log, audio_backend_idx, current_user_lang;
 static std::vector<std::string> list_user_lang;
 
+static constexpr std::array<std::string_view, 24> firmware_apps_paths = {
+    "pd0:app/NPXS10007",
+    "vs0:app/NPXS10000", "vs0:app/NPXS10001", "vs0:app/NPXS10002",
+    "vs0:app/NPXS10003", "vs0:app/NPXS10004", "vs0:app/NPXS10006",
+    "vs0:app/NPXS10008", "vs0:app/NPXS10009", "vs0:app/NPXS10010",
+    "vs0:app/NPXS10012", "vs0:app/NPXS10013", "vs0:app/NPXS10014",
+    "vs0:app/NPXS10015", "vs0:app/NPXS10018", "vs0:app/NPXS10021",
+    "vs0:app/NPXS10026", "vs0:app/NPXS10031", "vs0:app/NPXS10072",
+    "vs0:app/NPXS10078", "vs0:app/NPXS10091", "vs0:app/NPXS10094",
+    "vs0:app/NPXS10095", "vs0:app/NPXS10098"
+};
+
+static std::vector<std::pair<std::string, std::string>> fw_apps;
+static std::vector<std::string> current_fw_apps;
+static bool firmware_apps_refresh_pending = false;
+static std::string settings_save_error;
+
+static void get_firmware_apps_title(EmuEnvState &emuenv) {
+    current_fw_apps = emuenv.cfg.firmware_apps;
+    fw_apps.clear();
+    for (const auto app_path : firmware_apps_paths) {
+        vfs::FileBuffer param;
+        sfo::SfoAppInfo app_info;
+        if (vfs::read_app_file(param, emuenv.vita_fs_path, std::string(app_path), "sce_sys/param.sfo")
+            && sfo::get_param_info(app_info, param, emuenv.cfg.sys_lang) && !app_info.app_title.empty())
+            fw_apps.emplace_back(app_path, app_info.app_title);
+    }
+
+    std::sort(fw_apps.begin(), fw_apps.end(), [](const auto &a, const auto &b) {
+        const bool a_selected = vector_utils::contains(current_fw_apps, a.first);
+        const bool b_selected = vector_utils::contains(current_fw_apps, b.first);
+        return a_selected != b_selected ? a_selected : a.second < b.second;
+    });
+}
+
 /** Initialize the dialog draft from the global or app-specific configuration. */
 void init_config(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path) {
     Config config_copy;
     config_copy = emuenv.cfg;
     config::set_current_config(config_copy, emuenv.config_path, app_path);
     config = config_copy.current_config;
+    experimental_appmeta = emuenv.cfg.experimental_appmeta;
 
     list_user_lang.clear();
     const auto get_list_user_lang = [&](const fs::path &path) {
@@ -340,6 +381,7 @@ void init_config(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path
 
     current_user_lang = emuenv.cfg.user_lang.empty() ? 0 : (vector_utils::find_index(list_user_lang, emuenv.cfg.user_lang) + 1);
 
+    get_firmware_apps_title(emuenv);
     refresh_modules_list(emuenv);
     current_aniso_filter_log = static_cast<int>(log2f(static_cast<float>(config.anisotropic_filtering)));
     max_aniso_filter_log = static_cast<int>(log2f(static_cast<float>(emuenv.renderer->get_max_anisotropic_filtering())));
@@ -349,18 +391,73 @@ void init_config(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path
     gui.vita_area.information_bar = true;
 }
 
-static app::SettingsCommitResult save_config(GuiState &gui, EmuEnvState &emuenv) {
+static bool save_config(GuiState &gui, EmuEnvState &emuenv, app::SettingsCommitResult &result) {
+    settings_save_error.clear();
+    if (gui.apps_list_scan_running.exchange(true)) {
+        settings_save_error = "The application list is being refreshed. Please try saving again.";
+        return false;
+    }
+    struct ScanGuard {
+        GuiState &gui;
+        ~ScanGuard() { gui.apps_list_scan_running = false; }
+    } scan_guard{ gui };
+
+    const auto previous_fw_apps = emuenv.cfg.firmware_apps;
+    const bool firmware_apps_changed = previous_fw_apps != current_fw_apps;
     Config desired_cfg;
     desired_cfg = emuenv.cfg;
     desired_cfg.current_config = config;
 
     const auto scope_app_path = gui.configuration_menu.custom_settings_dialog ? emuenv.app_path : std::string{};
-    if (scope_app_path.empty())
+    if (scope_app_path.empty()) {
         config::copy_current_config_to_global(desired_cfg);
-    const auto result = app::commit_settings(emuenv, desired_cfg, scope_app_path);
+        desired_cfg.experimental_appmeta = experimental_appmeta;
+    }
 
-    if (!scope_app_path.empty())
-        config::serialize_config(emuenv.cfg, emuenv.cfg.config_path);
+    try {
+        const bool had_custom_config = !scope_app_path.empty() && config::has_custom_config(emuenv.config_path, scope_app_path);
+        if (!scope_app_path.empty() && !config::save_custom_config(config, emuenv.config_path, scope_app_path)) {
+            settings_save_error = "Could not save the application settings.";
+            LOG_ERROR("{}", settings_save_error);
+            return false;
+        }
+
+        result = app::commit_settings(emuenv, desired_cfg, scope_app_path);
+        if (!scope_app_path.empty())
+            result.custom_config_created = !had_custom_config;
+        emuenv.cfg.firmware_apps = current_fw_apps;
+        if (config::serialize_config(emuenv.cfg, emuenv.cfg.config_path) != Success) {
+            emuenv.cfg.firmware_apps = previous_fw_apps;
+            settings_save_error = "Could not save the emulator settings. Some other changes may have been applied.";
+            LOG_ERROR("{}", settings_save_error);
+            return false;
+        }
+    } catch (const std::exception &e) {
+        emuenv.cfg.firmware_apps = previous_fw_apps;
+        settings_save_error = "Could not save the settings. Some changes may have been applied; check the log.";
+        LOG_ERROR("{}: {}", settings_save_error, e.what());
+        return false;
+    }
+
+    firmware_apps_refresh_pending |= firmware_apps_changed;
+    if (firmware_apps_refresh_pending) {
+        try {
+            if (!app::scan_apps(emuenv)) {
+                settings_save_error = "Settings were saved, but the application list could not be refreshed. Please retry.";
+                LOG_ERROR("{}", settings_save_error);
+                return false;
+            }
+            gui.app_selector.icon_async_loader.reset();
+            gui.app_selector.user_apps_icon.clear();
+            init_apps_icon(gui, emuenv, app::get_apps(emuenv));
+            gui.app_selector.is_app_list_sorted = false;
+            firmware_apps_refresh_pending = false;
+        } catch (const std::exception &e) {
+            settings_save_error = "Settings were saved, but the application list could not be refreshed. Please retry.";
+            LOG_ERROR("{}: {}", settings_save_error, e.what());
+            return false;
+        }
+    }
 
     if (result.runtime_settings_applied && emuenv.renderer) {
         emuenv.renderer->set_stretch_display(emuenv.cfg.current_config.stretch_the_display_area);
@@ -368,7 +465,7 @@ static app::SettingsCommitResult save_config(GuiState &gui, EmuEnvState &emuenv)
     }
 
     bgm_player::set_bgm_volume(emuenv.cfg.bgm_volume);
-    return result;
+    return true;
 }
 
 static std::vector<const char *> cameras_list(2);
@@ -582,6 +679,9 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Spacing();
         ImGui::Checkbox(lang.cpu["cpu_opt"].c_str(), &config.cpu_opt);
         SetTooltipEx(lang.cpu["cpu_opt_description"].c_str());
+        ImGui::Spacing();
+        ImGui::Checkbox(lang.cpu["thread_scheduler"].c_str(), &config.thread_scheduler);
+        SetTooltipEx(lang.cpu["thread_scheduler_description"].c_str());
         break;
     }
     case SettingsDialogSection::GPU: {
@@ -1060,10 +1160,36 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         ImGui::Checkbox(lang.system["demo_mode"].c_str(), &emuenv.cfg.demo_mode);
         SetTooltipEx(lang.system["demo_mode_description"].c_str());
 
+        ImGui::Spacing();
+        ImGui::TextColored(GUI_COLOR_TEXT, "%s", "Select Your Preferred Firmware App");
+        ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.5f);
+        if (ImGui::BeginListBox("##fw_apps_list", { 0.0f, ImGui::GetTextLineHeightWithSpacing() * 8.25f + ImGui::GetStyle().FramePadding.y * 2.0f })) {
+            for (const auto &[path, title] : fw_apps) {
+                const auto it = std::find(current_fw_apps.begin(), current_fw_apps.end(), path);
+                const bool selected = it != current_fw_apps.end();
+                ImGui::PushID(path.c_str());
+                if (ImGui::Selectable(title.c_str(), selected)) {
+                    if (selected)
+                        current_fw_apps.erase(it);
+                    else
+                        current_fw_apps.push_back(path);
+                }
+                ImGui::PopID();
+                ImGui::ScrollWhenDragging();
+            }
+            ImGui::EndListBox();
+        }
+        ImGui::PopItemWidth();
+
         break;
     }
 
     case SettingsDialogSection::Emulator: {
+        if (!is_custom_config) {
+            ImGui::Spacing();
+            ImGui::Checkbox(lang.emulator["experimental_appmeta"].c_str(), &experimental_appmeta);
+            SetTooltipEx(lang.emulator["experimental_appmeta_description"].c_str());
+        }
 #ifndef __ANDROID__
         ImGui::Spacing();
         ImGui::Checkbox(lang.emulator["boot_apps_full_screen"].c_str(), &emuenv.cfg.boot_apps_full_screen);
@@ -1332,7 +1458,8 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
         if (emuenv.cfg.adhoc_addr >= addrs.size()) {
             emuenv.cfg.adhoc_addr = 0;
             LOG_WARN("Invalid adhoc address index {}, resetting to 0", emuenv.cfg.adhoc_addr);
-            save_config(gui, emuenv);
+            app::SettingsCommitResult result;
+            save_config(gui, emuenv, result);
         }
 
         ImGui::PushItemWidth(ImGui::CalcTextSize(addrsStrings[emuenv.cfg.adhoc_addr].c_str()).x + (30.f * SCALE.x));
@@ -1550,18 +1677,28 @@ void draw_settings_dialog(GuiState &gui, EmuEnvState &emuenv) {
             button_label = lang.main_window["save_apply"].c_str();
     }
     if (ImGui::Button(button_label, BUTTON_SIZE)) {
-        const auto result = save_config(gui, emuenv);
-        if (result.affected_running_game && !result.restart_required_settings.empty())
-            app::request_in_process_launch(emuenv, AppLaunchRequest{
-                                                       .app_path = emuenv.io.app_path,
-                                                       .self_path = emuenv.self_path,
-                                                       .argv = emuenv.cfg.app_args.empty() ? std::vector<std::string>{} : std::vector<std::string>{ emuenv.cfg.app_args },
-                                                       .reason = AppLaunchReason::LoadExec,
-                                                   });
+        app::SettingsCommitResult result;
+        if (save_config(gui, emuenv, result)) {
+            if (result.affected_running_game && !result.restart_required_settings.empty())
+                app::request_in_process_launch(emuenv, AppLaunchRequest{
+                                                           .app_path = emuenv.io.app_path,
+                                                           .self_path = emuenv.self_path,
+                                                           .argv = emuenv.cfg.app_args.empty() ? std::vector<std::string>{} : std::vector<std::string>{ emuenv.cfg.app_args },
+                                                           .reason = AppLaunchReason::LoadExec,
+                                                       });
 
-        close_settings_dialog();
+            close_settings_dialog();
+        } else {
+            ImGui::OpenPopup("##settings_save_error");
+        }
     }
     SetTooltipEx(lang.main_window["keep_changes"].c_str());
+    if (ImGui::BeginPopupModal("##settings_save_error", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", settings_save_error.c_str());
+        if (ImGui::Button(common["close"].c_str()))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
     ImGui::PopStyleColor(8);
     ImGui::PopStyleVar(3);
 

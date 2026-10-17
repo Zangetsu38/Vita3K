@@ -21,6 +21,7 @@
 #include <kernel/callback.h>
 #include <kernel/debugger.h>
 #include <kernel/object_store.h>
+#include <kernel/scheduler.h>
 #include <kernel/sync_primitives.h>
 #include <kernel/types.h>
 #include <mem/allocator.h>
@@ -141,6 +142,7 @@ struct KernelState {
 
     bool cpu_opt;
     CorenumAllocator corenum_allocator;
+    Scheduler sched;
     CallImportFunc call_import;
 
     // Thumb NOP and WFI that guest functions called by the kernel return to
@@ -168,7 +170,7 @@ struct KernelState {
         return next_uid++;
     }
 
-    bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
+    bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt, bool thread_scheduler);
     void deinit(MemState &mem);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
     // Creates a dormant thread with these creation arguments, attr without THREAD_ATTR_USER, or returns null

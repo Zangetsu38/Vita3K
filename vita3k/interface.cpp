@@ -28,6 +28,7 @@
 #include <display/functions.h>
 #include <display/state.h>
 #include <emuenv/state.h>
+#include <io/device.h>
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
@@ -60,6 +61,7 @@
 
 #include "patch/patch.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <regex>
@@ -258,10 +260,15 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
         else
             return false;
     }
-    if (!copy_path(output_path, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
-        return false;
-
     update_progress();
+
+    if (emuenv.cfg.experimental_appmeta && !is_theme) {
+        const auto ux0 = emuenv.vita_fs_path / "ux0";
+        if (output_path == ux0 / "app" / emuenv.app_info.app_title_id)
+            create_experimental_appmeta(emuenv.vita_fs_path, emuenv.app_info.app_title_id, AppmetaInstallType::Application);
+        else if (output_path == ux0 / "patch" / emuenv.app_info.app_title_id)
+            create_experimental_appmeta(emuenv.vita_fs_path, emuenv.app_info.app_title_id, AppmetaInstallType::Patch);
+    }
 
     LOG_INFO("{} [{}] installed successfully!", emuenv.app_info.app_title, emuenv.app_info.app_title_id);
 
@@ -404,8 +411,13 @@ bool install_content(EmuEnvState &emuenv, const fs::path &content_path) {
     if (fs::exists(dst_path / "sce_sys/package/") && !is_nonpdrm(emuenv, dst_path))
         return false;
 
-    if (!copy_path(dst_path, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
-        return false;
+    if (emuenv.cfg.experimental_appmeta && !is_theme) {
+        const auto ux0 = emuenv.vita_fs_path / "ux0";
+        if (dst_path == ux0 / "app" / emuenv.app_info.app_title_id)
+            create_experimental_appmeta(emuenv.vita_fs_path, emuenv.app_info.app_title_id, AppmetaInstallType::Application);
+        else if (dst_path == ux0 / "patch" / emuenv.app_info.app_title_id)
+            create_experimental_appmeta(emuenv.vita_fs_path, emuenv.app_info.app_title_id, AppmetaInstallType::Patch);
+    }
 
     LOG_INFO("{} [{}] installed successfully!", emuenv.app_info.app_title, emuenv.app_info.app_title_id);
 
@@ -478,14 +490,20 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     const auto call_import = [&emuenv](CPUState &cpu, uint32_t nid, SceUID thread_id) {
         ::call_import(emuenv, cpu, nid, thread_id);
     };
+    emuenv.mem.trace_silent_hill = emuenv.io.title_id == "PCSB00115";
+    const char *scheduler_test = std::getenv("VITA3K_SH_TEST_SCHEDULER");
+    const char *late_wait_test = std::getenv("VITA3K_SH_TEST_LATE_WAIT");
+    emuenv.mem.silent_hill_late_wait_experiment = emuenv.mem.trace_silent_hill && late_wait_test && std::strcmp(late_wait_test, "1") == 0;
+    emuenv.mem.silent_hill_scheduler_experiment = emuenv.mem.silent_hill_late_wait_experiment
+        || (emuenv.mem.trace_silent_hill && scheduler_test && std::strcmp(scheduler_test, "1") == 0);
+    const bool thread_scheduler = emuenv.cfg.current_config.thread_scheduler || emuenv.mem.silent_hill_scheduler_experiment;
     emuenv.kernel.process_exit_callback = [&emuenv](int res, std::optional<AppLaunchRequest> relaunch) {
         emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit, .exit_code = res }));
     };
-    if (!emuenv.kernel.init(emuenv.mem, call_import, emuenv.cfg.current_config.cpu_opt)) {
+    if (!emuenv.kernel.init(emuenv.mem, call_import, emuenv.cfg.current_config.cpu_opt, thread_scheduler)) {
         LOG_WARN("Failed to init kernel!");
         return KernelInitFailed;
     }
-
     if (emuenv.cfg.archive_log) {
         const fs::path log_directory{ emuenv.log_path / "logs" };
         fs::create_directory(log_directory);
@@ -523,12 +541,12 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     LOG_INFO("Version: {}", emuenv.app_info.app_version);
     LOG_INFO("Category: {}", emuenv.app_info.app_category);
 
-    init_device_paths(emuenv.io);
+    init_device_paths(emuenv.io, emuenv.vita_fs_path);
     init_savedata_app_path(emuenv.io, emuenv.vita_fs_path);
 
     // Load param.sfo
     vfs::FileBuffer param_sfo;
-    if (vfs::read_app_file(param_sfo, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/param.sfo"))
+    if (fs_utils::read_data(expand_path(emuenv.io, "app0:sce_sys/param.sfo", emuenv.vita_fs_path), param_sfo))
         sfo::load(emuenv.sfo_handle, param_sfo);
 
     init_exported_vars(emuenv);
@@ -577,15 +595,13 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
             process_preload_disabled = *preload_disabled_ptr.get(emuenv.mem);
         }
     }
-    const auto module_app_path{ emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_module" };
-
     std::vector<std::string> lib_load_list = {};
     // todo: check if module is imported
     auto add_preload_module = [&](uint32_t code, SceSysmoduleModuleId module_id, const std::string &name, bool load_from_app) {
         if ((process_preload_disabled & code) == 0) {
             if (is_lle_module(name, emuenv)) {
                 const auto module_name_file = fmt::format("{}.suprx", name);
-                if (load_from_app && fs::exists(module_app_path / module_name_file))
+                if (load_from_app && fs::exists(expand_path(emuenv.io, fmt::format("app0:sce_module/{}", module_name_file).c_str(), emuenv.vita_fs_path)))
                     lib_load_list.emplace_back(fmt::format("app0:sce_module/{}", module_name_file));
                 else if (fs::exists(emuenv.vita_fs_path / "vs0/sys/external" / module_name_file))
                     lib_load_list.emplace_back(fmt::format("vs0:sys/external/{}", module_name_file));
@@ -595,8 +611,11 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
                 emuenv.kernel.loaded_sysmodules[module_id] = {};
         }
     };
-    lib_load_list.emplace_back("os0:kd/bootimage.skprx");
-    lib_load_list.emplace_back("os0:kd/sysmodule.skprx");
+    const auto app_device = device::get_device(emuenv.io.app_path);
+    if (app_device != VitaIoDevice::vs0 && app_device != VitaIoDevice::pd0) {
+        lib_load_list.emplace_back("os0:kd/bootimage.skprx");
+        lib_load_list.emplace_back("os0:kd/sysmodule.skprx");
+    }
     add_preload_module(0x00010000, SCE_SYSMODULE_INVALID, "libc", true);
     add_preload_module(0x00020000, SCE_SYSMODULE_DBG, "libdbg", false);
     add_preload_module(0x00080000, SCE_SYSMODULE_INVALID, "libshellsvc", false);
@@ -689,7 +708,8 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv) {
 
 ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
     if (load_app_impl(main_module_id, emuenv, launch_request) != Success) {
-        std::string message = fmt::format(fmt::runtime(lang::get(lang::str::load_app_failed_msg)), emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / emuenv.self_path);
+        const auto executable_path = vfs::resolve_app_path(emuenv.vita_fs_path, emuenv.io.app_path, emuenv.self_path, emuenv.io.title_id);
+        std::string message = fmt::format(fmt::runtime(lang::get(lang::str::load_app_failed_msg)), executable_path);
         LOG_ERROR(message);
         return ModuleLoadFailed;
     }

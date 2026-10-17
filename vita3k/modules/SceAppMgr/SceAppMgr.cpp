@@ -17,6 +17,8 @@
 
 #include "SceAppMgr.h"
 
+#include <io/functions.h>
+#include <io/io.h>
 #include <io/state.h>
 #include <kernel/state.h>
 #include <packages/sfo.h>
@@ -24,6 +26,58 @@
 #include <util/tracy.h>
 
 TRACY_MODULE_NAME(SceAppMgr);
+
+namespace {
+
+bool read_mount_string(const MemState &mem, Ptr<const char> input, size_t max_length, std::string &value) {
+    value.clear();
+    if (!input)
+        return false;
+    for (size_t i = 0; i <= max_length; ++i) {
+        if (i > std::numeric_limits<Address>::max() - input.address())
+            return false;
+        const Ptr<const char> current(input.address() + static_cast<Address>(i));
+        if (!current.valid(mem))
+            return false;
+        const char ch = *current.get(mem);
+        if (ch == '\0')
+            return true;
+        if (i == max_length)
+            return false;
+        value.push_back(ch);
+    }
+    return false;
+}
+
+bool valid_mount_output(const MemState &mem, Ptr<char> output) {
+    if (!output || output.address() > std::numeric_limits<Address>::max() - 15)
+        return false;
+    for (Address i = 0; i < 16; ++i) {
+        if (!Ptr<char>(output.address() + i).valid(mem))
+            return false;
+    }
+    return true;
+}
+
+bool valid_mount_sfo(EmuEnvState &emuenv, const std::string &mount_point, const char *relative_sfo, const std::string &title_id, const char *export_name) {
+    const std::string sfo_path = mount_point + relative_sfo;
+    SceIoStat stat{};
+    if (stat_file(emuenv.io, sfo_path.c_str(), &stat, emuenv.vita_fs_path, export_name) < 0
+        || !(stat.st_mode & SCE_S_IFREG) || stat.st_size <= 0 || stat.st_size > 32768)
+        return false;
+
+    const SceUID fd = open_file(emuenv.io, sfo_path.c_str(), SCE_O_RDONLY, emuenv.vita_fs_path, export_name);
+    if (fd < 0)
+        return false;
+    vfs::FileBuffer buffer(static_cast<size_t>(stat.st_size));
+    const int bytes_read = read_file(buffer.data(), emuenv.io, fd, static_cast<SceSize>(buffer.size()), export_name);
+    close_file(emuenv.io, fd, export_name);
+    sfo::SfoAppInfo info;
+    return bytes_read == static_cast<int>(buffer.size())
+        && sfo::get_param_info(info, buffer, emuenv.cfg.sys_lang) && info.app_title_id == title_id;
+}
+
+} // namespace
 
 EXPORT(SceInt32, __sceAppMgrGetAppState, SceAppMgrAppState *appState, SceUInt32 sizeofSceAppMgrAppState, SceUInt32 buildVersion) {
     TRACY_FUNC(__sceAppMgrGetAppState, appState, sizeofSceAppMgrAppState, buildVersion);
@@ -57,9 +111,35 @@ EXPORT(int, _sceAppMgrAppDataMount) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceAppMgrAppDataMountById) {
-    TRACY_FUNC(_sceAppMgrAppDataMountById);
-    return UNIMPLEMENTED();
+EXPORT(int, _sceAppMgrAppDataMountById, int mountId, Ptr<const char> id, Ptr<char> mountPoint) {
+    TRACY_FUNC(_sceAppMgrAppDataMountById, mountId, id.address(), mountPoint.address());
+    if (mountId != 0x6e) {
+        LOG_WARN("Unsupported AppDataMountById type {}", log_hex(mountId));
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    }
+    std::string title_id;
+    if (!read_mount_string(emuenv.mem, id, 32, title_id) || title_id.empty() || !valid_mount_output(emuenv.mem, mountPoint))
+        return RET_ERROR(SCE_APPMGR_ERROR_INVALID_PARAMETER);
+    if (title_id == "new") {
+        LOG_WARN("Writable appmeta promotion is not implemented");
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    }
+
+    std::string mount_point;
+    if (!mount_readonly_appmeta(emuenv.io, emuenv.vita_fs_path, title_id, mount_point)) {
+        LOG_WARN("Cannot mount appmeta for '{}'", title_id);
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOENT);
+    }
+    if (mount_point.size() >= 16 || !valid_mount_sfo(emuenv, mount_point, "/param.sfo", title_id, export_name)) {
+        LOG_WARN("Invalid or encrypted appmeta SFO for '{}'", title_id);
+        if (!unmount_appmeta(emuenv.io, mount_point))
+            LOG_ERROR("Failed to release rejected appmeta mount '{}'", mount_point);
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
+    }
+    for (Address i = 0; i < 16; ++i)
+        *Ptr<char>(mountPoint.address() + i).get(emuenv.mem) = i < mount_point.size() ? mount_point[i] : '\0';
+    LOG_INFO("Mounted appmeta with readable SFO for '{}' at '{}' (PFS is not emulated)", title_id, mount_point);
+    return 0;
 }
 
 EXPORT(int, _sceAppMgrAppMount) {
@@ -174,9 +254,45 @@ EXPORT(int, _sceAppMgrForceUmount) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceAppMgrGameDataMount) {
-    TRACY_FUNC(_sceAppMgrGameDataMount);
-    return UNIMPLEMENTED();
+EXPORT(int, _sceAppMgrGameDataMount, Ptr<const char> source, Ptr<const char> patch, Ptr<const void> license, Ptr<char> mountPoint) {
+    TRACY_FUNC(_sceAppMgrGameDataMount, source.address(), patch.address(), license.address(), mountPoint.address());
+    std::string source_path;
+    std::string patch_path;
+    if (!read_mount_string(emuenv.mem, source, 0x123, source_path) || !valid_mount_output(emuenv.mem, mountPoint)
+        || (patch && !read_mount_string(emuenv.mem, patch, 0x123, patch_path)))
+        return RET_ERROR(SCE_APPMGR_ERROR_INVALID_PARAMETER);
+    if (license) {
+        LOG_WARN("GameDataMount with an explicit license is not implemented");
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    }
+    if (source_path.starts_with("ux0:/"))
+        source_path.erase(4, 1);
+    if (patch_path.starts_with("ux0:/"))
+        patch_path.erase(4, 1);
+    if (!source_path.starts_with("ux0:app/") || source_path.size() <= 8) {
+        LOG_WARN("Unsupported GameDataMount source '{}'", source_path);
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    }
+    const auto title_id = source_path.substr(8);
+    if (patch && patch_path != "ux0:patch/" + title_id) {
+        LOG_WARN("Unsupported GameDataMount patch '{}'", patch_path);
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    }
+    std::string mount_point;
+    if (!mount_readonly_game_data(emuenv.io, emuenv.vita_fs_path, title_id, bool(patch), mount_point)) {
+        LOG_WARN("Cannot mount game data for '{}'", title_id);
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOENT);
+    }
+    if (!valid_mount_sfo(emuenv, mount_point, "/sce_sys/param.sfo", title_id, export_name)) {
+        LOG_WARN("Invalid or encrypted game data SFO for '{}'", title_id);
+        if (!unmount_game_data(emuenv.io, mount_point))
+            LOG_ERROR("Failed to release rejected game data mount '{}'", mount_point);
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
+    }
+    for (Address i = 0; i < 16; ++i)
+        *Ptr<char>(mountPoint.address() + i).get(emuenv.mem) = i < mount_point.size() ? mount_point[i] : '\0';
+    LOG_INFO("Mounted game data for '{}' at '{}' in read-only mode (PFS is not emulated)", title_id, mount_point);
+    return 0;
 }
 
 EXPORT(int, _sceAppMgrGetAppInfo) {
@@ -433,7 +549,7 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
 
     // Load exec executable
     vfs::FileBuffer exec_buffer;
-    if (vfs::read_app_file(exec_buffer, emuenv.vita_fs_path, emuenv.io.app_path, exec_path)) {
+    if (vfs::read_app_file(exec_buffer, emuenv.vita_fs_path, emuenv.io.app_path, exec_path, emuenv.io.title_id)) {
         std::vector<std::string> exec_argv;
         if (argv && argv->get(emuenv.mem)) {
             size_t args = 0;
@@ -732,9 +848,27 @@ EXPORT(int, _sceAppMgrTrophyMountById) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceAppMgrUmount) {
-    TRACY_FUNC(_sceAppMgrUmount);
-    return UNIMPLEMENTED();
+EXPORT(int, _sceAppMgrUmount, Ptr<const char> mountPoint) {
+    TRACY_FUNC(_sceAppMgrUmount, mountPoint.address());
+    std::string mount_point;
+    if (!read_mount_string(emuenv.mem, mountPoint, 15, mount_point))
+        return RET_ERROR(SCE_APPMGR_ERROR_INVALID_PARAMETER);
+    if (unmount_game_data(emuenv.io, mount_point)) {
+        LOG_INFO("Unmounted game data '{}'", mount_point);
+        return 0;
+    }
+    if (unmount_appmeta(emuenv.io, mount_point)) {
+        LOG_INFO("Unmounted appmeta '{}'", mount_point);
+        return 0;
+    }
+    if (mount_point == "ux0:picture" || mount_point == "friend0:" || mount_point == "psnmsg0:"
+        || mount_point == "near0:" || mount_point == "ux0:music" || mount_point == "ux0:calendar"
+        || mount_point == "ux0:video" || mount_point == "sqlite0:/" || mount_point == "attach0:/"
+        || mount_point == "ux0:pspemu/" || mount_point == "checkout0:/" || mount_point == "webbrowser0:/"
+        || mount_point == "ux0:mms/photo" || mount_point == "ux0:mms/music" || mount_point == "ux0:mms/video")
+        return STUBBED("Unmount of legacy static path redirection");
+    LOG_WARN("Unknown or unsupported AppMgr mount '{}'", mount_point);
+    return RET_ERROR(SCE_ERROR_ERRNO_ENOENT);
 }
 
 EXPORT(int, _sceAppMgrUmountByPid) {

@@ -203,6 +203,7 @@ int main(int argc, char *argv[]) {
                 LOG_INFO("Installing pkg from {} ", *cfg.pkg_path);
                 emuenv.cache_path = root_paths.get_cache_path();
                 emuenv.vita_fs_path = cfg.get_vita_fs_path();
+                emuenv.cfg.experimental_appmeta = cfg.experimental_appmeta;
                 auto pkg_path = fs_utils::utf8_to_path(*cfg.pkg_path);
                 install_pkg(pkg_path, emuenv, *cfg.pkg_zrif, [](float) {});
             }

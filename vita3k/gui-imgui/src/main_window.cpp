@@ -53,6 +53,7 @@
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_init.h>
 #include <SDL3/SDL_keyboard.h>
+#include <SDL3/SDL_messagebox.h>
 #include <SDL3/SDL_properties.h>
 #include <SDL3/SDL_scancode.h>
 #include <SDL3/SDL_sensor.h>
@@ -242,7 +243,7 @@ static bool pump_sdl_events(EmuEnvState &emuenv, GuiState &gui, app::AppSessionC
         && SDL_TextInputActive(gui.window_state->window.get())) {
         SDL_StopTextInput(gui.window_state->window.get());
     }
-    const auto allow_switch_state = !emuenv.io.title_id.empty() && !gui.vita_area.live_area_screen && !gui.vita_area.app_close && !gui.vita_area.online_storage && (!gui.vita_area.home_screen || emuenv.kernel.is_threads_paused()) && !gui.vita_area.user_management && !gui.configuration_menu.custom_settings_dialog && !gui.configuration_menu.settings_dialog && !gui.controls_menu.controls_dialog && gui::get_sys_apps_state(gui);
+    const auto allow_switch_state = !emuenv.io.title_id.empty() && !(gui.vita_area.home_screen && gui.live_area_app_current_open >= 0) && !gui.vita_area.app_close && !gui.vita_area.online_storage && (!gui.vita_area.home_screen || emuenv.kernel.is_threads_paused()) && !gui.vita_area.user_management && !gui.configuration_menu.custom_settings_dialog && !gui.configuration_menu.settings_dialog && !gui.controls_menu.controls_dialog && gui::get_sys_apps_state(gui);
 
     const auto toggle_pause = [session]() {
         if (session && session->is_running())
@@ -263,14 +264,15 @@ static bool pump_sdl_events(EmuEnvState &emuenv, GuiState &gui, app::AppSessionC
                 if (!emuenv.cfg.show_live_area_screen) {
                     toggle_pause();
                 } else {
-                    const auto live_area_app_index = gui::get_live_area_current_open_apps_list_index(gui, emuenv.io.app_path);
+                    const auto ui_path = gui::app_ui_path(emuenv.io.app_path);
+                    const auto live_area_app_index = gui::get_live_area_current_open_apps_list_index(gui, ui_path);
                     if (live_area_app_index == gui.live_area_current_open_apps_list.end())
-                        gui::open_live_area(gui, emuenv, emuenv.io.app_path);
+                        gui::open_live_area(gui, emuenv, ui_path);
                     else {
-                        if ((gui.live_area_app_current_open < 0) || (gui.live_area_current_open_apps_list[gui.live_area_app_current_open] != emuenv.io.app_path))
+                        if ((gui.live_area_app_current_open < 0) || (gui.live_area_current_open_apps_list[gui.live_area_app_current_open] != ui_path))
                             gui.live_area_app_current_open = static_cast<int32_t>(std::distance(live_area_app_index, gui.live_area_current_open_apps_list.end()) - 1);
                         gui.vita_area.information_bar = true;
-                        gui.vita_area.live_area_screen = true;
+                        gui.vita_area.home_screen = true;
                     }
                     gui.imgui_render = true;
 #ifdef __ANDROID__
@@ -309,10 +311,12 @@ static bool pump_sdl_events(EmuEnvState &emuenv, GuiState &gui, app::AppSessionC
             gui::browse_users_management(gui, emuenv, sce_ctrl_btn);
         else if (gui.vita_area.manual)
             gui::browse_pages_manual(gui, emuenv, sce_ctrl_btn);
-        else if (gui.vita_area.home_screen)
-            gui::browse_home_apps_list(gui, emuenv, sce_ctrl_btn, session);
-        else if (gui.vita_area.live_area_screen)
-            gui::browse_live_area_apps_list(gui, emuenv, sce_ctrl_btn, session);
+        else if (gui.vita_area.home_screen) {
+            if (gui.live_area_app_current_open < 0)
+                gui::browse_home_apps_list(gui, emuenv, sce_ctrl_btn, session);
+            else
+                gui::browse_live_area_apps_list(gui, emuenv, sce_ctrl_btn, session);
+        }
     };
 
     emuenv.drop_inputs = gui.configuration_menu.settings_dialog || gui.configuration_menu.custom_settings_dialog || gui.controls_menu.controllers_dialog || gui.controls_menu.controls_dialog;
@@ -424,7 +428,7 @@ static bool pump_sdl_events(EmuEnvState &emuenv, GuiState &gui, app::AppSessionC
                     capture_completion();
             }
 
-            if (ImGui::GetIO().WantTextInput || gui.is_key_locked || (emuenv.drop_inputs && !gui.vita_area.live_area_screen) || gui.gate_animation.state != GateAnimationState::None)
+            if (ImGui::GetIO().WantTextInput || gui.is_key_locked || gui.vita_area.update_history_info || (emuenv.drop_inputs && !(gui.vita_area.home_screen && gui.live_area_app_current_open >= 0)) || gui.gate_animation.state != GateAnimationState::None)
                 continue;
 #ifdef __ANDROID__
             if (event.key.scancode == SDL_SCANCODE_AC_BACK)
@@ -526,7 +530,12 @@ static bool pump_sdl_events(EmuEnvState &emuenv, GuiState &gui, app::AppSessionC
             }
             if (!emuenv.kernel.is_threads_paused() && event.gbutton.button == SDL_GAMEPAD_BUTTON_TOUCHPAD)
                 toggle_touchscreen(emuenv.touch);
-            if (ImGui::GetIO().WantTextInput || gui.is_key_locked || (emuenv.drop_inputs && !gui.vita_area.live_area_screen) || gui.gate_animation.state != GateAnimationState::None)
+            if (gui.vita_area.update_history_info) {
+                if (shared_event.vita_button == SCE_CTRL_CROSS || shared_event.vita_button == SCE_CTRL_CIRCLE)
+                    gui.vita_area.update_history_button = shared_event.vita_button;
+                continue;
+            }
+            if (ImGui::GetIO().WantTextInput || gui.is_key_locked || (emuenv.drop_inputs && !(gui.vita_area.home_screen && gui.live_area_app_current_open >= 0)) || gui.gate_animation.state != GateAnimationState::None)
                 continue;
             if (shared_event.vita_button != 0) {
                 if (last_buttons.contains(shared_event.vita_button))
@@ -731,6 +740,14 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
     } imgui_context_guard;
 #endif
     GuiState gui;
+    struct GuiWorkerGuard {
+        GuiState &gui;
+        ~GuiWorkerGuard() {
+            destroy_update_check_thread(gui);
+            destroy_pkg_install_thread();
+            destroy_download_manager();
+        }
+    } gui_worker_guard{ gui };
     if (!init_window(gui, emuenv))
         return RendererInitFailed;
 
@@ -802,6 +819,7 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
     bool renderer_cleaned = false;
     const auto stop_session = [&](const app::AppSessionStopReason reason) {
         const bool had_active_session = session.has_active_session();
+        LOG_DEBUG("Stopping app session with reason {}", static_cast<int>(reason));
         session.stop(reason);
 #ifdef __ANDROID__
         if (had_active_session)
@@ -812,7 +830,8 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
         if (emuenv.renderer)
             emuenv.renderer->frontend_frame_callback = {};
     };
-    const auto draw_frontend = [&](const bool renderer_owns_frame) {
+    std::string update_launch_background;
+    const auto draw_frontend = [&](const bool renderer_owns_frame, const bool process_notices = true) {
         if (!renderer_owns_frame) {
             wait_for_frame_done();
             if (!emuenv.renderer->set_current())
@@ -822,15 +841,38 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
         std::lock_guard<std::mutex> render_lock(gui.render_mutex);
         update_viewport(gui, emuenv);
         draw_begin(gui, emuenv);
+        if (process_notices)
+            process_pending_notice_updates(gui, emuenv);
         if (gui.app_selector.icon_async_loader)
             gui.app_selector.icon_async_loader->commit(gui);
-        draw_vita_area(gui, emuenv, &session);
+        if (!update_launch_background.empty()) {
+            const auto &viewport = sdl::get_viewport();
+            const ImVec2 pos_min(viewport.logical_x, viewport.logical_y);
+            const ImVec2 pos_max(viewport.logical_x + viewport.logical_width, viewport.logical_y + viewport.logical_height);
+            ImGui::SetNextWindowPos(pos_min);
+            ImGui::SetNextWindowSize(ImVec2(viewport.logical_width, viewport.logical_height));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.f, 0.f));
+            ImGui::Begin("draw_background", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings);
+            const auto background = gui.apps_background.find(update_launch_background);
+            if (background != gui.apps_background.end())
+                ImGui::GetBackgroundDrawList()->AddImage(background->second, pos_min, pos_max);
+            else
+                draw_background(gui, emuenv);
+            ImGui::PopStyleVar();
+            ImGui::End();
+            ImGui::PushFont(gui.vita_font[gui.current_font_level]);
+            if (gui.vita_area.pkg_install)
+                draw_pkg_install(gui, emuenv);
+            ImGui::PopFont();
+        } else {
+            draw_vita_area(gui, emuenv, &session);
+        }
         if (renderer_owns_frame) {
             if (emuenv.cfg.current_config.show_touchpad_cursor && !emuenv.kernel.is_threads_paused())
                 draw_touchpad_cursor(gui, emuenv);
         }
 
-        if (gui.imgui_render)
+        if (gui.imgui_render && update_launch_background.empty())
             draw_ui(gui, emuenv, &session);
 
         draw_end(gui);
@@ -855,18 +897,57 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
         if (gui.live_area_app_current_open >= 0
             && gui.live_area_app_current_open < static_cast<int32_t>(gui.live_area_current_open_apps_list.size())
             && gui::get_live_area_current_open_apps_list_index(gui, gui.live_area_current_open_apps_list[gui.live_area_app_current_open]) != gui.live_area_current_open_apps_list.end()) {
-            gui.vita_area.home_screen = false;
-            gui.vita_area.live_area_screen = true;
+            gui.vita_area.home_screen = true;
             gui.vita_area.information_bar = true;
             gui.gate_animation.start(GateAnimationState::ReturnApp);
         } else {
-            gui.vita_area.live_area_screen = false;
             gui.vita_area.information_bar = emuenv.cfg.show_info_bar;
             gui.vita_area.home_screen = true;
         }
         bgm_player::switch_bgm_state(false);
     };
+    bool frontend_quit = false;
     const auto launch_app = [&](const AppLaunchRequest &request) {
+        if (request.reason == AppLaunchReason::User) {
+            const auto app = get_app_index(gui, emuenv, request.app_path);
+            const auto id = app ? app->title_id : fs::path(request.app_path).filename().string();
+            const auto install = gui.updates_install.find(id);
+            if (install != gui.updates_install.end() && (install->second.state == UpdateState::WAITING_INSTALL || install->second.state == UpdateState::INSTALLING)) {
+                gui.vita_area.home_screen = false;
+                gui.vita_area.information_bar = false;
+                init_app_background(gui, emuenv, request.app_path);
+                update_launch_background = request.app_path;
+                if (install->second.state == UpdateState::WAITING_INSTALL)
+                    update_install(gui, emuenv, id);
+                const auto install_state = [&]() {
+                    const auto current = gui.updates_install.find(id);
+                    return current != gui.updates_install.end() ? current->second.state : UpdateState::FAILED;
+                };
+                const auto minimum_display_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+                while (install_state() == UpdateState::INSTALLING) {
+                    if (!pump_sdl_events(emuenv, gui)) {
+                        frontend_quit = true;
+                        break;
+                    }
+                    draw_frontend(false, std::chrono::steady_clock::now() >= minimum_display_until);
+                }
+                update_launch_background.clear();
+                if (frontend_quit)
+                    return false;
+                if (install_state() != UpdateState::SUCCESS) {
+                    return_to_frontend_after_app();
+                    const auto message = fmt::format("Failed to install update for {}.", request.app_path);
+                    LOG_ERROR("{}", message);
+                    if (!SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Vita3K", message.c_str(), gui.window_state->window.get()))
+                        LOG_ERROR("Failed to show update installation error: {}", SDL_GetError());
+                    return false;
+                }
+                destroy_pkg_install_thread();
+            }
+            const auto completed = gui.updates_install.find(id);
+            if (completed != gui.updates_install.end() && completed->second.state == UpdateState::SUCCESS)
+                refresh_live_area(gui, emuenv, request.app_path);
+        }
         if (!session.begin_launch(request, request.reason != AppLaunchReason::LoadExec)) {
             LOG_ERROR("Could not begin launching application {}.", request.app_path);
             return_to_frontend_after_app();
@@ -944,8 +1025,20 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
     };
 #endif
     while (running) {
+        if (!session.has_active_session()) {
+            std::lock_guard<std::mutex> render_lock(gui.render_mutex);
+            if (!gui.pending_app_deletion.empty()) {
+                auto app_path = std::move(gui.pending_app_deletion);
+                gui.pending_app_deletion.clear();
+                delete_app(gui, emuenv, app_path, &session);
+                if (gui.vita_area.content_manager)
+                    init_content_manager(gui, emuenv);
+            }
+        }
         if (auto request = launch_request())
             launch_app(*request);
+        if (frontend_quit)
+            break;
 
         if (!session.has_active_session()) {
             if (!emuenv.cfg.show_gui)
@@ -977,17 +1070,18 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
             const auto request = emuenv.take_app_launch_request();
             if (request) {
                 stop_session(app::AppSessionStopReason::Relaunch);
-                if ((request->reason == AppLaunchReason::User) && gui.vita_area.live_area_screen) {
+                if ((request->reason == AppLaunchReason::User) && gui.vita_area.home_screen && gui.live_area_app_current_open >= 0) {
                     gui.gate_animation.start(GateAnimationState::EnterApp);
                     gui.gate_animation.launch_request = *request;
                     break;
                 }
                 if (request->reason != AppLaunchReason::ProcessExit) {
                     gui.vita_area.home_screen = false;
-                    gui.vita_area.live_area_screen = false;
                     gui.vita_area.information_bar = false;
                     launch_app(*request);
-                } else if (!gui.vita_area.online_storage && !gui.vita_area.live_area_screen && !gui.vita_area.home_screen)
+                    if (frontend_quit)
+                        running = false;
+                } else if (!gui.vita_area.online_storage && !gui.vita_area.content_manager && !gui.vita_area.home_screen)
                     return_to_frontend_after_app();
                 break;
             }
@@ -1003,8 +1097,9 @@ ExitCode run_frontend(EmuEnvState &emuenv, char *argv[]) {
             }
 
             if (emuenv.kernel.threads.empty()) {
+                LOG_WARN("No guest threads remain; stopping the app session");
                 stop_session(app::AppSessionStopReason::UserRequest);
-                if (!gui.vita_area.online_storage && !gui.vita_area.live_area_screen && !gui.vita_area.home_screen)
+                if (!gui.vita_area.online_storage && !gui.vita_area.home_screen)
                     return_to_frontend_after_app();
                 break;
             }

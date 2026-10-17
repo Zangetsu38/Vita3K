@@ -1,4 +1,5 @@
 add_library(packages STATIC
+            src/appmeta.cpp
             src/exfat.cpp
             src/license.cpp
             src/pkg.cpp

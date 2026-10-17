@@ -27,11 +27,14 @@ namespace vita_shell {
 
 static ThemeState current_theme;
 
-constexpr std::array<std::string_view, 4> system_app_ids = {
+constexpr std::array<std::string_view, 7> system_app_ids = {
     "NPXS10003",
+    "NPXS10006",
     "NPXS10008",
+    "NPXS10014",
     "NPXS10015",
-    "NPXS10026"
+    "NPXS10026",
+    "NPXS19999"
 };
 
 static std::optional<Color> parse_color(std::string value, std::string_view context) {
@@ -212,10 +215,13 @@ ThemeState load_theme_directory(const std::filesystem::path &theme_directory,
     if (const auto path = resolve_asset_path(theme_directory, preview_image); path && fs::exists(*path))
         state.package_thumbnail_path = *path;
 
-    const std::array<std::pair<std::string_view, std::string_view>, 4> system_icon_paths = { { { "NPXS10003", "m_browser" },
+    const std::array<std::pair<std::string_view, std::string_view>, 7> system_icon_paths = { { { "NPXS10003", "m_browser" },
+        { "NPXS10006", "m_friend" },
         { "NPXS10008", "m_trophy" },
+        { "NPXS10014", "m_message" },
         { "NPXS10015", "m_settings" },
-        { "NPXS10026", "m_hostCollabo" } } };
+        { "NPXS10026", "m_hostCollabo" },
+        { "NPXS19999", "m_power" } } };
     for (const auto &[title_id, node_name] : system_icon_paths) {
         const auto icon_name = child_text(home.child(node_name.data()), "m_iconFilePath");
         if (icon_name.empty())
@@ -228,6 +234,18 @@ ThemeState load_theme_directory(const std::filesystem::path &theme_directory,
             LOG_WARN("Theme icon '{}' was not found for '{}'.", icon_name, state.content_id);
         }
     }
+
+    const auto load_page_indicator = [&](const std::string_view node_name, std::filesystem::path &target) {
+        const auto icon_name = child_text(home, node_name.data());
+        if (icon_name.empty())
+            return;
+        if (const auto path = resolve_asset_path(theme_directory, icon_name); path && fs::is_regular_file(*path))
+            target = *path;
+        else
+            LOG_WARN("Theme page indicator '{}' was not found for '{}'.", icon_name, state.content_id);
+    };
+    load_page_indicator("m_basePageFilePath", state.page_indicators.base);
+    load_page_indicator("m_curPageFilePath", state.page_indicators.current);
 
     const auto bgm_name = child_text(home, "m_bgmFilePath");
     if (!bgm_name.empty()) {
@@ -365,6 +383,7 @@ static ThemeState build_theme_state(const std::filesystem::path &vita_fs_path,
     state.installed_path = parsed_theme.installed_path;
     state.package_thumbnail_path = parsed_theme.package_thumbnail_path;
     state.backgrounds = parsed_theme.backgrounds;
+    state.page_indicators = parsed_theme.page_indicators;
     if (parsed_theme.bgm.device == "ux0")
         state.bgm = parsed_theme.bgm;
     state.information_bar = parsed_theme.information_bar;

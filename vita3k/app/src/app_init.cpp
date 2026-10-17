@@ -239,6 +239,9 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::DisableMaskBit:
             runtime_current.disable_mask_bit = previous_current.disable_mask_bit;
             break;
+        case config::RestartRequiredSetting::ThreadScheduler:
+            runtime_current.thread_scheduler = previous_current.thread_scheduler;
+            break;
         }
     }
 

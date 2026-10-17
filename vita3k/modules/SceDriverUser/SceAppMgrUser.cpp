@@ -26,8 +26,65 @@
 #include <modules/module_parent.h>
 #include <util/find.h>
 
+#include <cstddef>
+
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceAppMgrUser);
+
+struct SceAppMgrAppStatus {
+    SceUInt32 unk_0;
+    SceUInt32 unk_4;
+    SceUInt32 unk_8;
+    char appName[32];
+    SceUInt32 unk_2c;
+    SceUID appId;
+    SceUID processId;
+    SceUInt32 flag_38;
+    SceUInt32 flag_3c;
+    SceUInt32 unk_40;
+    SceUInt32 unk_44;
+    SceUInt32 unk_48;
+    SceUInt32 unk_4c;
+    char data_50[32];
+    char unk_70;
+    uint8_t unk_71;
+    char unk_72;
+    char unk_73;
+    uint32_t unk_74;
+    uint32_t unk_78;
+    uint32_t unk_7c;
+};
+
+static_assert(sizeof(SceAppMgrAppStatus) == 0x80);
+static_assert(offsetof(SceAppMgrAppStatus, appName) == 0x0c);
+static_assert(offsetof(SceAppMgrAppStatus, appId) == 0x30);
+static_assert(offsetof(SceAppMgrAppStatus, processId) == 0x34);
+static_assert(offsetof(SceAppMgrAppStatus, flag_38) == 0x38);
+static_assert(offsetof(SceAppMgrAppStatus, data_50) == 0x50);
+static_assert(offsetof(SceAppMgrAppStatus, unk_70) == 0x70);
+
+static void set_compat_app_status(SceAppMgrAppStatus &status, const std::string &title_id) {
+    // Preserve the existing shell boot workaround until per-application state is emulated.
+    // Firmware produces boolean values at 0x38 and 0x3c; these placeholders are not real state.
+    status = {};
+    status.unk_0 = 2;
+    status.unk_4 = 2;
+    status.unk_8 = 1;
+    strncpy(status.appName, title_id.c_str(), sizeof(status.appName));
+    status.unk_2c = 2;
+    status.flag_38 = 2;
+    status.flag_3c = 2;
+    status.unk_40 = 2;
+    status.unk_44 = 2;
+    status.unk_48 = 2;
+    status.unk_4c = 2;
+    strncpy(status.data_50, title_id.c_str(), sizeof(status.data_50));
+    status.unk_70 = 1;
+    status.unk_71 = 2;
+    status.unk_74 = 1;
+    status.unk_78 = 2;
+    status.unk_7c = 2;
+}
 
 struct SceAppMgrSaveDataDataDelete {
     int size;
@@ -77,19 +134,21 @@ EXPORT(int, sceAppMgrAddContMount) {
 
 EXPORT(int, sceAppMgrAppDataMount, int mountId, char *mountPoint) {
     TRACY_FUNC(sceAppMgrAppDataMount, mountId, mountPoint);
-    STUBBED("Using strcpy");
+    if (!mountPoint)
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
+    STUBBED("Path redirection without mount lifecycle");
     switch (mountId) {
     case 0x64: // photo0:
         strcpy(mountPoint, "ux0:picture");
         break;
     case 0x65: // psnfriend
-        fmt::format_to(mountPoint, "ur0:user/{}/psnfriend{}", emuenv.io.user_id, '\0');
+        strcpy(mountPoint, "friend0:");
         break;
     case 0x66: // psnmsg
-        fmt::format_to(mountPoint, "ur0:user/{}/psnmsg{}", emuenv.io.user_id, '\0');
+        strcpy(mountPoint, "psnmsg0:");
         break;
     case 0x67: // near
-        fmt::format_to(mountPoint, "ur0:user/{}/near{}", emuenv.io.user_id, '\0');
+        strcpy(mountPoint, "near0:");
         break;
     case 0x69: // music0:
         strcpy(mountPoint, "ux0:music");
@@ -102,15 +161,15 @@ EXPORT(int, sceAppMgrAppDataMount, int mountId, char *mountPoint) {
         break;
     default:
         LOG_WARN("Unknown mountId {}", log_hex(mountId));
-        break;
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
     }
 
     return 0;
 }
 
-EXPORT(int, sceAppMgrAppDataMountById) {
-    TRACY_FUNC(sceAppMgrAppDataMountById);
-    return UNIMPLEMENTED();
+EXPORT(int, sceAppMgrAppDataMountById, int mountId, Ptr<const char> id, Ptr<char> mountPoint) {
+    TRACY_FUNC(sceAppMgrAppDataMountById, mountId, id.address(), mountPoint.address());
+    return CALL_EXPORT(_sceAppMgrAppDataMountById, mountId, id, mountPoint);
 }
 
 EXPORT(int, sceAppMgrAppMount) {
@@ -201,9 +260,9 @@ EXPORT(int, sceAppMgrForceUmount) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAppMgrGameDataMount) {
-    TRACY_FUNC(sceAppMgrGameDataMount);
-    return UNIMPLEMENTED();
+EXPORT(int, sceAppMgrGameDataMount, Ptr<const char> source, Ptr<const char> patch, Ptr<const void> license, Ptr<char> mountPoint) {
+    TRACY_FUNC(sceAppMgrGameDataMount, source.address(), patch.address(), license.address(), mountPoint.address());
+    return CALL_EXPORT(_sceAppMgrGameDataMount, source, patch, license, mountPoint);
 }
 
 EXPORT(int, sceAppMgrGetAppInfo) {
@@ -247,9 +306,25 @@ EXPORT(int, sceAppMgrGetCurrentBgmState) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAppMgrGetCurrentBgmState2) {
-    TRACY_FUNC(sceAppMgrGetCurrentBgmState2);
-    return UNIMPLEMENTED();
+struct BgmState {
+    SceUID processId;
+    uint32_t unk_4;
+    uint32_t unk_8;
+    SceUID appId;
+    uint32_t reserved[4];
+};
+
+static_assert(sizeof(BgmState) == 0x20);
+static_assert(offsetof(BgmState, appId) == 0x0c);
+
+EXPORT(int, sceAppMgrGetCurrentBgmState2, BgmState *state) {
+    TRACY_FUNC(sceAppMgrGetCurrentBgmState2, state);
+    if (!state)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+    *state = {};
+    // Keep the existing shell boot placeholder; this is not a real BGM owner PID.
+    state->processId = 130;
+    return STUBBED("Returning partial BGM state");
 }
 
 EXPORT(int, sceAppMgrGetDevInfo, const char *dev, uint64_t *max_size, uint64_t *free_size) {
@@ -355,9 +430,12 @@ EXPORT(int, sceAppMgrGetSaveDataInfoForSpecialExport) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAppMgrGetStatusByAppId) {
-    TRACY_FUNC(sceAppMgrGetStatusByAppId);
-    return UNIMPLEMENTED();
+EXPORT(int, sceAppMgrGetStatusByAppId, int id, SceAppMgrAppStatus *appStatus) {
+    TRACY_FUNC(sceAppMgrGetStatusByAppId, id, appStatus);
+    if (!appStatus)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+    set_compat_app_status(*appStatus, emuenv.io.title_id);
+    return STUBBED("Returning compatibility status without looking up app ID");
 }
 
 EXPORT(int, sceAppMgrGetStatusById) {
@@ -365,9 +443,13 @@ EXPORT(int, sceAppMgrGetStatusById) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAppMgrGetStatusByName) {
-    TRACY_FUNC(sceAppMgrGetStatusByName);
-    return UNIMPLEMENTED();
+EXPORT(int, sceAppMgrGetStatusByName, const char *appName, SceAppMgrAppStatus *appStatus) {
+    TRACY_FUNC(sceAppMgrGetStatusByName, appName, appStatus);
+    if (!appStatus)
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+    LOG_DEBUG_IF(appName, "name: {}", appName);
+    set_compat_app_status(*appStatus, emuenv.io.title_id);
+    return STUBBED("Returning compatibility status without looking up app name");
 }
 
 EXPORT(int, sceAppMgrGetSystemDataFilePlayReady) {
@@ -534,7 +616,8 @@ EXPORT(int, sceAppMgrReceiveEventNum, SceUInt32 *eventNum) {
 
 EXPORT(int, sceAppMgrReceiveNotificationRequestForShell) {
     TRACY_FUNC(sceAppMgrReceiveNotificationRequestForShell);
-    return UNIMPLEMENTED();
+    STUBBED("No shell notification available");
+    return static_cast<int>(0x80802024u);
 }
 
 EXPORT(int, sceAppMgrReceiveShellEvent) {
@@ -768,9 +851,9 @@ EXPORT(int, sceAppMgrTrophyMountById) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAppMgrUmount) {
-    TRACY_FUNC(sceAppMgrUmount);
-    return UNIMPLEMENTED();
+EXPORT(int, sceAppMgrUmount, Ptr<const char> mountPoint) {
+    TRACY_FUNC(sceAppMgrUmount, mountPoint.address());
+    return CALL_EXPORT(_sceAppMgrUmount, mountPoint);
 }
 
 EXPORT(int, sceAppMgrUmountByPid) {
@@ -785,26 +868,28 @@ EXPORT(int, sceAppMgrUpdateSaveDataParam) {
 
 EXPORT(int, sceAppMgrWorkDirMount, int mountId, char *mountPoint) {
     TRACY_FUNC(sceAppMgrWorkDirMount, mountId, mountPoint);
-    STUBBED("using strcpy");
+    if (!mountPoint)
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
+    STUBBED("Path redirection without mount lifecycle");
     switch (mountId) {
     case 0xC8:
-        strcpy(mountPoint, "ur0:temp/sqlite/");
+        strcpy(mountPoint, "sqlite0:/");
         break;
     case 0xC9:
-        strcpy(mountPoint, "ur0:temp/attach/");
+        strcpy(mountPoint, "attach0:/");
         break;
     case 0xCA:
         strcpy(mountPoint, "ux0:pspemu/");
         break;
     case 0xCC:
-        strcpy(mountPoint, "ur0:temp/checkout/");
+        strcpy(mountPoint, "checkout0:/");
         break;
     case 0xCE:
-        strcpy(mountPoint, "ur0:temp/webbrowser/");
+        strcpy(mountPoint, "webbrowser0:/");
         break;
     default:
         LOG_WARN("Unknown mount id: {}", log_hex(mountId));
-        break;
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
     }
 
     return 0;

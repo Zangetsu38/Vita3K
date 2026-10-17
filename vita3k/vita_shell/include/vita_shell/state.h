@@ -43,6 +43,11 @@ struct InformationBarState {
     std::map<NoticeIcon, std::filesystem::path> notice_icons;
 };
 
+struct HomePageIndicators {
+    std::filesystem::path base;
+    std::filesystem::path current;
+};
+
 enum class StartDateLayout : int32_t {
     LeftDown,
     LeftUp,
@@ -68,6 +73,7 @@ struct ThemeState {
     ThemeBgm bgm;
     Color text_color{};
     InformationBarState information_bar;
+    HomePageIndicators page_indicators;
     std::filesystem::path start_screen_background;
     std::optional<Color> start_date_color;
     std::optional<Color> start_notice_background_color;

@@ -550,7 +550,7 @@ void draw_settings(GuiState &gui, EmuEnvState &emuenv) {
                         }
                         fs::remove_all(emuenv.vita_fs_path / "ux0/theme" / fs_utils::utf8_to_path(selected));
                         last_updated_themes_list = time(0);
-                        if (emuenv.app_path == "NPXS10026")
+                        if (emuenv.app_path == "emu:app/NPXS10026")
                             init_content_manager(gui, emuenv);
                         delete_theme = selected;
                         popup = Popup::UNDEFINED;
@@ -933,7 +933,7 @@ void draw_settings(GuiState &gui, EmuEnvState &emuenv) {
                             emuenv.cfg.sys_lang = sys_lang.first;
                             config::serialize_config(emuenv.cfg, emuenv.config_path);
                             gui::init_lang(gui.lang, emuenv);
-                            const auto live_area_state = get_live_area_current_open_apps_list_index(gui, "NPXS10015") != gui.live_area_current_open_apps_list.end();
+                            const auto live_area_state = get_live_area_current_open_apps_list_index(gui, "emu:app/NPXS10015") != gui.live_area_current_open_apps_list.end();
                             if (previous_sys_lang != emuenv.cfg.sys_lang) {
                                 get_sys_apps_title(gui, emuenv);
                                 init_user_apps(gui, emuenv);
@@ -943,8 +943,8 @@ void draw_settings(GuiState &gui, EmuEnvState &emuenv) {
                             gui.live_items.clear();
                             init_notice_info(gui, emuenv);
                             if (live_area_state) {
-                                update_live_area_current_open_apps_list(gui, emuenv, "NPXS10015");
-                                init_live_area(gui, emuenv, "NPXS10015");
+                                update_live_area_current_open_apps_list(gui, emuenv, "emu:app/NPXS10015");
+                                init_live_area(gui, emuenv, "emu:app/NPXS10015");
                             }
                         }
                         popup = Popup::UNDEFINED;

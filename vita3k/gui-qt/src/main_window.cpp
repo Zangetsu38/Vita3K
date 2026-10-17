@@ -888,9 +888,9 @@ void MainWindow::init_current_user() {
 
 void MainWindow::on_app_selected(const app::AppEntry &app) {
     if (emuenv.cfg.show_live_area_screen && !m_game_window)
-        show_live_area(app.title_id);
+        show_live_area(app.path);
     else
-        boot_game(app.title_id);
+        boot_game(app.path);
 }
 
 void MainWindow::boot_game(const std::string &title_id) {
@@ -1219,10 +1219,10 @@ void MainWindow::show_live_area(const std::string &title_id) {
         return;
     }
 
-    app::set_current_config(emuenv, title_id);
+    app::set_current_config(emuenv, emuenv.io.app_path);
     get_license(emuenv, emuenv.io.title_id, emuenv.io.content_id);
-    app::update_last_time_app_used(emuenv, title_id);
-    m_live_area_title_id = title_id;
+    app::update_last_time_app_used(emuenv, emuenv.io.app_path);
+    m_live_area_title_id = emuenv.io.app_path;
 
     m_live_area_widget = new LiveAreaWidget(emuenv, emuenv.io.app_path);
     m_game_container = m_live_area_widget;
@@ -1792,9 +1792,9 @@ void MainWindow::on_toolbar_start() {
         const app::AppEntry *app = m_apps_list_widget->selected_app();
         if (app && !app->title_id.empty()) {
             if (emuenv.cfg.show_live_area_screen && !m_live_area_widget)
-                show_live_area(app->title_id);
+                show_live_area(app->path);
             else
-                boot_game(app->title_id);
+                boot_game(app->path);
         }
     }
 }
@@ -1809,11 +1809,11 @@ void MainWindow::on_context_menu_requested(const QPoint &global_pos, const std::
 
     connect(&menu, &AppsListContextMenu::boot_requested,
         this, [this](const app::AppEntry &app) {
-            boot_game(app.title_id);
+            boot_game(app.path);
         });
     connect(&menu, &AppsListContextMenu::view_live_area_requested,
         this, [this](const app::AppEntry &app) {
-            show_live_area(app.title_id);
+            show_live_area(app.path);
         });
     connect(&menu, &AppsListContextMenu::open_settings_requested,
         this, [this](const std::string &app_path, int tab) {
@@ -1842,6 +1842,11 @@ void MainWindow::on_context_menu_requested(const QPoint &global_pos, const std::
         });
     connect(&menu, &AppsListContextMenu::refresh_requested,
         this, [this] { m_apps_list_widget->refresh(); });
+    connect(&menu, &AppsListContextMenu::update_changed,
+        this, [this](const std::string &app_path) {
+            if (m_live_area_widget)
+                m_live_area_widget->refresh_app_contents(app_path);
+        });
 
     menu.exec(global_pos);
 }

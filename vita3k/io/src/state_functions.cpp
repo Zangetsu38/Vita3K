@@ -39,6 +39,7 @@ static const uint32_t page_size = []() -> uint32_t {
 }();
 
 SceOff FileStats::read(void *input_data, const int element_size, const SceSize element_count) const {
+    const auto lock = lock_operations();
     if (!wrapped_file)
         return -1;
 
@@ -58,6 +59,7 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
 }
 
 SceOff FileStats::write(const void *data, const SceSize size, const int count) const {
+    const auto lock = lock_operations();
     if (!can_write_file())
         return -1;
 
@@ -65,6 +67,7 @@ SceOff FileStats::write(const void *data, const SceSize size, const int count) c
 }
 
 int FileStats::truncate(const SceSize size) const {
+    const auto lock = lock_operations();
 #ifdef _WIN32
     return _chsize_s(_fileno(get_file_pointer()), size);
 #else
@@ -73,6 +76,7 @@ int FileStats::truncate(const SceSize size) const {
 }
 
 bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
+    const auto lock = lock_operations();
     if (!wrapped_file)
         return false;
 
@@ -99,6 +103,7 @@ bool FileStats::seek(const SceOff offset, const SceIoSeekMode seek_mode) const {
 }
 
 SceOff FileStats::tell() const {
+    const auto lock = lock_operations();
     if (!wrapped_file)
         return -1;
 

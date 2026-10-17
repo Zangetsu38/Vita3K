@@ -207,6 +207,8 @@ option(GLSLANG_TESTS "Enable glslang testing" OFF)
 option(ENABLE_OPT "Enables spirv-opt capability if present" OFF)
 add_subdirectory(glslang)
 
+add_subdirectory(json)
+
 option(SPIRV_CROSS_CLI "Build the CLI binary. Requires SPIRV_CROSS_STATIC." OFF)
 option(SPIRV_CROSS_ENABLE_TESTS "Enable SPIRV-Cross tests." OFF)
 option(SPIRV_CROSS_ENABLE_HLSL "Enable HLSL target support." OFF)
@@ -388,14 +390,17 @@ if(NOT CURL_FOUND)
 	option(CURL_CA_FALLBACK "Use built-in CA store of OpenSSL. Defaults to OFF" ON)
 	option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 	option(BUILD_STATIC_LIBS "Build static libraries" ON)
-	option(BUILD_TESTING "Build tests" OFF)
 	option(BUILD_EXAMPLES "Build libcurl examples" OFF)
 	option(CURL_USE_LIBPSL "Use libpsl" OFF)
 	FetchContent_Declare(curl
 		GIT_REPOSITORY https://github.com/curl/curl.git
 		GIT_TAG        68720b4837284335b2d63cb358f8f6ce65f5bc55 # release 8.21.0
 	)
-	FetchContent_MakeAvailable(curl)
+	function(vita3k_make_available_curl)
+		set(BUILD_TESTING OFF)
+		FetchContent_MakeAvailable(curl)
+	endfunction()
+	vita3k_make_available_curl()
 else()
 	add_library(libcurl INTERFACE)
 	target_link_libraries(libcurl INTERFACE CURL::libcurl)

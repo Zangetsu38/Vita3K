@@ -17,17 +17,36 @@
 
 #pragma once
 
+#include <io/VitaIoDevice.h>
 #include <io/filesystem.h>
 #include <io/types.h>
 #include <io/util.h>
 
+#include <atomic>
+#include <functional>
 #include <map>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
+
+class SimpleEvent;
+
+struct AsyncIoRequest {
+    std::shared_ptr<SimpleEvent> event;
+    std::thread worker;
+    std::function<void()> cleanup;
+    bool finished = false;
+
+    ~AsyncIoRequest();
+};
 
 // Class for all needed information to access files on Vita3K.
 class FileStats : public VitaStats {
     // Shared file pointer
     FilePtr wrapped_file;
+    std::shared_ptr<std::mutex> operations_mutex = std::make_shared<std::mutex>();
 
 public:
     // Constructor used for files
@@ -60,6 +79,10 @@ public:
         return wrapped_file.get();
     }
 
+    std::unique_lock<std::mutex> lock_operations() const {
+        return std::unique_lock<std::mutex>(*operations_mutex);
+    }
+
     // File functions
     SceOff read(void *input_data, int element_size, SceSize element_count) const;
     SceOff write(const void *data, SceSize size, int count) const;
@@ -71,11 +94,13 @@ public:
 // Class for implementing Directory structure; path names are wide for Windows, normal for else
 class DirStats : public VitaStats {
     // Shared directory pointer
-    DirPtr dir_ptr;
+    std::vector<DirPtr> dir_ptrs;
+    size_t dir_index = 0;
+    std::unordered_set<std::string> seen_entries;
 
 public:
-    DirStats(const char *vita, const std::string &t, const fs::path &file, DirPtr ptr) {
-        dir_ptr = std::move(ptr);
+    DirStats(const char *vita, const std::string &t, const fs::path &file, std::vector<DirPtr> ptrs) {
+        dir_ptrs = std::move(ptrs);
 
         file_info.vita_loc = vita;
         file_info.translated = t;
@@ -85,8 +110,18 @@ public:
         file_info.access_mode = SCE_S_IFDIR | SCE_S_IRUSR;
     }
 
-    auto get_dir_ptr() const {
-        return get_system_dir_ptr(dir_ptr);
+    auto get_dir_ptr() {
+        using EntryPtr = decltype(get_system_dir_ptr(dir_ptrs.front()));
+        while (dir_index < dir_ptrs.size()) {
+            if (auto entry = get_system_dir_ptr(dir_ptrs[dir_index]))
+                return entry;
+            ++dir_index;
+        }
+        return EntryPtr{};
+    }
+
+    bool add_entry(const std::string &name) {
+        return seen_entries.insert(name).second;
     }
 
     bool is_directory() const {
@@ -101,9 +136,11 @@ using DirEntries = std::map<SceUID, DirStats>;
 struct IOState {
     struct DevicePaths {
         std::string app0;
+        VitaIoDevice app0_device = VitaIoDevice::_INVALID;
         std::string savedata0;
         std::string addcont0;
         std::string cache0;
+        std::string user_id;
     } device_paths;
 
     std::string addcont;
@@ -117,16 +154,31 @@ struct IOState {
 
     bool redirect_stdio;
 
-    SceUID next_fd = 0;
+    std::atomic<SceUID> next_fd = 0;
+    std::mutex files_mutex;
     TtyFiles tty_files;
     StdFiles std_files;
     DirEntries dir_entries;
 
+    std::mutex async_mutex;
+    bool async_stopping = false;
+    std::unordered_map<SceUID, std::shared_ptr<AsyncIoRequest>> async_requests;
+
     std::unordered_map<std::string, std::string> cachemap;
     bool case_isens_find_enabled = false;
 
+    std::mutex appmeta_mutex;
+    struct AppmetaMount {
+        fs::path source;
+        fs::path canonical_source;
+        fs::path patch;
+        fs::path canonical_patch;
+    };
+    std::unordered_map<std::string, AppmetaMount> appmeta_mounts;
+
     std::mutex overlay_mutex;
     SceUID next_overlay_id = 1;
+    SceUID app_overlay_id = -1;
     // overlay in the order they should be applied
     std::vector<FiosOverlay> overlays;
 };

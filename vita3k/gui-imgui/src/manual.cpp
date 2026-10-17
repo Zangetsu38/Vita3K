@@ -35,7 +35,6 @@ void open_manual(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path
         emuenv.app_path = app_path;
         gui.vita_area.information_bar = false;
         gui.vita_area.home_screen = false;
-        gui.vita_area.live_area_screen = false;
         gui.vita_area.manual = true;
     } else
         LOG_ERROR("Error opening Manual");
@@ -100,11 +99,10 @@ bool init_manual(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path
     const auto APP_INDEX = get_app_index(gui, emuenv, app_path);
     if (!APP_INDEX)
         return false;
-    const auto APP_PATH{ emuenv.vita_fs_path / "ux0/app" / app_path };
     auto manual_path{ fs::path("sce_sys/manual") };
 
     const auto lang = fmt::format("{:0>2d}", emuenv.cfg.sys_lang);
-    if (fs::exists(APP_PATH / manual_path / lang))
+    if (fs::exists(vfs::resolve_app_path(emuenv.vita_fs_path, app_path, manual_path / lang, APP_INDEX->title_id)))
         manual_path /= lang;
 
     // Load manual images
@@ -114,7 +112,7 @@ bool init_manual(GuiState &gui, EmuEnvState &emuenv, const std::string &app_path
 
         // Read manual image from file buffer and check if it exists
         vfs::FileBuffer buffer;
-        if (!vfs::read_app_file(buffer, emuenv.vita_fs_path, app_path, page_path))
+        if (!vfs::read_app_file(buffer, emuenv.vita_fs_path, app_path, page_path, APP_INDEX->title_id))
             break;
 
         // Load image data from memory buffer and check if it's valid

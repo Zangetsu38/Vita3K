@@ -71,6 +71,7 @@ public:
     QString demo_mode;
     QString boot_fullscreen;
     QString show_live_area;
+    QString experimental_appmeta;
     QString show_compile_shaders;
     QString check_for_updates;
     QString log_compat_warn;

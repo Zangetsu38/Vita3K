@@ -24,6 +24,7 @@
 #include <io/device.h>
 #include <io/functions.h>
 #include <io/vfs.h>
+#include <kernel/types.h>
 #include <lang/state.h>
 #include <net/state.h>
 #include <packages/functions.h>
@@ -104,9 +105,10 @@ EXPORT(int, sceCommonDialog_B7D4C911) {
     return 2;
 }
 
-EXPORT(int, sceCommonDialogGetWorkerThreadId) {
+EXPORT(SceUID, sceCommonDialogGetWorkerThreadId) {
     TRACY_FUNC(sceCommonDialogGetWorkerThreadId);
-    return UNIMPLEMENTED();
+    LOG_DEBUG("sceCommonDialogGetWorkerThreadId: thread_id={}", thread_id);
+    return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 }
 
 EXPORT(int, sceCommonDialogIsRunning) {

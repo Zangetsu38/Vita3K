@@ -23,10 +23,13 @@
 #include <io/state.h>
 #include <util/safe_time.h>
 #include <util/string_utils.h>
+#include <v3kn/state.h>
 #include <vita_shell/functions.h>
 
 #include <pugixml.hpp>
 #include <stb_image.h>
+
+#include <array>
 
 namespace gui {
 
@@ -211,6 +214,7 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
     gui.theme_backgrounds.clear();
     gui.theme_backgrounds_font_color.clear();
     gui.theme_information_bar_notice.clear();
+    gui.theme_page_indicator.clear();
 
     bgm_player::set_current_bgm_path({ theme.bgm.device, theme.bgm.device_path.generic_string() });
     bgm_player::init_bgm(emuenv.vita_fs_path, emuenv.app.user_list.users[emuenv.io.user_id].system_music);
@@ -219,7 +223,15 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
         int32_t width = 0;
         int32_t height = 0;
         vfs::FileBuffer buffer;
-        if (!fs_utils::read_data(icon_path, buffer)) {
+        auto source_path = icon_path;
+        if (title_id == "NPXS19999") {
+            const auto power_icon = emuenv.vita_fs_path / "vs0/data/internal/icon/power.png";
+            const auto default_fw_icon = emuenv.vita_fs_path / "vs0/data/internal/livearea/default/sce_sys/icon0.png";
+            const auto default_icon = emuenv.static_assets_path / "data/image/icon.png";
+            if ((source_path == default_fw_icon || source_path == default_icon) && fs::exists(power_icon))
+                source_path = power_icon;
+        }
+        if (!fs_utils::read_data(source_path, buffer)) {
             buffer = init_default_icon(gui, emuenv);
             if (buffer.empty()) {
                 LOG_WARN("No icon found for system app '{}' in theme '{}'.", title_id, content_id);
@@ -233,7 +245,33 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
             continue;
         }
 
-        gui.app_selector.sys_apps_icon[title_id] = ImGui_Texture(gui.imgui_state.get(), data, width, height);
+        gui.app_selector.sys_apps_icon[emu_app_path(title_id)] = ImGui_Texture(gui.imgui_state.get(), data, width, height);
+        stbi_image_free(data);
+    }
+
+    const std::array<std::pair<PageIndicator, std::filesystem::path>, 2> page_indicators = { {
+        { PageIndicator::BASE, theme.page_indicators.base },
+        { PageIndicator::CUR, theme.page_indicators.current },
+    } };
+    for (const auto &[indicator, icon_path] : page_indicators) {
+        if (icon_path.empty())
+            continue;
+
+        int32_t width = 0;
+        int32_t height = 0;
+        vfs::FileBuffer buffer;
+        if (!fs_utils::read_data(icon_path, buffer)) {
+            LOG_WARN("Page icon '{}' could not be read for theme '{}'.", icon_path, content_id);
+            continue;
+        }
+
+        stbi_uc *data = stbi_load_from_memory(buffer.data(), static_cast<int>(buffer.size()), &width, &height, nullptr, STBI_rgb_alpha);
+        if (!data) {
+            LOG_ERROR("Invalid page icon '{}' for theme '{}'.", icon_path, content_id);
+            continue;
+        }
+
+        gui.theme_page_indicator[indicator] = ImGui_Texture(gui.imgui_state.get(), data, width, height);
         stbi_image_free(data);
     }
 
@@ -301,11 +339,12 @@ bool init_theme(GuiState &gui, EmuEnvState &emuenv, const std::string &content_i
     return !gui.theme_backgrounds.empty();
 }
 
-void draw_background(GuiState &gui, EmuEnvState &emuenv) {
+void draw_background(GuiState &gui, EmuEnvState &emuenv, const bool is_image_background) {
     const auto &user = emuenv.app.user_list.users[emuenv.io.user_id];
     const auto &viewport = sdl::get_viewport();
     const ImVec2 VIEWPORT_SIZE(viewport.logical_width, viewport.logical_height);
     const ImVec2 VIEWPORT_POS(viewport.logical_x, viewport.logical_y);
+    const auto SCREEN_POS = ImGui::GetCursorScreenPos();
     const ImVec2 VIEWPORT_POS_MAX(viewport.logical_x + viewport.logical_width, viewport.logical_y + viewport.logical_height);
     const ImVec2 RES_SCALE(viewport.scale_x, viewport.scale_y);
     const ImVec2 SCALE(RES_SCALE.x * viewport.manual_dpi_scale, RES_SCALE.y * viewport.manual_dpi_scale);
@@ -317,19 +356,20 @@ void draw_background(GuiState &gui, EmuEnvState &emuenv) {
     const auto is_theme_background = !gui.theme_backgrounds.empty() && user.use_theme_bg;
 
     auto draw_list = ImGui::GetBackgroundDrawList();
+    const auto display_size = ImGui::GetIO().DisplaySize;
 
     // Draw black background for full screens
-    draw_list->AddRectFilled(ImVec2(0.f, 0.f), ImGui::GetIO().DisplaySize, IM_COL32(0.f, 0.f, 0.f, 255.f));
+    draw_list->AddRectFilled(ImVec2(0.f, 0.f), display_size, IM_COL32(0.f, 0.f, 0.f, 255.f));
 
     // Draw blue background for home screen and live area screen only
-    if (gui.vita_area.home_screen || gui.vita_area.live_area_screen)
+    if (gui.vita_area.home_screen)
         draw_list->AddRectFilled(VIEWPORT_POS, VIEWPORT_POS_MAX, IM_COL32(11.f, 90.f, 252.f, 160.f), 0.f, ImDrawFlags_RoundCornersAll);
 
     // Draw background image for home screen and app loading screen only
-    if (!gui.vita_area.live_area_screen && (is_theme_background || is_user_background)) {
+    if (is_image_background && (is_theme_background || is_user_background)) {
         const auto MARGIN_HEIGHT = gui.vita_area.home_screen ? INFO_BAR_HEIGHT : HALF_INFO_BAR_HEIGHT;
-        ImVec2 background_pos_min(VIEWPORT_POS.x, VIEWPORT_POS.y + MARGIN_HEIGHT);
-        ImVec2 background_pos_max(background_pos_min.x + VIEWPORT_SIZE.x, background_pos_min.y + VIEWPORT_SIZE.y - MARGIN_HEIGHT);
+        ImVec2 background_pos_min(SCREEN_POS.x, VIEWPORT_POS.y + MARGIN_HEIGHT);
+        ImVec2 background_pos_max(background_pos_min.x + VIEWPORT_SIZE.x, background_pos_min.y + VIEWPORT_SIZE.y - INFO_BAR_HEIGHT);
 
         // Draw background image
         std::string user_bg_path;
@@ -342,7 +382,11 @@ void draw_background(GuiState &gui, EmuEnvState &emuenv) {
 
         const auto &background = is_user_background ? gui.user_backgrounds[user_bg_path] : gui.theme_backgrounds[gui.current_theme_bg];
 
-        draw_list->AddImage(background, background_pos_min, background_pos_max);
+        if (background) {
+            const auto background_alpha = static_cast<int>(255.f * gui.bg_transition_alpha);
+            draw_list->AddImage(background, background_pos_min, background_pos_max, ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, background_alpha));
+            draw_list->AddRectFilled(ImVec2(0.f, 0.f), ImVec2(VIEWPORT_POS.x, display_size.y), IM_COL32(0.f, 0.f, 0.f, 255.f));
+        }
     }
 }
 
@@ -350,6 +394,7 @@ void close_start_screen(GuiState &gui, EmuEnvState &emuenv) {
     gui.vita_area.start_screen = false;
     bgm_player::switch_bgm_state(false);
     gui.vita_area.home_screen = true;
+    v3kn::set_friend_presence_status(emuenv.v3kn.friends_state, PresenceStatus::Online);
     if (!emuenv.cfg.show_info_bar)
         gui.vita_area.information_bar = false;
 }

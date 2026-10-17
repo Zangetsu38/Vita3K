@@ -258,8 +258,8 @@ bool setup_game_launch(EmuEnvState &emuenv, const std::string &app_path, const b
 
     get_license(emuenv, emuenv.io.title_id, emuenv.io.content_id);
     if (update_last_time_used)
-        update_last_time_app_used(emuenv, app_path);
-    set_current_config(emuenv, app_path);
+        update_last_time_app_used(emuenv, emuenv.io.app_path);
+    set_current_config(emuenv, emuenv.io.app_path);
     reset_perf_metrics(emuenv);
     return true;
 }
@@ -276,7 +276,7 @@ void prepare_game_launch_overlay(EmuEnvState &emuenv) {
     renderer.precompile_requested = false;
     renderer.precompile_complete.store(false, std::memory_order_relaxed);
 
-    const auto bg_path = emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_sys/pic0.png";
+    const auto bg_path = vfs::resolve_app_path(emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/pic0.png", emuenv.io.title_id);
     if (fs::exists(bg_path))
         renderer.precompile_bg_path = fs_utils::path_to_utf8(bg_path);
 

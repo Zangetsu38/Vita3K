@@ -38,6 +38,7 @@
 #include <jni.h>
 #endif
 
+#include <cstring>
 #include <regex>
 
 namespace gui {
@@ -83,21 +84,37 @@ bool init_vita3k_update(GuiState &gui) {
     git_version = 0;
     vita_area_state = {};
 
-    // Get Build number of latest release
-    const auto version = net_utils::get_web_regex_result("https://api.github.com/repos/Vita3K/Vita3K/releases/latest", std::regex("Vita3K Build: (\\d+)"));
-
-    // Check if version is empty or not all digit
-    if (version.empty() || !std::all_of(version.begin(), version.end(), ::isdigit)) {
-        LOG_WARN("Failed to get current git version, try again later\n{}", version);
+    const auto release_body = net_utils::get_web_response("https://api.github.com/repos/Zangetsu38/Vita3K/releases/latest");
+    std::smatch release_info;
+    const auto release_metadata_regex = std::regex(fmt::format(R"(Corresponding commit:\s*([a-f0-9]{{{}}})[\s\S]*?Vita3K Build:\s*(\d+)[\s\S]*?App master count:\s*(\d+)\s*)", std::strlen(app_hash)));
+    if (release_body.empty() || !std::regex_search(release_body, release_info, release_metadata_regex) || release_info.size() != 4) {
+        LOG_WARN("Failed to get latest Limule release metadata");
         gui.help_menu.vita3k_update = false;
         return false;
     }
 
-    // Set latest git version number
-    git_version = string_utils::stoi_def(version, 0, "git version");
+    const auto commit = release_info[1].str();
+    const auto version = release_info[2].str();
+    const auto master_version = release_info[3].str();
+    if (!std::all_of(version.begin(), version.end(), ::isdigit) || !std::all_of(master_version.begin(), master_version.end(), ::isdigit)) {
+        LOG_WARN("Invalid version metadata in latest Limule release");
+        gui.help_menu.vita3k_update = false;
+        return false;
+    }
 
-    // Get difference between current app number and git version
-    const auto dif_from_current = static_cast<uint32_t>(std::max(git_version - app_number, 0));
+    git_version = string_utils::stoi_def(version, 0, "git version");
+    const auto master_git_version = string_utils::stoi_def(master_version, 0, "master git version");
+
+    const bool same_build = git_version == app_number;
+    const bool same_master = master_git_version == app_master_number;
+    const bool same_commit = commit == std::string(app_hash);
+    const uint32_t delta_git_release = static_cast<uint32_t>(std::max(git_version - master_git_version, 0));
+    const uint32_t delta_master = static_cast<uint32_t>(std::max(master_git_version - app_master_number, 0));
+    const uint32_t combined_delta = delta_git_release + delta_master;
+
+    const auto dif_from_current = (app_master_number == 0 || master_git_version == 0)
+        ? static_cast<uint32_t>(std::max(git_version - app_number, 0))
+        : (!same_build || !same_master ? combined_delta : (!same_commit ? delta_git_release : 0));
     const auto has_update = dif_from_current > 0;
     if (has_update) {
         // Reset cancel and thread running variable before starting the worker
@@ -128,7 +145,7 @@ bool init_vita3k_update(GuiState &gui) {
                         return;
 
                     // Create link for get commits
-                    const auto continuous_link = fmt::format(R"(https://api.github.com/repos/Vita3K/Vita3K/commits?sha=continuous&page={}&per_page={})", p + 1, std::min(dif_from_current, max_per_page));
+                    const auto continuous_link = fmt::format(R"(https://api.github.com/repos/Zangetsu38/Vita3K/commits?sha=limule&page={}&per_page={})", p + 1, std::min(dif_from_current, max_per_page));
 
                     // Get response from github api
                     auto commits = net_utils::get_web_response(continuous_link);
@@ -198,7 +215,6 @@ bool init_vita3k_update(GuiState &gui) {
     if (has_update || gui.help_menu.vita3k_update) {
         vita_area_state = gui.vita_area;
         gui.vita_area.home_screen = false;
-        gui.vita_area.live_area_screen = false;
         gui.vita_area.start_screen = false;
         gui.vita_area.information_bar = true;
     }
@@ -214,7 +230,7 @@ static void download_update(const fs::path &download_path) {
     progress_state.canceled = false;
     progress_state.pause = false;
     std::thread download([download_path]() {
-        std::string download_continuous_link = "https://github.com/Vita3K/Vita3K/releases/download/continuous/";
+        std::string download_continuous_link = "https://github.com/Zangetsu38/Vita3K/releases/download/continuous/";
 #ifdef _WIN32
 #if defined(__aarch64__) || defined(_M_ARM64)
         download_continuous_link += "windows-arm64-latest.zip";
@@ -473,7 +489,7 @@ void draw_vita3k_update(GuiState &gui, EmuEnvState &emuenv) {
             ImGui::SetCursorPosY(pos);
             ImGui::PushID(desc.sha.c_str());
             if (ImGui::Selectable("##commit_link", false, ImGuiSelectableFlags_SpanAllColumns, ImVec2(ImGui::GetWindowWidth(), max_height))) {
-                open_path(fmt::format("https://github.com/Vita3K/Vita3K/commit/{}", desc.sha));
+                open_path(fmt::format("https://github.com/Zangetsu38/Vita3K/commit/{}", desc.sha));
             }
             ImGui::PopID();
             ImGui::Separator();

@@ -17,6 +17,8 @@ set(GUI_SOURCES
 	src/gui.cpp
 	src/lang.cpp
 	src/home_screen.cpp
+	src/friend.cpp
+	src/friend_profile.cpp
 	src/ime.cpp
 	src/imgui_impl_sdl_gl3.cpp
 	src/imgui_impl_sdl_vulkan.cpp
@@ -29,6 +31,7 @@ set(GUI_SOURCES
 	src/main_menubar.cpp
 	src/main_window.cpp
 	src/manual.cpp
+	src/messages.cpp
 	src/mutexes_dialog.cpp
 	src/pkg_install_dialog.cpp
 	src/popups.cpp
@@ -41,6 +44,7 @@ set(GUI_SOURCES
 	src/trophy_collection.cpp
 	src/user_management.cpp
 	src/online_storage.cpp
+	src/patch_check.cpp
 	src/v3kn_dialog.cpp
 	src/overlay_dialog.cpp
 	src/controls_dialog.cpp

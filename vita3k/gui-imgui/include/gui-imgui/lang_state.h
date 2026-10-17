@@ -130,6 +130,7 @@ struct LangState {
             { "delete_app", "This application and all related data, including saved data, will be deleted." },
             { "delete_app_description", "Deleting an application may take a while,\ndepending on its size and your hardware." },
             { "delete_patch", "Do you want to delete this patch?" },
+            { "delete_update", "Do you want to delete this update?" },
             { "delete_addcont", "Do you want to delete this add-on data?" },
             { "delete_license", "Do you want to delete this license?" }
         };
@@ -294,12 +295,32 @@ struct LangState {
     };
     std::map<std::string, std::string> indicator = {
         { "app_added_home", "The application has been added to the home screen." },
+        { "cancel_download", "Cancel download" },
+        { "cancel_install", "Do you want to cancel this installation?\nIf you cancel, the files downloaded for this installation will also be deleted." },
         { "delete_all", "Delete All" },
         { "notif_deleted", "The notifications will be deleted." },
+        { "waiting_download", "Waiting to download" },
+        { "downloading_complete", "Update downloaded." },
         { "install_failed", "Could not install." },
+        { "waiting_install", "Waiting to install" },
         { "install_complete", "Installation complete." },
         { "installing", "Installing..." },
-        { "no_notif", "There are no notifications." }
+        { "minutes_left", "{} minutes left" },
+        { "no_notif", "There are no notifications." },
+        { "pause_all", "Pause All" },
+        { "pause", "Pause" },
+        { "paused", "Paused" },
+        { "resume_all", "Resume All" },
+        { "resume", "Resume" },
+        { "seconds_left", "{} seconds left" }
+    };
+    std::map<std::string, std::string> patch_check = {
+        { "new_app_version_available", "A new version of the application is available." },
+        { "latest_version_installed", "The latest version of the application is already installed." },
+        { "downloading_app_update", "Downloading the application update file...\nYou can check the progress of the download in the notification list." },
+        { "download", "Download" },
+        { "not_enough_space", "Could not download.\nThere is not enough free space on the memory card. Create at least {} free space on the memory card, and then try to download again." },
+        { "version", "Version {}" }
     };
     std::map<std::string, std::string> initial_setup = {
         { "back", "Back" },
@@ -405,6 +426,72 @@ struct LangState {
         { "copying", "Copying..." },
         { "minutes_left", "{} Minutes Left" },
         { "seconds_left", "{} Seconds Left" }
+    };
+    std::map<std::string, std::string> friends = {
+        { "accept", "Accept" },
+        { "players_blocked", "Players Blocked" },
+        { "friend_request_already_canceled", "This Friend request has already been canceled." },
+        { "search_for_player", "Search for a Vita3K Network player and view the player's profile, or send a Friend request." },
+        { "friend_requests", "Friend Requests" },
+        { "friends", "Friends" },
+        { "could_not_find_online_id", "Could not find the online ID." },
+        { "there_are_no_players", "There are no players." },
+        { "no_players_found", "No players found." },
+        { "online_id", "Online ID" },
+        { "enter_from_3_to_16_characters", "Enter from 3 to 16 characters." },
+        { "online_status", "Online Status" },
+        { "received", "Received" },
+        { "search", "Search" },
+        { "sent", "Sent" },
+        { "waiting_for_friend_response", "Waiting for Friend response." }
+    };
+    std::map<std::string, std::string> friend_profile = {
+        { "about_me", "About Me" },
+        { "accept", "Accept" },
+        { "activity", "Activity" },
+        { "warn_block_player", "If you block this player, you will no longer be able to receive messages from this player.\nDo you want to continue?" },
+        { "warn_block_friend", "If you block this player, the player will be removed from Friends. You will no longer be able to receive messages from this player.\nDo you want to continue?" },
+        { "block", "Block" },
+        { "blocked", "Blocked." },
+        { "cancel_friend_request", "Cancel Friend Request" },
+        { "friend_request_canceled", "The Friend request will be canceled." },
+        { "delete_request", "Delete Request" },
+        { "edit_profile", "Edit Profile" },
+        { "friend_request_already_canceled", "This Friend request has already been canceled." },
+        { "friends", "Friends" },
+        { "is_now_friends_with", "is now friends with {}" },
+        { "level", "Level" },
+        { "not_a_friend_yet", "Not a Friend yet." },
+        { "remove_from_friends", "Remove from Friends" },
+        { "player_removed_from_friends", "This player will be removed from Friends." },
+        { "send_friend_request", "Send Friend Request" },
+        { "send", "Send" },
+        { "trophies", "Trophies" },
+        { "unblock", "Unblock" },
+        { "unblock_player", "Unblock this player." },
+        { "waiting_friend_response", "Waiting for Friend response." },
+        { "friend_request_from_player", "You have a Friend request from this player." },
+        { "you_have_friend_requests", "You have Friend requests." }
+    };
+    std::map<std::string, std::string> contacts_pa = {
+        { "activities_of", "{}'s Activities" },
+        { "anyone", "Anyone" },
+        { "no_one", "No One" },
+        { "cannot_display", "Cannot display any more pages." },
+        { "friends_of_friends", "Friends of Friends" },
+        { "friends_only", "Friends Only" },
+        { "share_range", "Share Range : " }
+    };
+    std::map<std::string, std::string> messages_app = {
+        { "title", "Messages" },
+        { "create_message", "+ Create a message" },
+        { "uncheck_all", "Uncheck All" },
+        { "enter_online_id", "Enter the online ID." },
+        { "add", "Add" },
+        { "add_recipient", "Add a recipient" },
+        { "delete", "Delete" },
+        { "cancel", "Cancel" },
+        { "to", "To" }
     };
     std::map<std::string, std::string> message = { { "load_app_failed", "Failed to load \"{}\".\nCheck vita3k.log to see console output for details.\n1. Have you installed the firmware?\n2. Re-dump your own PS Vita app/game and install it on Vita3K.\n3. If you want to install or boot Vitamin, it is not supported." } };
     std::map<std::string, std::string> overlay = {
@@ -517,7 +604,9 @@ struct LangState {
         };
         std::map<std::string, std::string> cpu = {
             { "cpu_opt", "Enable optimizations" },
-            { "cpu_opt_description", "Check the box to enable additional CPU JIT optimizations." }
+            { "cpu_opt_description", "Check the box to enable additional CPU JIT optimizations." },
+            { "thread_scheduler", "Use Vita thread scheduler" },
+            { "thread_scheduler_description", "Use Vita-like three-core priority scheduling. Changing this setting requires restarting the app." }
         };
         std::map<std::string, std::string> gpu = {
             { "reset", "Reset" },
@@ -617,6 +706,8 @@ struct LangState {
             { "select_log_level", "Select your preferred log level." },
             { "archive_log", "Archive Log" },
             { "archive_log_description", "Check the box to enable Archive Log." },
+            { "experimental_appmeta", "Create appmeta on install (experimental)" },
+            { "experimental_appmeta_description", "Create unencrypted appmeta when installing applications and update it for patches. This helps the Vita shell display app bubbles and their information. Existing appmeta is preserved when installing an application; protected appmeta is not updated. Experimental: PFS and shell promotion are not emulated." },
             { "discord_rich_presence", "Enables Discord Rich Presence to show what application you're running on Discord." },
             { "texture_cache", "Texture Cache" },
             { "texture_cache_description", "Uncheck the box to disable texture cache." },
@@ -747,8 +838,10 @@ struct LangState {
     std::map<std::string, std::string> sys_apps_title = {
         { "browser", "Browser" },
         { "internet_browser", "Internet Browser" },
+        { "friends", "Friends" },
         { "trophies", "Trophies" },
         { "trophy_collection", "Trophy Collection" },
+        { "messages", "Messages" },
         { "settings", "Settings" },
         { "content_manager", "Content Manager" }
     };
@@ -859,9 +952,11 @@ struct LangState {
             "30", "31"
         };
         std::map<std::string, std::string> main = {
+            { "activities", "Activities" },
             { "close", "Close" },
             { "connecting_please_wait", "Connecting...\nPlease wait." },
             { "error", "Error" },
+            { "download_failed", "Could not download." },
             { "could_not_connect_server", "Could not connect to the server." },
             { "could_not_connect_internet", "Could not connect to the Internet." },
             { "vita3k_network_connection_lost", "The connection to Vita3K Network has been lost." },
@@ -870,6 +965,8 @@ struct LangState {
             { "select_all", "Select All" },
             { "select", "Select" },
             { "hidden_trophy", "Hidden Trophy" },
+            { "has_earned_platinum_trophy", "has earned a platinum trophy in \"{}\"!" },
+            { "has_earned_trophy", "has earned a trophy in \"{}\"!" },
             { "one_hour_ago", "1 Hour Ago" },
             { "one_minute_ago", "1 Minute Ago" },
             { "bronze", "Bronze" },
@@ -877,7 +974,17 @@ struct LangState {
             { "platinum", "Platinum" },
             { "silver", "Silver" },
             { "hours_ago", "{} Hours Ago" },
-            { "minutes_ago", "{} Minutes Ago" }
+            { "minutes_ago", "{} Minutes Ago" },
+            { "first_time_playing", "is playing \"{}\" for the first time." },
+            { "like", "Like" },
+            { "likes_this", "{} likes this." },
+            { "and_like_this", "{} and {} like this." },
+            { "people_like_this", "{} people like this." },
+            { "comments", "Comments {}" },
+            { "delete_activity", "This activity will be deleted." },
+            { "delete_comment", "This comment will be deleted." },
+            { "unlike", "Unlike" },
+            { "write_comment", "Write Comment" }
         };
     };
     Common common;

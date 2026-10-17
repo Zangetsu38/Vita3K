@@ -369,10 +369,11 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         break;
     }
 
-    if (!copy_path(title_id_src, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
-        return false;
-
     create_license(emuenv, zRIF);
+
+    if (emuenv.cfg.experimental_appmeta && (type == PkgType::PKG_TYPE_VITA_APP || type == PkgType::PKG_TYPE_VITA_PATCH))
+        create_experimental_appmeta(emuenv.vita_fs_path, emuenv.app_info.app_title_id,
+            type == PkgType::PKG_TYPE_VITA_PATCH ? AppmetaInstallType::Patch : AppmetaInstallType::Application);
 
     progress_callback(100);
     return true;

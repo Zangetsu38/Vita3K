@@ -288,6 +288,9 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
         return false;
     }
 
+    if (emuenv.cfg.experimental_appmeta)
+        create_experimental_appmeta(emuenv.vita_fs_path, emuenv.app_info.app_title_id);
+
     fs::remove_all(staging);
     progress(100);
     LOG_INFO("{} [{}] installed successfully!", emuenv.app_info.app_title, emuenv.app_info.app_title_id);

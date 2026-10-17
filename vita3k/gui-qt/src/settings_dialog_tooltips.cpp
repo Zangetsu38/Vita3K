@@ -44,6 +44,8 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Vulkan Validation Layer");
     case config::RestartRequiredSetting::DisableMaskBit:
         return QCoreApplication::translate("SettingsDialogTooltips", "Disable Mask Bit Emulation");
+    case config::RestartRequiredSetting::ThreadScheduler:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Thread Scheduler");
     }
 
     return {};
@@ -137,6 +139,7 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , demo_mode(tr("Enable Demo Mode."))
     , boot_fullscreen(tr("Automatically enter fullscreen when booting an app."))
     , show_live_area(tr("Show an imitated PS Vita Live Area screen before booting an app."))
+    , experimental_appmeta(tr("Create unencrypted appmeta when installing applications and update it for patches. This helps the Vita shell display app bubbles and their information. Existing appmeta is preserved when installing an application; protected appmeta is not updated. Experimental: PFS and shell promotion are not emulated."))
     , show_compile_shaders(tr("Show a hint when shaders are being compiled during gameplay."))
     , check_for_updates(tr("Choose whether Vita3K checks for updates at startup.\n\"Check\" notifies you when a newer build is available, and \"Don't Check\" disables startup checks."))
     , log_compat_warn(tr("Log compatibility database related warnings."))

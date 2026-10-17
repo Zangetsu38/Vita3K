@@ -141,7 +141,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     if (!m_app_path.empty()) {
         QString title_name = QString::fromStdString(m_app_path);
         for (const auto &app : emuenv.app.apps_list.apps) {
-            if (app.title_id == m_app_path) {
+            if (app.path == m_app_path || app.title_id == m_app_path) {
                 title_name = QString::fromStdString(app.title);
                 break;
             }
@@ -177,6 +177,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
         m_ui->gb_theme_music_section->setVisible(false);
         m_ui->boot_apps_fullscreen->setVisible(false);
         m_ui->show_live_area_screen->setVisible(false);
+        m_ui->experimental_appmeta->setVisible(false);
         m_ui->show_compile_shaders->setVisible(false);
         m_ui->label_check_for_updates_mode->setVisible(false);
         m_ui->check_for_updates_mode->setVisible(false);
@@ -414,6 +415,7 @@ void SettingsDialog::load_config() {
 
     m_ui->boot_apps_fullscreen->setChecked(emuenv.cfg.boot_apps_full_screen);
     m_ui->show_live_area_screen->setChecked(emuenv.cfg.show_live_area_screen);
+    m_ui->experimental_appmeta->setChecked(emuenv.cfg.experimental_appmeta);
     m_ui->gui_backend_box->clear();
     m_ui->gui_backend_box->addItems({ QStringLiteral("ImGui"), QStringLiteral("Qt") });
     m_ui->gui_backend_box->setCurrentIndex(emuenv.cfg.gui_backend == "Qt" ? 1 : 0);
@@ -661,6 +663,8 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     desired.demo_mode = m_ui->demo_mode->isChecked();
     desired.boot_apps_full_screen = m_ui->boot_apps_fullscreen->isChecked();
     desired.show_live_area_screen = m_ui->show_live_area_screen->isChecked();
+    if (m_app_path.empty())
+        desired.experimental_appmeta = m_ui->experimental_appmeta->isChecked();
     if (m_app_path.empty())
         desired.gui_backend = m_ui->gui_backend_box->currentText().toStdString();
     desired.show_compile_shaders = m_ui->show_compile_shaders->isChecked();
@@ -1250,6 +1254,7 @@ void SettingsDialog::setup_connections() {
         // Emulator
         { m_ui->boot_apps_fullscreen, tr("Boot Games in Fullscreen"), m_tooltips->boot_fullscreen },
         { m_ui->show_live_area_screen, tr("Show Live Area Before Booting"), m_tooltips->show_live_area },
+        { m_ui->experimental_appmeta, tr("Create appmeta on install (experimental)"), m_tooltips->experimental_appmeta },
         { m_ui->show_compile_shaders, tr("Show Shader Compilation Hint"), m_tooltips->show_compile_shaders },
         { m_ui->check_for_updates_mode, tr("Update Check Mode"), m_tooltips->check_for_updates },
         { m_ui->log_compat_warn, tr("Log Compatibility Warnings"), m_tooltips->log_compat_warn },

@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cpu/common.h>
+#include <kernel/scheduler.h>
 #include <kernel/thread/wait_queue.h>
 #include <kernel/types.h>
 #include <mem/block.h>
@@ -31,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 struct ThreadState;
 using ThreadStatePtr = std::shared_ptr<ThreadState>;
@@ -192,6 +194,8 @@ struct ThreadState final {
     SceInt32 get_vm_context(CPUContext &context, uint32_t &tpidrurw, bool &in_kernel_call);
 
 private:
+    friend class Scheduler;
+
     // How a thread ends, each value stronger than the ones before it
     enum class Ending : uint8_t {
         none,
@@ -240,6 +244,7 @@ private:
     std::optional<uint32_t> run_guest(std::unique_lock<std::mutex> &lock, bool from_kernel_call);
     // Ends the thread's run and returns whether it parks dormant for another start
     bool finish_run(std::unique_lock<std::mutex> &lock);
+    void wait_for_silent_hill_intro();
     // Calls the guest's data abort handler with the abort context on the stack, without mutex held
     void dispatch_abort(Address fault_addr);
 
@@ -266,6 +271,7 @@ private:
     // Priority and affinity
     int priority;
     SceInt32 affinity_mask;
+    Scheduler::Node sched;
 
     // Waits
     // What the thread waits on while waiting, empty otherwise
@@ -304,4 +310,19 @@ private:
     // Threads blocked in sceKernelWaitThreadEnd on this one, with their own lock, taken after mutex
     std::mutex end_waiters_mutex;
     WaitQueue<EndWaitEntry> end_waiters;
+};
+class ThreadHostWait {
+public:
+    explicit ThreadHostWait(ThreadStatePtr thread)
+        : thread_(std::move(thread)) {
+        if (thread_)
+            wait_.emplace(*thread_);
+    }
+
+    ThreadHostWait(const ThreadHostWait &) = delete;
+    ThreadHostWait &operator=(const ThreadHostWait &) = delete;
+
+private:
+    ThreadStatePtr thread_;
+    std::optional<ThreadState::HostWait> wait_;
 };

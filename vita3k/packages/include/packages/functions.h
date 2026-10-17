@@ -26,3 +26,8 @@
 #include <util/fs.h>
 
 std::string install_pup(const fs::path &vita_fs_path, const fs::path &pup_path, const std::function<void(uint32_t)> &progress_callback = nullptr);
+
+enum class AppmetaInstallType { Application,
+    Patch };
+
+bool create_experimental_appmeta(const fs::path &vita_fs_path, const std::string &title_id, AppmetaInstallType type = AppmetaInstallType::Application);

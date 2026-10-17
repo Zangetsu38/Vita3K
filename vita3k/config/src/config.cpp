@@ -417,6 +417,8 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
     auto config = app.add_option_group("Configuration", "Modify Vita3K's config.yml file");
     config->add_flag("--archive-log,-A", command_line.archive_log, "Make a duplicate of the log file with TITLE_ID and Game ID as title")
         ->group("Logging");
+    config->add_flag("--experimental-appmeta", command_line.experimental_appmeta, "Experimentally create or update unencrypted appmeta for the Vita shell when installing an application or patch")
+        ->group("Vita Emulation");
     config->add_option("--backend-renderer,-B", command_line.backend_renderer, "Renderer backend to use")
         ->ignore_case()->check(CLI::IsMember(std::set<std::string>{ "OpenGL", "Vulkan" }))->group("Vita Emulation");
     config->add_flag("--color-surface-debug,-C", command_line.color_surface_debug, "Save color surfaces")
@@ -475,6 +477,7 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
     if (command_line.pkg_path.has_value() && command_line.pkg_zrif.has_value()) {
         cfg.pkg_path = std::move(command_line.pkg_path);
         cfg.pkg_zrif = std::move(command_line.pkg_zrif);
+        cfg.experimental_appmeta = cfg.experimental_appmeta || command_line.experimental_appmeta;
         return QuitRequested;
     }
     if (command_line.load_config || command_line.config_path != root_paths.get_config_path()) {

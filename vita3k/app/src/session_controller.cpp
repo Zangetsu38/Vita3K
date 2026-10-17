@@ -30,6 +30,8 @@
 #include <overlay/display_manager.h>
 #include <renderer/functions.h>
 #include <util/log.h>
+#include <v3kn/friend.h>
+#include <v3kn/state.h>
 
 namespace app {
 
@@ -79,6 +81,9 @@ bool AppSessionController::begin_launch(const AppLaunchRequest &launch_request, 
         emuenv.renderer->paused.store(false, std::memory_order_relaxed);
 
     active_launch_request = launch_request;
+    active_launch_request.app_path = emuenv.io.app_path;
+    if (active_launch_request.app_path == "vs0:vsh/shell" && active_launch_request.self_path.empty())
+        active_launch_request.self_path = "shell.self";
     renderer_initialized = false;
     runtime_initialized = false;
     active_pause_reasons.store(0, std::memory_order_release);
@@ -153,6 +158,7 @@ bool AppSessionController::load_and_run() {
     frame_host->get().finalize_render_thread_start();
 
     set_phase(AppSessionPhase::Running);
+    v3kn::set_friend_now_playing(emuenv.v3kn.friends_state, emuenv.io.title_id, emuenv.current_app_title);
     return true;
 }
 
@@ -234,6 +240,9 @@ void AppSessionController::stop(const AppSessionStopReason reason) {
     }
 
     const bool needs_renderer_cleanup = renderer_was_initialized || active_frame_host.has_value();
+
+    if (app_started)
+        v3kn::set_friend_now_playing(emuenv.v3kn.friends_state, {}, {});
 
     if (runtime_was_initialized) {
         if (app_started && reason != AppSessionStopReason::LaunchFailure)

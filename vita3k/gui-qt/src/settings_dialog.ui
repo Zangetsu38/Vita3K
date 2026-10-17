@@ -1778,6 +1778,13 @@ QGroupBox[flat=&quot;true&quot;]::title {
                     </widget>
                    </item>
                    <item>
+                    <widget class="QCheckBox" name="experimental_appmeta">
+                     <property name="text">
+                      <string>Create appmeta on install (experimental)</string>
+                     </property>
+                    </widget>
+                   </item>
+                   <item>
                     <widget class="QCheckBox" name="show_compile_shaders">
                      <property name="text">
                       <string>Show Shader Compilation Hint</string>

@@ -19,6 +19,28 @@
 
 #include <module/module.h>
 
+#include <limits>
+#include <string>
+
+inline std::string appmgr_mount_log_string(const MemState &mem, Ptr<const char> input, size_t limit = 256) {
+    if (!input)
+        return "<null>";
+
+    std::string result;
+    for (size_t i = 0; i < limit; ++i) {
+        if (i > std::numeric_limits<Address>::max() - input.address())
+            return result + "<invalid>";
+        const Ptr<const char> current(input.address() + static_cast<Address>(i));
+        if (!current.valid(mem))
+            return result + "<invalid>";
+        const unsigned char ch = *current.get(mem);
+        if (ch == 0)
+            return result;
+        result += ch >= 32 && ch < 127 ? static_cast<char>(ch) : '?';
+    }
+    return result + "<truncated>";
+}
+
 enum SceAppMgrErrorCode : uint32_t {
     SCE_APPMGR_ERROR_INVALID_PARAMETER = 0x80800001, //!< Invalid parameter (NULL)
     SCE_APPMGR_ERROR_INVALID_PARAMETER2 = 0x80801000, //!< Invalid parameter (wrong value)
@@ -63,6 +85,9 @@ typedef struct sceAppMgrAppParamGetStringOptParam {
 } sceAppMgrAppParamGetStringOptParam;
 
 DECL_EXPORT(SceInt32, __sceAppMgrGetAppState, SceAppMgrAppState *appState, SceUInt32 sizeofSceAppMgrAppState, SceUInt32 buildVersion);
+DECL_EXPORT(int, _sceAppMgrAppDataMountById, int mountId, Ptr<const char> id, Ptr<char> mountPoint);
+DECL_EXPORT(int, _sceAppMgrGameDataMount, Ptr<const char> source, Ptr<const char> patch, Ptr<const void> license, Ptr<char> mountPoint);
+DECL_EXPORT(int, _sceAppMgrUmount, Ptr<const char> mountPoint);
 DECL_EXPORT(SceInt32, _sceAppMgrAppParamGetString, int pid, int param, char *string, sceAppMgrAppParamGetStringOptParam *optParam);
 DECL_EXPORT(SceInt32, _sceAppMgrGetAppParam, char *param);
 DECL_EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[], const SceAppMgrLoadExecOptParam *optParam);
