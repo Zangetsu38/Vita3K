@@ -184,15 +184,32 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
 
     depthstencil.init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransientAttachment);
 
-    // transition images to their right state
-    vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.general_command_pool);
-    // color
-    color.transition_to_discard(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
-    // depth stencil
-    depthstencil.transition_to_discard(cmd_buffer, vkutil::ImageLayout::DepthStencilAttachment, vkutil::ds_subresource_range);
-    {
+    if (state.features.use_mask_bit) {
+        mask = vkutil::Image(depthstencil.width, depthstencil.height, vk::Format::eR8G8B8A8Unorm);
+        mask.init_image(vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferDst);
+
+        vk::FramebufferCreateInfo mask_info{
+            .renderPass = state.pipeline_cache.retrieve_mask_render_pass(),
+            .width = mask.width,
+            .height = mask.height,
+            .layers = 1
+        };
+        mask_info.setAttachments(mask.view);
+        mask_framebuffer = device.createFramebuffer(mask_info);
+    }
+
+    try {
+        // Presentation records from general_command_pool on another thread.
+        std::lock_guard<std::mutex> pool_lock(state.multithread_pool_mutex);
+        vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.multithread_command_pool);
+        color.transition_to_discard(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
+        depthstencil.transition_to_discard(cmd_buffer, vkutil::ImageLayout::DepthStencilAttachment, vkutil::ds_subresource_range);
+
         std::lock_guard<std::mutex> lock(state.queue_mutex);
-        vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+        vkutil::end_single_time_command(state.device, state.general_queue, state.multithread_command_pool, cmd_buffer);
+    } catch (const vk::DeviceLostError &) {
+        state.report_device_lost("render target initialization");
+        throw;
     }
 
     constexpr uint16_t SCE_GXM_MAX_SCENES_PER_RENDERTARGET = 8;
@@ -218,6 +235,7 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
 }
 
 VKRenderTarget::~VKRenderTarget() {
+    device.destroy(mask_framebuffer);
     for (auto &fence : fences)
         device.destroy(fence);
     fences.clear();
@@ -245,6 +263,8 @@ void destroy(VKState &state, std::unique_ptr<RenderTarget> &rt) {
     FrameObject &frame = state.frame();
     frame.destroy_queue.add_image(render_target.color);
     frame.destroy_queue.add_image(render_target.depthstencil);
+    frame.destroy_queue.add(render_target.mask_framebuffer);
+    frame.destroy_queue.add_image(render_target.mask);
 
     for (auto &fence : render_target.fences)
         frame.destroy_queue.add(fence);

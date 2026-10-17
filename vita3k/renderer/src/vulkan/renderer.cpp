@@ -359,6 +359,7 @@ VKState::VKState(int gpu_idx)
 
 bool VKState::init() {
     shader_version = fmt::format("v{}", shader::CURRENT_VERSION);
+    features.use_mask_bit = true;
     return true;
 }
 
@@ -628,7 +629,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         bool support_buffer_device_address = false;
         bool support_external_memory = false;
         bool support_shader_interlock = false;
-        const std::map<std::string_view, bool *> optional_extensions = {
+        bool support_image_view_usage = false;
+        std::map<std::string_view, bool *> optional_extensions = {
             { vk::KHRGetMemoryRequirements2ExtensionName, &temp_bool },
             // can be used by vma to improve performance
             { vk::KHRDedicatedAllocationExtensionName, &support_dedicated_allocations },
@@ -636,6 +638,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             { vk::EXTGlobalPriorityExtensionName, &support_global_priority },
             // can be used to specify which format will be used by mutable images
             { vk::KHRImageFormatListExtensionName, &surface_cache.support_image_format_specifier },
+            { vk::KHRMaintenance2ExtensionName, &support_image_view_usage },
             { vk::KHRExternalMemoryExtensionName, &temp_bool },
             { vk::KHRDeviceGroupExtensionName, &temp_bool },
             // can host memory directly be used for gxm memory
@@ -664,6 +667,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             { VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, &support_unix_fd_import },
 #endif
         };
+
+        if (config.validation_layer)
+            optional_extensions.emplace(vk::NVDeviceDiagnosticCheckpointsExtensionName, &support_gpu_checkpoints);
 
         for (const vk::ExtensionProperties &ext : physical_device.enumerateDeviceExtensionProperties()) {
             auto it = optional_extensions.find(ext.extensionName.data());
@@ -752,6 +758,10 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         }
 
         support_shader_interlock &= static_cast<bool>(physical_device_features.fragmentStoresAndAtomics);
+        if (support_shader_interlock && !support_image_view_usage) {
+            LOG_WARN("Disabling shader interlock: VK_KHR_maintenance2 is required for sRGB storage views");
+            support_shader_interlock = false;
+        }
         if (support_shader_interlock) {
             auto props = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>();
             support_shader_interlock = static_cast<bool>(props.get<vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>().fragmentShaderSampleInterlock);
@@ -810,6 +820,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             device = physical_device.createDevice(device_info.get());
         }
         VULKAN_HPP_DEFAULT_DISPATCHER.init(device);
+        device_lost_reported = false;
+        LOG_INFO("Vulkan GPU diagnostic checkpoints: {}", support_gpu_checkpoints ? "enabled (validation requested)" : "unavailable or disabled");
     }
 
     // Get Queues
@@ -925,7 +937,42 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
     support_fsr &= screen_renderer.surface_format.format == vk::Format::eR8G8B8A8Unorm;
     support_fsr &= static_cast<bool>(physical_device.getFormatProperties(screen_renderer.surface_format.format).optimalTilingFeatures & vk::FormatFeatureFlagBits::eStorageImage);
 
-    return true;
+    return init();
+}
+
+vk::Result VKState::wait_for_fences(vk::ArrayProxy<const vk::Fence> fences, uint64_t timeout) {
+    try {
+        return device.waitForFences(fences, vk::True, timeout);
+    } catch (const vk::DeviceLostError &) {
+        report_device_lost("waitForFences");
+        throw;
+    }
+}
+
+void VKState::report_device_lost(std::string_view operation) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    if (device_lost_reported)
+        return;
+    device_lost_reported = true;
+
+    LOG_CRITICAL_SYNC("Vulkan device lost during {}", operation);
+    if (!support_gpu_checkpoints) {
+        LOG_ERROR_SYNC("Vulkan GPU diagnostic checkpoints are unavailable or disabled");
+        return;
+    }
+
+    const auto report_queue = [](vk::Queue queue, std::string_view name) {
+        const auto checkpoints = queue.getCheckpointDataNV();
+        if (checkpoints.empty())
+            LOG_ERROR_SYNC("Vulkan GPU checkpoint: queue={}, no checkpoint data reported", name);
+        for (const auto &checkpoint : checkpoints) {
+            LOG_ERROR_SYNC("Vulkan GPU checkpoint: queue={}, stage={}, pipeline marker={}",
+                name, vk::to_string(checkpoint.stage), fmt::ptr(checkpoint.pCheckpointMarker));
+        }
+    };
+    report_queue(general_queue, "graphics");
+    if (transfer_queue != general_queue)
+        report_queue(transfer_queue, "transfer");
 }
 
 void VKState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
@@ -941,6 +988,9 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     features.support_shader_interlock = supports_shader_interlock && use_high_accuracy;
     features.direct_fragcolor = !features.support_shader_interlock;
     features.use_texture_viewport = support_standard_layout && !use_high_accuracy;
+
+    LOG_INFO("Vulkan rendering settings for {}: accuracy={}, shader interlock={}, texture viewport={}",
+        game_id, use_high_accuracy ? "High" : "Standard", features.support_shader_interlock, features.use_texture_viewport);
 
     // shader interlock is more accurate but slower
     if (features.support_shader_interlock) {
@@ -1518,7 +1568,13 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 
     case MappingMethod::DoubleBuffer: {
         vkutil::Buffer buffer(size + KiB(4));
-        buffer.init_buffer(mapped_memory_flags, vkutil::vma_mapped_alloc);
+        constexpr vma::AllocationCreateInfo double_buffer_alloc{
+            .flags = vma::AllocationCreateFlagBits::eHostAccessRandom | vma::AllocationCreateFlagBits::eMapped,
+            .usage = vma::MemoryUsage::eAutoPreferHost,
+            .requiredFlags = vk::MemoryPropertyFlagBits::eHostCoherent,
+            .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached
+        };
+        buffer.init_buffer(mapped_memory_flags, double_buffer_alloc);
 
         vk::BufferDeviceAddressInfoKHR address_info{
             .buffer = buffer.buffer

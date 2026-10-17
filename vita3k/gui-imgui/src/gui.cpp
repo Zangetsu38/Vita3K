@@ -798,6 +798,9 @@ void draw_vita_area(GuiState &gui, EmuEnvState &emuenv, app::AppSessionControlle
     if ((emuenv.cfg.show_info_bar || !gui.imgui_render || !gui.vita_area.home_screen) && gui.vita_area.information_bar)
         draw_information_bar(gui, emuenv);
 
+    if (!gui.vita_area.start_screen && (gui.vita_area.live_area_screen || gui.vita_area.home_screen))
+        draw_indicator(gui, emuenv);
+
     draw_popups(gui, emuenv);
 
     ImGui::PopFont();

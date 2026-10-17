@@ -95,7 +95,8 @@ static bool is_valid_output_path(const VitaIoDevice device) {
     return !(device == VitaIoDevice::savedata0 || device == VitaIoDevice::savedata1 || device == VitaIoDevice::app0
         || device == VitaIoDevice::_INVALID || device == VitaIoDevice::addcont0 || device == VitaIoDevice::tty0
         || device == VitaIoDevice::tty1 || device == VitaIoDevice::tty2 || device == VitaIoDevice::tty3
-        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0);
+        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0
+        || device == VitaIoDevice::memory);
 }
 
 bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, const fs::path &vita_fs_path, bool redirect_stdio) {
@@ -110,6 +111,9 @@ bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, con
     const fs::path vd0{ vita_fs_path / "vd0" };
 
     fs::create_directories(ux0 / "data");
+    // The memory: work directory is volatile across emulator sessions.
+    fs::remove_all(ux0 / "data" / "memory");
+    fs::create_directories(ux0 / "data" / "memory");
     fs::create_directories(ux0 / "app");
     fs::create_directories(ux0 / "music");
     fs::create_directories(ux0 / "picture");
@@ -252,6 +256,11 @@ std::string translate_path(const char *path, VitaIoDevice &device, const IOState
     }
     case VitaIoDevice::photo0: { // Redirect photo0: to ux0:picture
         relative_path = device::remove_device_from_path(relative_path, device, "picture");
+        device = VitaIoDevice::ux0;
+        break;
+    }
+    case VitaIoDevice::memory: { // Redirect memory: to ux0:data/memory
+        relative_path = device::remove_device_from_path(relative_path, device, "data/memory");
         device = VitaIoDevice::ux0;
         break;
     }
@@ -667,13 +676,19 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
+    auto new_device = device::get_device(new_name);
+    if (new_device == VitaIoDevice::_INVALID) {
+        LOG_ERROR("Cannot find device for path: {}", new_name);
+        return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
+    }
+
     const auto translated_old_path = translate_path(old_name, device, io.device_paths);
     if (translated_old_path.empty()) {
         LOG_ERROR("Cannot translate path: {}", translated_old_path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    const auto translated_new_path = translate_path(new_name, device, io.device_paths);
+    const auto translated_new_path = translate_path(new_name, new_device, io.device_paths);
     if (translated_new_path.empty()) {
         LOG_ERROR("Cannot translate path: {}", translated_new_path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
@@ -685,7 +700,7 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
 
-    const auto emulated_new_path = device::construct_emulated_path(device, translated_new_path, vita_fs_path, io.redirect_stdio);
+    const auto emulated_new_path = device::construct_emulated_path(new_device, translated_new_path, vita_fs_path, io.redirect_stdio);
 
     LOG_TRACE_IF(log_file_op, "{}: Renaming file {} to {} ({} to {})", export_name, old_name, new_name, emulated_old_path, emulated_new_path);
 

@@ -203,13 +203,16 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
 
             vk::SubmitInfo submit_info{};
             submit_info.setCommandBuffers(context->cmdbuffers_to_submit);
-            {
+            try {
                 std::lock_guard<std::mutex> lock(state.queue_mutex);
                 state.general_queue.submit(submit_info, current_fence);
+            } catch (const vk::DeviceLostError &) {
+                state.report_device_lost("texture upload queue submit");
+                throw;
             }
             context->cmdbuffers_to_submit.clear();
 
-            auto result = state.device.waitForFences(current_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+            auto result = state.wait_for_fences(current_fence, std::numeric_limits<uint64_t>::max());
             if (result != vk::Result::eSuccess) {
                 LOG_ERROR("Could not wait for fences.");
                 assert(false);
@@ -230,7 +233,7 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
             }
         } else {
             // wait for the fence, but don't reset it
-            auto result = state.device.waitForFences(staging_buffer->waiting_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
+            auto result = state.wait_for_fences(staging_buffer->waiting_fence, std::numeric_limits<uint64_t>::max());
             if (result != vk::Result::eSuccess) {
                 LOG_ERROR("Could not wait for fences.");
                 assert(false);

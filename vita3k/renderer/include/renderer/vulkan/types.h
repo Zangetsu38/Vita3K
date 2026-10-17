@@ -212,6 +212,9 @@ struct CallbackRequest {
 struct BufferSyncRequest {
     Address location;
     uint32_t size;
+    uint32_t row_stride = 0;
+    uint32_t row_bytes = 0;
+    uint32_t row_count = 0;
 };
 
 // A parallel thread is handling these request and telling other waiting threads
@@ -291,8 +294,11 @@ struct VKContext : public renderer::Context {
     SceGxmPrimitiveType last_primitive;
 
     vk::RenderPass current_render_pass;
+    vk::RenderPass initial_render_pass;
     vk::RenderPass current_shader_interlock_pass = nullptr;
     vk::Pipeline current_pipeline;
+    // Opaque address of a stable pipeline-cache entry; diagnostics never dereference it.
+    const void *current_pipeline_checkpoint = nullptr;
 
     vk::Framebuffer current_framebuffer;
     vk::Framebuffer current_shader_interlock_framebuffer = nullptr;
@@ -300,12 +306,16 @@ struct VKContext : public renderer::Context {
     vkutil::Image *current_color_base_image;
     vk::Format current_color_format;
     vk::ImageView current_color_view;
+    vk::ImageView current_color_storage_view;
     vk::ImageView current_ds_view;
 
     bool is_recording = false;
     bool in_renderpass = false;
+    bool in_maskupdate_pass = false;
     bool refresh_pipeline = false;
     bool is_first_scene_draw = false;
+    uint16_t initialized_macroblocks = 0;
+    std::optional<vk::Rect2D> rendered_area;
     // command buffer used to record the current scene
     vk::CommandBuffer render_cmd{};
     // command buffer used for commands that need to be executed before render_cmd (mostly because they can't be done during a render pass)
@@ -336,7 +346,7 @@ struct VKContext : public renderer::Context {
     ~VKContext() override;
 
     void start_recording(bool first_in_scene = false);
-    void start_render_pass(bool create_descriptor_set = true);
+    void start_render_pass(bool create_descriptor_set = true, bool maskupdate = false);
     void stop_render_pass();
     void stop_recording(const SceGxmNotification &notif1, const SceGxmNotification &notif2, bool submit = true);
 
@@ -353,6 +363,8 @@ struct VKRenderTarget : public renderer::RenderTarget {
     uint16_t height;
     vkutil::Image color;
     vkutil::Image depthstencil;
+    vkutil::Image mask;
+    vk::Framebuffer mask_framebuffer;
 
     uint64_t last_used_frame = 0;
 

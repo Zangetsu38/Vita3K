@@ -128,6 +128,8 @@ using VertexProgramOutputPropertiesMap = std::map<SceGxmVertexProgramOutputs, Ve
 // * Functions (implementation) *
 // ******************************
 
+static void discard_masked_fragments(spv::Builder &b, const TranslationState &translate_state);
+
 static spv::Id create_array_if_needed(spv::Builder &b, const spv::Id param_id, const Input &input, const uint32_t explicit_array_size = 0) {
     // disabled
     return param_id;
@@ -347,6 +349,8 @@ static spv::Id create_builtin_sampler(spv::Builder &b, const FeatureState &featu
 
     spv::Id image_type = b.makeImageType(sampled_type, spv::Dim2D, false, false, false, sampled, format);
     spv::Id sampler = b.createVariable(spv::NoPrecision, spv::StorageClassUniformConstant, image_type, name.c_str());
+    if (name == "f_mask")
+        b.addDecoration(sampler, spv::DecorationNonWritable);
 
     return sampler;
 }
@@ -690,6 +694,14 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
         } else {
             b.addDecoration(mask, spv::DecorationBinding, MASK_TEXTURE_SLOT_IMAGE);
         }
+    }
+
+    if (translation_state.is_vulkan && !translation_state.is_maskupdate) {
+        if (features.use_mask_bit)
+            discard_masked_fragments(b, translation_state);
+
+        if (program.is_frag_color_used() && features.should_use_shader_interlock())
+            b.createNoResultOp(spv::OpBeginInvocationInterlockEXT);
     }
 
     if (program.is_frag_color_used()) {
@@ -1441,6 +1453,49 @@ static void generate_shader_body(spv::Builder &b, const SpirvShaderParameters &p
     usse::convert_gxp_usse_to_spirv(b, program, features, parameters, utils, begin_hook_func, end_hook_func, texture_queries, render_info_id, spv_func_main, interfaces);
 }
 
+static void discard_masked_fragments(spv::Builder &b, const TranslationState &translate_state) {
+    spv::Id current_coord = translate_state.frag_coord_id;
+    spv::Id i32 = b.makeIntegerType(32, true);
+    spv::Id v2i32 = b.makeVectorType(i32, 2);
+    current_coord = b.createUnaryOp(spv::OpConvertFToS, b.makeVectorType(i32, 4), b.createLoad(current_coord, spv::NoPrecision));
+    current_coord = b.createOp(spv::OpVectorShuffle, v2i32, { { true, current_coord }, { true, current_coord }, { false, 0 }, { false, 1 } });
+
+    spv::Id sampled_type = b.makeFloatType(32);
+    spv::Id v4 = b.makeVectorType(sampled_type, 4);
+    spv::Id texel = b.createOp(spv::OpImageRead, v4, { b.createLoad(translate_state.mask_id, spv::NoPrecision), current_coord });
+    spv::Id rezero = b.makeFloatConstant(0.5f);
+    spv::Id zero = b.makeCompositeConstant(v4, { rezero, rezero, rezero, rezero });
+    spv::Id pred = b.createOp(spv::OpFOrdLessThan, b.makeVectorType(b.makeBoolType(), 4), { texel, zero });
+    spv::Id pred2 = b.createUnaryOp(spv::OpAll, b.makeBoolType(), pred);
+    spv::Builder::If cond_builder(pred2, spv::SelectionControlMaskNone, b);
+    b.makeStatementTerminator(spv::OpKill, "discard");
+    cond_builder.makeEndIf();
+}
+
+usse::SpirvCode create_mask_test_shader() {
+    spv::SpvBuildLogger logger;
+    spv::Builder b(spv::Spv_1_0, 0x1337 << 12, &logger);
+    b.setMemoryModel(spv::AddressingModelLogical, spv::MemoryModelGLSL450);
+    b.addCapability(spv::CapabilityShader);
+    spv::Function *entry = b.makeEntryPoint("main_fs");
+    b.addExecutionMode(entry, spv::ExecutionModeOriginUpperLeft);
+
+    TranslationState state;
+    state.frag_coord_id = b.createVariable(spv::NoPrecision, spv::StorageClassInput, b.makeVectorType(b.makeFloatType(32), 4), "gl_FragCoord");
+    b.addDecoration(state.frag_coord_id, spv::DecorationBuiltIn, spv::BuiltInFragCoord);
+    state.mask_id = create_builtin_sampler(b, FeatureState{}, state, "f_mask");
+    b.addDecoration(state.mask_id, spv::DecorationBinding, 1);
+    b.addDecoration(state.mask_id, spv::DecorationDescriptorSet, 1);
+    discard_masked_fragments(b, state);
+    b.makeReturn(false);
+    b.leaveFunction();
+    b.addEntryPoint(spv::ExecutionModelFragment, entry, "main_fs")->addIdOperand(state.frag_coord_id);
+
+    usse::SpirvCode code;
+    b.dump(code);
+    return code;
+}
+
 static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvShaderParameters &parameters,
     const SceGxmProgram &program, utils::SpirvUtilFunctions &utils, const FeatureState &features, TranslationState &translate_state) {
     std::vector<std::vector<spv::Decoration>> decorations;
@@ -1548,25 +1603,8 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
         }
     }
 
-    if (features.use_mask_bit) {
-        // Discard masked fragments
-        spv::Id current_coord = translate_state.frag_coord_id;
-        spv::Id i32 = b.makeIntegerType(32, true);
-        spv::Id v2i32 = b.makeVectorType(i32, 2);
-        current_coord = b.createUnaryOp(spv::OpConvertFToS, b.makeVectorType(i32, 4), b.createLoad(current_coord, spv::NoPrecision));
-        current_coord = b.createOp(spv::OpVectorShuffle, v2i32, { { true, current_coord }, { true, current_coord }, { false, 0 }, { false, 1 } });
-
-        spv::Id sampled_type = b.makeFloatType(32);
-        spv::Id v4 = b.makeVectorType(sampled_type, 4);
-        spv::Id texel = b.createOp(spv::OpImageRead, v4, { b.createLoad(translate_state.mask_id, spv::NoPrecision), current_coord });
-        spv::Id rezero = b.makeFloatConstant(0.5f);
-        spv::Id zero = b.makeCompositeConstant(v4, { rezero, rezero, rezero, rezero });
-        spv::Id pred = b.createOp(spv::OpFOrdLessThan, b.makeVectorType(b.makeBoolType(), 4), { texel, zero });
-        spv::Id pred2 = b.createUnaryOp(spv::OpAll, b.makeBoolType(), pred);
-        spv::Builder::If cond_builder(pred2, spv::SelectionControlMaskNone, b);
-        b.makeStatementTerminator(spv::OpKill, "discard");
-        cond_builder.makeEndIf();
-    }
+    if (features.use_mask_bit && !translate_state.is_vulkan)
+        discard_masked_fragments(b, translate_state);
 
     b.makeReturn(false);
     b.setBuildPoint(last_build_point);
@@ -1914,7 +1952,8 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
             b.addExtension("SPV_EXT_fragment_shader_interlock");
             b.addCapability(spv::CapabilityFragmentShaderSampleInterlockEXT);
 
-            b.createNoResultOp(spv::OpBeginInvocationInterlockEXT);
+            if (!translation_state.is_vulkan)
+                b.createNoResultOp(spv::OpBeginInvocationInterlockEXT);
         }
     }
 

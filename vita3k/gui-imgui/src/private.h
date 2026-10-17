@@ -77,6 +77,7 @@ void draw_welcome_dialog(GuiState &gui, EmuEnvState &emuenv);
 void draw_content_manager(GuiState &gui, EmuEnvState &emuenv);
 void draw_home_screen(GuiState &gui, EmuEnvState &emuenv, app::AppSessionController *session);
 void draw_information_bar(GuiState &gui, EmuEnvState &emuenv);
+void draw_indicator(GuiState &gui, EmuEnvState &emuenv);
 void draw_live_area_screen(GuiState &gui, EmuEnvState &emuenv, app::AppSessionController *session);
 void draw_manual(GuiState &gui, EmuEnvState &emuenv);
 void draw_online_storage(GuiState &gui, EmuEnvState &emuenv, app::AppSessionController *session);

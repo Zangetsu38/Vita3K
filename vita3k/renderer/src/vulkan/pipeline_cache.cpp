@@ -225,6 +225,10 @@ void PipelineCache::init(bool support_rasterized_order_access) {
 
     support_coherent_framebuffer_fetch = support_rasterized_order_access;
 
+    // Loose SPIR-V files can survive without the index that checks feature compatibility.
+    state.shader_version = fmt::format("vk{}-f{:08x}", shader::CURRENT_VERSION, state.get_features_mask());
+    LOG_INFO("Vulkan shader cache variant: {}", state.shader_version);
+
     const int nb_logical_threads = SDL_GetNumLogicalCPUCores();
     // took this from RPCS3 (slightly modified)
     if (nb_logical_threads > 12)
@@ -279,7 +283,7 @@ void PipelineCache::set_async_compilation(bool enable) {
 constexpr uint32_t pipeline_cache_magic = 0xBEEF4321;
 
 void PipelineCache::read_pipeline_cache() {
-    const std::string pipeline_cache_name = fmt::format("pipeline-cache-vk{}.dat", shader::CURRENT_VERSION);
+    const std::string pipeline_cache_name = fmt::format("pipeline-cache-{}.dat", state.shader_version);
     const fs::path path = state.shaders_path / pipeline_cache_name;
 
     fs::ifstream pipeline_cache_file(path, std::ios::in | std::ios::binary);
@@ -348,7 +352,7 @@ void PipelineCache::save_pipeline_cache() {
         // No pipeline was created
         return;
 
-    const std::string pipeline_cache_name = fmt::format("pipeline-cache-vk{}.dat", shader::CURRENT_VERSION);
+    const std::string pipeline_cache_name = fmt::format("pipeline-cache-{}.dat", state.shader_version);
     const fs::path path = state.shaders_path / pipeline_cache_name;
 
     fs::ofstream pipeline_cache_file(path, std::ios::out | std::ios::binary | std::ios::trunc);
@@ -387,6 +391,8 @@ void PipelineCache::cleanup() {
         for (auto &[hash, shader] : shaders)
             state.device.destroy(shader);
         shaders.clear();
+        state.device.destroy(mask_test_shader);
+        mask_test_shader = nullptr;
     }
 
     for (int i = 0; i < 2; i++)
@@ -400,6 +406,8 @@ void PipelineCache::cleanup() {
     for (auto &[fmt, pass] : shader_interlock_pass)
         state.device.destroy(pass);
     shader_interlock_pass.clear();
+    state.device.destroy(mask_render_pass);
+    mask_render_pass = nullptr;
 
     for (int i = 0; i < 17; i++)
         for (int j = 0; j < 17; j++) {
@@ -456,9 +464,6 @@ static const vk::SpecializationInfo srgb_info_false = {
 };
 
 vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb) {
-    if (maskupdate)
-        LOG_WARN_ONCE("Mask not implemented in the vulkan renderer!");
-
     const vk::ShaderModule shader_compiling = std::bit_cast<vk::ShaderModule>(~0ULL);
 
     const vk::SpecializationInfo *spec_info = nullptr;
@@ -504,9 +509,8 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     const std::string hash_text = hex_string(hash);
 
     LOG_INFO("Generating vulkan spv shader {}", hash_text);
-    const std::string shader_version = fmt::format("vk{}", shader::CURRENT_VERSION);
 
-    shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true);
+    shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, state.shader_version, true);
 
     vk::ShaderModuleCreateInfo shader_info{
         .codeSize = sizeof(uint32_t) * source.size(),
@@ -534,6 +538,44 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     };
 
     return shader_stage_info;
+}
+
+vk::RenderPass PipelineCache::retrieve_mask_render_pass() {
+    if (mask_render_pass)
+        return mask_render_pass;
+
+    const vk::AttachmentDescription attachment{
+        .format = vk::Format::eR8G8B8A8Unorm,
+        .samples = vk::SampleCountFlagBits::e1,
+        .loadOp = vk::AttachmentLoadOp::eLoad,
+        .storeOp = vk::AttachmentStoreOp::eStore,
+        .initialLayout = vk::ImageLayout::eGeneral,
+        .finalLayout = vk::ImageLayout::eGeneral
+    };
+    const vk::AttachmentReference color_ref{ 0, vk::ImageLayout::eGeneral };
+    vk::SubpassDescription subpass{
+        .pipelineBindPoint = vk::PipelineBindPoint::eGraphics
+    };
+    subpass.setColorAttachments(color_ref);
+
+    const std::array<vk::SubpassDependency, 2> dependencies{ { { .srcSubpass = VK_SUBPASS_EXTERNAL,
+                                                                   .dstSubpass = 0,
+                                                                   .srcStageMask = vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                                                   .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+                                                                   .srcAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eColorAttachmentWrite,
+                                                                   .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite },
+        { .srcSubpass = 0,
+            .dstSubpass = VK_SUBPASS_EXTERNAL,
+            .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput,
+            .dstStageMask = vk::PipelineStageFlagBits::eFragmentShader | vk::PipelineStageFlagBits::eColorAttachmentOutput,
+            .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite } } };
+    vk::RenderPassCreateInfo pass_info;
+    pass_info.setAttachments(attachment);
+    pass_info.setSubpasses(subpass);
+    pass_info.setDependencies(dependencies);
+    mask_render_pass = state.device.createRenderPass(pass_info);
+    return mask_render_pass;
 }
 
 vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force_load, bool force_store, bool is_color_transient, bool no_color) {
@@ -596,31 +638,32 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
     dependencies[0] = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
-        .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eLateFragmentTests,
-        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests,
+        .srcStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests,
+        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests,
         .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite,
-        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentRead
+        .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite
+            | vk::AccessFlagBits::eDepthStencilAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentWrite
     };
-
-    if (state.features.support_shader_interlock && no_color) {
-        // we must wait for the previous shaders to be done
-        dependencies[1].dstStageMask = vk::PipelineStageFlagBits::eFragmentShader;
-        dependencies[1].dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
-    }
 
     // if an attachment is sampled from, we want it to be done before the next render pass fragment shader
     dependencies[1] = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
         .srcStageMask = vk::PipelineStageFlagBits::eFragmentShader,
-        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eLateFragmentTests,
+        .dstStageMask = vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eEarlyFragmentTests | vk::PipelineStageFlagBits::eLateFragmentTests,
         .srcAccessMask = vk::AccessFlagBits::eShaderRead,
         .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite
     };
 
-    if (state.features.support_shader_interlock && !no_color) {
-        // we must wait for the shader interlock shader to be done
+    if (state.features.support_shader_interlock) {
+        // Interlock writes must precede both attachment access and subsequent interlock draws.
         dependencies[1].srcAccessMask |= vk::AccessFlagBits::eShaderWrite;
+        if (no_color) {
+            dependencies[0].dstStageMask |= vk::PipelineStageFlagBits::eFragmentShader;
+            dependencies[0].dstAccessMask |= vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+            dependencies[1].dstStageMask |= vk::PipelineStageFlagBits::eFragmentShader;
+            dependencies[1].dstAccessMask |= vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+        }
     }
 
     // self-dependency
@@ -815,7 +858,7 @@ static vk::StencilOpState convert_op_state(const GxmStencilStateOp &state) {
     };
 }
 
-vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const SceGxmVertexProgram &vertex_program_gxm, const SceGxmFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem) {
+vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const SceGxmVertexProgram &vertex_program_gxm, const SceGxmFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem) try {
     const VertexProgram &vertex_program = *vertex_program_gxm.renderer_data;
     const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
@@ -824,12 +867,42 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     // the vertex input state must be computed before shader are retrieved in case symbols are stripped
     const vk::PipelineVertexInputStateCreateInfo vertex_input = get_vertex_input_state(vertex_program_gxm, mem);
 
-    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program.get(mem), vertex_program.hash, true, fragment_program_gxm.is_maskupdate, mem, hints);
-    const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_gxm.is_maskupdate, mem, hints, record.is_gamma_corrected);
+    const bool maskupdate = fragment_program_gxm.is_maskupdate;
+    const bool is_fragment_disabled = !maskupdate && (record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect());
+    if (!maskupdate && !is_fragment_disabled) {
+        const uint32_t vertex_outputs = gxp::get_vertex_outputs(*vertex_program_gxm.program.get(mem));
+        const uint32_t fragment_inputs = gxp::get_fragment_inputs(*gxm_fragment_shader);
+        const uint32_t varying_mask = SCE_GXM_FRAGMENT_PROGRAM_INPUT_FOG | SCE_GXM_FRAGMENT_PROGRAM_INPUT_COLOR0
+            | SCE_GXM_FRAGMENT_PROGRAM_INPUT_COLOR1 | ((SCE_GXM_FRAGMENT_PROGRAM_INPUT_TEXCOORD9 << 1) - SCE_GXM_FRAGMENT_PROGRAM_INPUT_TEXCOORD0);
+        const uint32_t missing_outputs = fragment_inputs & varying_mask & ~vertex_outputs;
+        if (missing_outputs) {
+            LOG_ERROR("Vulkan shader interface mismatch: vertex {} does not provide varying mask {:#x} required by fragment {}",
+                hex_string(vertex_program.hash), missing_outputs, hex_string(fragment_program.hash));
+        }
+    }
+    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program.get(mem), vertex_program.hash, true, false, mem, hints);
+    vk::PipelineShaderStageCreateInfo fragment_shader;
+    if (is_fragment_disabled && state.features.use_mask_bit) {
+        const std::lock_guard<std::mutex> lock(shaders_mutex);
+        if (!mask_test_shader) {
+            const auto code = shader::create_mask_test_shader();
+            const vk::ShaderModuleCreateInfo shader_info{
+                .codeSize = code.size() * sizeof(uint32_t),
+                .pCode = code.data()
+            };
+            mask_test_shader = state.device.createShaderModule(shader_info);
+        }
+        fragment_shader = {
+            .stage = vk::ShaderStageFlagBits::eFragment,
+            .module = mask_test_shader,
+            .pName = "main_fs"
+        };
+    } else if (!is_fragment_disabled) {
+        fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, maskupdate, mem, hints, record.is_gamma_corrected);
+    }
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
-    // disable the fragment shader if gxm asks us to
-    const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
-    const uint32_t shader_stage_count = is_fragment_disabled ? 1U : 2U;
+    // Depth-only draws still need the mask test before depth/stencil updates.
+    const uint32_t shader_stage_count = is_fragment_disabled && !state.features.use_mask_bit ? 1U : 2U;
 
     const vk::PipelineInputAssemblyStateCreateInfo input_assembly{
         .topology = translate_primitive(type)
@@ -837,14 +910,14 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
 
     const bool two_sided = (record.two_sided == SCE_GXM_TWO_SIDED_ENABLED);
 
-    const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
+    const bool use_shader_interlock = !maskupdate && !is_fragment_disabled && state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
 
     const vk::PipelineRasterizationStateCreateInfo rasterizer{
         .polygonMode = translate_polygon_mode(record.front_polygon_mode),
         .cullMode = translate_cull_mode(record.cull_mode),
         // front face is always counter clockwise
         .frontFace = vk::FrontFace::eCounterClockwise,
-        .depthBiasEnable = VK_TRUE,
+        .depthBiasEnable = !maskupdate,
         .lineWidth = 1.0f
     };
     const vk::PipelineMultisampleStateCreateInfo multisampling{
@@ -853,21 +926,27 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     // depth and stencil tests are always enabled on the ps vita as there is almost no cost in doing so
     // on a tiled renderer
     const vk::PipelineDepthStencilStateCreateInfo ds_info{
-        .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
+        .depthTestEnable = !maskupdate,
+        .depthWriteEnable = !maskupdate && (record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED),
         .depthCompareOp = translate_depth_func(record.front_depth_func),
         .depthBoundsTestEnable = VK_FALSE,
-        .stencilTestEnable = VK_TRUE,
+        .stencilTestEnable = !maskupdate,
         .front = convert_op_state(record.front_stencil_state_op),
         .back = convert_op_state(two_sided ? record.back_stencil_state_op : record.front_stencil_state_op)
     };
 
     vk::PipelineColorBlendStateCreateInfo color_blending{};
-    if (support_coherent_framebuffer_fetch && gxm_fragment_shader->is_frag_color_used())
+    if (!maskupdate && !is_fragment_disabled && support_coherent_framebuffer_fetch && gxm_fragment_shader->is_frag_color_used())
         color_blending.flags = vk::PipelineColorBlendStateCreateFlagBits::eRasterizationOrderAttachmentAccessEXT;
 
     const bool frag_has_no_output = static_cast<bool>(gxm_fragment_shader->program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED);
-    if (is_fragment_disabled || frag_has_no_output || use_shader_interlock) {
+    if (maskupdate) {
+        static const vk::PipelineColorBlendAttachmentState blending{
+            .blendEnable = VK_FALSE,
+            .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
+        };
+        color_blending.setAttachments(blending);
+    } else if (is_fragment_disabled || frag_has_no_output || use_shader_interlock) {
         // The write mask must be empty as the lack of a fragment shader results in undefined values
         static const vk::PipelineColorBlendAttachmentState blending = {
             .blendEnable = VK_FALSE,
@@ -926,6 +1005,9 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
     }
 
     return result.value;
+} catch (const vk::DeviceLostError &) {
+    state.report_device_lost("graphics pipeline compilation");
+    throw;
 }
 
 vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem) {
@@ -953,6 +1035,7 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
 
     auto it = pipelines.find(key);
     if (it != pipelines.end()) {
+        context.current_pipeline_checkpoint = &it->second;
         if (it->second != nullptr) {
             if (it->second == pipeline_compiling)
                 // pipeline is still compiling
@@ -964,18 +1047,26 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     } else {
         // the pipeline hash was not in the cache;
         it = pipelines.insert({ key, pipeline_compiling }).first;
+        context.current_pipeline_checkpoint = &it->second;
     }
 
     // get the correct renderpass here
     const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
-    const bool use_shader_interlock = state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
-    const vk::RenderPass render_pass = use_shader_interlock ? context.current_shader_interlock_pass : context.current_render_pass;
+    const bool maskupdate = fragment_program_gxm.is_maskupdate;
+    const bool is_fragment_disabled = record.front_side_fragment_program_mode == SCE_GXM_FRAGMENT_PROGRAM_DISABLED || gxm_fragment_shader->has_no_effect();
+    const bool use_shader_interlock = !maskupdate && !is_fragment_disabled && state.features.support_shader_interlock && gxm_fragment_shader->is_frag_color_used();
+    const vk::RenderPass render_pass = maskupdate ? retrieve_mask_render_pass() : (use_shader_interlock ? context.current_shader_interlock_pass : context.current_render_pass);
+    if (state.support_gpu_checkpoints && !already_in_cache) {
+        LOG_INFO_SYNC("Vulkan GPU pipeline marker {}: vertex={}, fragment={}, maskupdate={}, interlock={}",
+            fmt::ptr(context.current_pipeline_checkpoint), hex_string(vertex_program_gxm.renderer_data->hash),
+            hex_string(fragment_program.hash), maskupdate, use_shader_interlock);
+    }
     // update the shader hints
     context.shader_hints.color_format = record.color_surface.colorFormat;
     context.shader_hints.attributes = &vertex_program_gxm.attributes;
 
     // note: the flag can_use_deferred_compilation is not considered here because it causes way too many false positives
-    const bool compile_pipeline_async = !already_in_cache && consider_for_async && use_async_compilation;
+    const bool compile_pipeline_async = !maskupdate && !already_in_cache && consider_for_async && use_async_compilation;
 
     if (compile_pipeline_async) {
         // create the pipeline compile request
@@ -1027,7 +1118,7 @@ vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool s
 
     Sha256Hash shader_hash;
     memcpy(shader_hash.data(), hash.data(), sizeof(Sha256Hash));
-    const std::string shader_file_name = fmt::format("vk{}-{}.spv", shader::CURRENT_VERSION, hex_string(shader_hash));
+    const std::string shader_file_name = fmt::format("{}-{}.spv", state.shader_version, hex_string(shader_hash));
     const std::vector<uint32_t> source = renderer::pre_load_shader_spirv(state.shaders_path / shader_file_name);
 
     if (source.empty())

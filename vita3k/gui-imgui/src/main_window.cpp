@@ -386,19 +386,8 @@ static bool pump_sdl_events(EmuEnvState &emuenv, GuiState &gui, app::AppSessionC
             ImGui_ImplSdl_ProcessEvent(gui.imgui_state.get(), &event);
         switch (event.type) {
         case SDL_EVENT_QUIT:
-            bgm_player::destroy_bgm_player();
-            if (!emuenv.io.app_path.empty())
-                app::update_app_time_used(emuenv, emuenv.io.app_path);
-            if (emuenv.audio.adapter)
-                emuenv.audio.switch_state(true);
-            // Wake guest threads blocked on GXM notifications/display work before
-            // waiting for process_exit() to delete them.
-            emuenv.gxm.display_queue.abort();
-            emuenv.display.abort = true;
-            emuenv.renderer->notification_ready.notify_all();
-            emuenv.kernel.process_exit();
-            if (emuenv.display.vblank_thread)
-                emuenv.display.vblank_thread->join();
+        case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+            // The caller stops the session after releasing render_mutex.
             gui.is_capturing_keys = false;
             return false;
 

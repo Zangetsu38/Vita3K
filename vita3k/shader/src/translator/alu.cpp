@@ -1914,6 +1914,9 @@ bool USSETranslatorVisitor::vdual(
             return spv::NoResult;
         }
 
+        if (m_b.getNumComponents(result) == 1)
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
+
         disasm_str += fmt::format("{} {}", disasm::opcode_str(code), disasm::operand_to_str(dest, write_mask_dest));
 
         for (Operand &op : ops)

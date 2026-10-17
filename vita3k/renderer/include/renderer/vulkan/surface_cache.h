@@ -34,6 +34,26 @@ struct VKState;
 struct Viewport;
 using CallbackRequestFunction = std::function<void()>;
 
+class SurfaceSyncWriteScope {
+    inline static thread_local bool active_ = false;
+    bool previous_;
+
+public:
+    SurfaceSyncWriteScope()
+        : previous_(active_) {
+        active_ = true;
+    }
+    ~SurfaceSyncWriteScope() {
+        active_ = previous_;
+    }
+    SurfaceSyncWriteScope(const SurfaceSyncWriteScope &) = delete;
+    SurfaceSyncWriteScope &operator=(const SurfaceSyncWriteScope &) = delete;
+
+    static bool active() {
+        return active_;
+    }
+};
+
 // used for in-shader texture viewport
 struct TextureViewport {
     std::pair<float, float> ratio = { 1.0f, 1.0f };
@@ -60,6 +80,7 @@ struct Framebuffer {
     vk::Framebuffer shader_interlock;
     // base color image used by the framebuffer
     vkutil::Image *base_image;
+    vk::ImageView storage_color_view;
 };
 
 struct CastedTexture {
@@ -109,6 +130,7 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // only for double buffer, do we need to sync the two views?
     bool need_buffer_sync = false;
+    vk::Rect2D sync_region;
 
     std::shared_ptr<bool> dirty = std::make_shared<bool>(false);
 
@@ -188,6 +210,8 @@ private:
 
     void destroy_surface(ColorSurfaceCacheInfo &info);
     void destroy_surface(DepthStencilSurfaceCacheInfo &info);
+    bool try_upload_guest_content(ColorSurfaceCacheInfo &info, MemState &mem);
+    vk::ImageView create_surface_view(vk::Image image, vk::Format format, vk::ComponentMapping mapping);
 
 public:
     // when creating a mutable image, can we pass as an argument

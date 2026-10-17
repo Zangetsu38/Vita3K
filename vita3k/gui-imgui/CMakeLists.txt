@@ -21,6 +21,7 @@ set(GUI_SOURCES
 	src/imgui_impl_sdl_gl3.cpp
 	src/imgui_impl_sdl_vulkan.cpp
 	src/imgui_impl_sdl.cpp
+	src/indicator.cpp
 	src/information_bar.cpp
 	src/initial_setup.cpp
 	src/license_install_dialog.cpp

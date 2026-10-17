@@ -326,24 +326,30 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
-    void *indices_ptr = indices.get(mem);
+    const SceGxmFragmentProgram &gxm_fragment_program = *context.record.fragment_program.get(mem);
 
+    void *indices_ptr = indices.get(mem);
     context.check_for_macroblock_change(true);
 
+    const bool maskupdate = gxm_fragment_program.is_maskupdate;
+    if (context.in_renderpass && context.in_maskupdate_pass != maskupdate)
+        context.stop_render_pass();
+
     if (!context.in_renderpass)
-        context.start_render_pass();
+        context.start_render_pass(true, maskupdate);
 
     // when we do multiple render pass for one scene (shader interlock or slow macroblock),
     // we need to always load the depth-stencil after the first draw
-    if (context.is_first_scene_draw && (context.state.features.support_shader_interlock || context.ignore_macroblock)) {
+    if (!maskupdate && context.is_first_scene_draw && (context.state.features.support_shader_interlock || context.state.features.use_mask_bit || context.ignore_macroblock)) {
         // update the render pass to load and store the depth and stencil
         context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, !context.record.color_surface.data);
         context.is_first_scene_draw = false;
     }
 
-    const SceGxmFragmentProgram &gxm_fragment_program = *context.record.fragment_program.get(mem);
     const SceGxmProgram &fragment_program_gxp = *gxm_fragment_program.program.get(mem);
-    if (context.state.features.direct_fragcolor && fragment_program_gxp.is_frag_color_used()) {
+    const bool uses_framebuffer_fetch = !maskupdate && fragment_program_gxp.is_frag_color_used()
+        && context.record.front_side_fragment_program_mode != SCE_GXM_FRAGMENT_PROGRAM_DISABLED && !fragment_program_gxp.has_no_effect();
+    if (context.state.features.direct_fragcolor && uses_framebuffer_fetch) {
         // the fragment shader is using programmable blending with a subpass input
         vk::ImageMemoryBarrier barrier{
             .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
@@ -357,12 +363,12 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         };
         context.render_cmd.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eFragmentShader,
             vk::DependencyFlagBits::eByRegion, {}, {}, barrier);
-    } else if (context.state.features.support_shader_interlock
-        && fragment_program_gxp.is_frag_color_used() != context.last_draw_was_framebuffer_fetch) {
+    } else if (!maskupdate && context.state.features.support_shader_interlock
+        && uses_framebuffer_fetch != context.last_draw_was_framebuffer_fetch) {
         // restart the render pass to act as a barrier
         context.render_cmd.endRenderPass();
 
-        if (fragment_program_gxp.is_frag_color_used()) {
+        if (uses_framebuffer_fetch) {
             context.curr_renderpass_info.framebuffer = context.current_shader_interlock_framebuffer;
             context.curr_renderpass_info.renderPass = context.current_shader_interlock_pass;
         } else {
@@ -371,10 +377,10 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         }
 
         context.render_cmd.beginRenderPass(context.curr_renderpass_info, vk::SubpassContents::eInline);
-        context.last_draw_was_framebuffer_fetch = fragment_program_gxp.is_frag_color_used();
+        context.last_draw_was_framebuffer_fetch = uses_framebuffer_fetch;
     }
 
-    if (context.current_visibility_buffer != nullptr && context.current_query_idx != -1 && !context.is_in_query) {
+    if (!maskupdate && context.current_visibility_buffer != nullptr && context.current_query_idx != -1 && !context.is_in_query) {
         if (context.current_visibility_buffer->queries_used[context.current_query_idx]) {
             LOG_WARN_ONCE("Visibility buffer entry is used more than once in a scene");
             // still let this happen, this is a validation error but I think most GPUs should be fine with it
@@ -502,7 +508,23 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // bind the vertex streams
     bind_vertex_streams(context, mem, instance_count, max_index);
 
+    if (context.state.support_gpu_checkpoints)
+        context.render_cmd.setCheckpointNV(context.current_pipeline_checkpoint);
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
+
+    if (!maskupdate && count && instance_count) {
+        const auto &area = context.curr_renderpass_info.renderArea;
+        if (!context.rendered_area) {
+            context.rendered_area = area;
+        } else {
+            const auto &previous = *context.rendered_area;
+            const int32_t x0 = std::min(previous.offset.x, area.offset.x);
+            const int32_t y0 = std::min(previous.offset.y, area.offset.y);
+            const int32_t x1 = std::max(previous.offset.x + static_cast<int32_t>(previous.extent.width), area.offset.x + static_cast<int32_t>(area.extent.width));
+            const int32_t y1 = std::max(previous.offset.y + static_cast<int32_t>(previous.extent.height), area.offset.y + static_cast<int32_t>(area.extent.height));
+            context.rendered_area = vk::Rect2D{ { x0, y0 }, { static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0) } };
+        }
+    }
 
     context.vertex_uniform_storage_allocated = false;
     context.fragment_uniform_storage_allocated = false;
