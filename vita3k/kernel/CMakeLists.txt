@@ -1,16 +1,20 @@
 set(SOURCE_LIST
 	include/kernel/state.h
+	include/kernel/codec_engine_block.h
 	include/kernel/types.h
+	include/kernel/scheduler.h
 	include/kernel/thread/wait_queue.h
 	include/kernel/thread/thread_state.h
 	include/kernel/thread/wait.h
 	include/kernel/sync_primitives.h
 	include/kernel/relocation.h
 	include/kernel/object_store.h
+	include/kernel/process_local_storage.h
 	include/kernel/debugger.h
 	include/kernel/load_self.h
 	include/kernel/callback.h
 	src/kernel.cpp
+	src/scheduler.cpp
 	src/thread.cpp
 	src/debugger.cpp
 	src/load_self.cpp

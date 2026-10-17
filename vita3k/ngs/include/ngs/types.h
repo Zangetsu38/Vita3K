@@ -43,6 +43,29 @@ struct SceNgsPatchSetupInfo {
     int32_t dest_input_index;
 };
 
+struct SceNgsVolumeMatrix {
+    SceFloat32 matrix[SCE_NGS_MAX_SYSTEM_CHANNELS][SCE_NGS_MAX_SYSTEM_CHANNELS];
+};
+
+struct SceNgsVoiceInfo {
+    SceUInt32 voice_state;
+    SceUInt32 num_modules;
+    SceUInt32 num_inputs;
+    SceUInt32 num_outputs;
+    SceUInt32 num_patches_per_output;
+    SceUInt32 update_passed;
+};
+
+enum SceNgsVoiceState : uint32_t {
+    SCE_NGS_VOICE_STATE_AVAILABLE = 0,
+    SCE_NGS_VOICE_STATE_ACTIVE = 1 << 0,
+    SCE_NGS_VOICE_STATE_FINALIZE = 1 << 2,
+    SCE_NGS_VOICE_STATE_UNLOADING = 1 << 3,
+    SCE_NGS_VOICE_STATE_PENDING = 1 << 4,
+    SCE_NGS_VOICE_STATE_PAUSED = 1 << 5,
+    SCE_NGS_VOICE_STATE_KEY_OFF = 1 << 6
+};
+
 struct SceNgsRackDescription {
     Ptr<ngs::VoiceDefinition> definition;
     int32_t voice_count;

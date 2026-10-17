@@ -17,22 +17,31 @@
 
 #include <module/module.h>
 
-EXPORT(int, sceRegMgrSrvCnvRegionInt) {
+#include <mem/ptr.h>
+#include <util/tracy.h>
+TRACY_MODULE_NAME(SceRegMgrService);
+
+EXPORT(int, sceRegMgrSrvCnvRegionInt, Ptr<const char> name) {
+    TRACY_FUNC(sceRegMgrSrvCnvRegionInt, name);
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceRegMgrSrvCnvRegionPsCode) {
+EXPORT(int, sceRegMgrSrvCnvRegionPsCode, SceInt32 region) {
+    TRACY_FUNC(sceRegMgrSrvCnvRegionPsCode, region);
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceRegMgrSrvCnvRegionStr) {
+EXPORT(int, sceRegMgrSrvCnvRegionStr, SceInt32 region, Ptr<char> buf, SceSize size) {
+    TRACY_FUNC(sceRegMgrSrvCnvRegionStr, region, buf.address(), size);
     return UNIMPLEMENTED();
 }
 
 EXPORT(int, sceRegMgrSrvGetRegion) {
+    TRACY_FUNC(sceRegMgrSrvGetRegion);
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceRegMgrSrvGetRegionStr) {
+EXPORT(int, sceRegMgrSrvGetRegionStr, Ptr<char> buf, SceSize size) {
+    TRACY_FUNC(sceRegMgrSrvGetRegionStr, buf.address(), size);
     return UNIMPLEMENTED();
 }

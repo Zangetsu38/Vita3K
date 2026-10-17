@@ -20,4 +20,8 @@
 #include <module/module.h>
 #include <np/state.h>
 
-DECL_EXPORT(int, sceNpManagerGetNpId, np::SceNpId *id);
+#include <string>
+
+DECL_EXPORT(int, sceNpManagerGetNpId, Ptr<np::SceNpId> id);
+
+int sce_np_manager_populate_np_id(const std::string &user_name, np::SceNpId &id);

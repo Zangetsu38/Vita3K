@@ -8,5 +8,8 @@ add_library(
 )
 
 target_include_directories(regmgr PUBLIC include)
-target_include_directories(regmgr PRIVATE)
-target_link_libraries(regmgr PUBLIC util)
+target_link_libraries(regmgr PRIVATE kernel)
+target_link_libraries(regmgr PUBLIC util mem)
+if(WIN32)
+	target_link_libraries(regmgr PRIVATE advapi32)
+endif()

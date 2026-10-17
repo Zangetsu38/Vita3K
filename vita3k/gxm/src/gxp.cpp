@@ -18,12 +18,78 @@
 #include <gxm/functions.h>
 
 #include <gxm/types.h>
+#include <mem/functions.h>
+#include <mem/ptr.h>
 #include <util/log.h>
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 namespace gxp {
+
+ParameterLookupResult get_guest_program_parameter(MemState &mem, Ptr<const SceGxmProgram> program, uint32_t index, Ptr<SceGxmProgramParameter> &result) {
+    result = nullptr;
+    SceGxmProgram header{};
+    if (!read_guest_memory(mem, program.address(), &header, sizeof(header)))
+        return ParameterLookupResult::invalid;
+    if (index >= header.parameter_count)
+        return ParameterLookupResult::out_of_range;
+
+    const uint64_t table_offset = uint64_t(offsetof(SceGxmProgram, parameters_offset)) + header.parameters_offset;
+    const uint64_t table_end = table_offset + uint64_t(header.parameter_count) * sizeof(SceGxmProgramParameter);
+    const uint64_t address = uint64_t(program.address()) + table_offset + uint64_t(index) * sizeof(SceGxmProgramParameter);
+    if (!header.parameters_offset || header.size < sizeof(header) || table_end > header.size || address > UINT32_MAX)
+        return ParameterLookupResult::invalid;
+    SceGxmProgramParameter parameter{};
+    if (!read_guest_memory(mem, static_cast<Address>(address), &parameter, sizeof(parameter)))
+        return ParameterLookupResult::invalid;
+    result = Ptr<SceGxmProgramParameter>(static_cast<Address>(address));
+    return ParameterLookupResult::found;
+}
+
+ParameterLookupResult find_guest_parameter_by_semantic(MemState &mem, Ptr<const SceGxmProgram> program,
+    SceGxmParameterSemantic semantic, uint32_t index, Ptr<SceGxmProgramParameter> &result) {
+    result = nullptr;
+    SceGxmProgram header{};
+    if (!program || !read_guest_memory(mem, program.address(), &header, sizeof(header)))
+        return ParameterLookupResult::invalid;
+    if (!header.parameter_count)
+        return ParameterLookupResult::out_of_range;
+
+    constexpr uint32_t max_program_size = 16 * 1024 * 1024;
+    const uint64_t table_offset = uint64_t(offsetof(SceGxmProgram, parameters_offset)) + header.parameters_offset;
+    const uint64_t table_size = uint64_t(header.parameter_count) * sizeof(SceGxmProgramParameter);
+    const uint64_t table_address = uint64_t(program.address()) + table_offset;
+    if (!header.parameters_offset || header.size < sizeof(header) || header.size > max_program_size || table_offset + table_size > header.size || table_address + table_size > (uint64_t{ 1 } << 32))
+        return ParameterLookupResult::invalid;
+
+    std::vector<SceGxmProgramParameter> parameters(header.parameter_count);
+    if (!read_guest_memory(mem, static_cast<Address>(table_address), parameters.data(), static_cast<uint32_t>(table_size)))
+        return ParameterLookupResult::invalid;
+    for (size_t i = 0; i < parameters.size(); ++i) {
+        if (parameters[i].semantic == semantic && parameters[i].semantic_index == index) {
+            result = Ptr<SceGxmProgramParameter>(static_cast<Address>(table_address + i * sizeof(SceGxmProgramParameter)));
+            return ParameterLookupResult::found;
+        }
+    }
+    return ParameterLookupResult::out_of_range;
+}
+
+bool get_guest_parameter_name(MemState &mem, Ptr<const SceGxmProgramParameter> parameter, Ptr<const char> &result) {
+    result = nullptr;
+    SceGxmProgramParameter copy{};
+    if (!parameter || !read_guest_memory(mem, parameter.address(), &copy, sizeof(copy)))
+        return false;
+    const int64_t address = int64_t(parameter.address()) + copy.name_offset;
+    if (address <= 0 || address > UINT32_MAX)
+        return false;
+    char first_char;
+    if (!read_guest_memory(mem, static_cast<Address>(address), &first_char, sizeof(first_char)))
+        return false;
+    result = Ptr<const char>(static_cast<Address>(address));
+    return true;
+}
 
 const static char *log_parameter_semantic(const SceGxmProgramParameter &parameter) {
     // clang-format off
@@ -101,6 +167,33 @@ int get_parameter_type_size(const SceGxmParameterType type) {
 int get_num_32_bit_components(const SceGxmParameterType type, const uint16_t num_comp) {
     const int param_size = get_parameter_type_size(type);
     return (num_comp + (4 / param_size - 1)) * param_size / 4;
+}
+
+bool has_attribute_symbols(const SceGxmProgram &program) {
+    const auto parameters = program.program_parameters();
+    return std::any_of(parameters, parameters + program.parameter_count, [](const SceGxmProgramParameter &parameter) {
+        return parameter.category == SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE;
+    });
+}
+
+bool is_attribute_used(const SceGxmProgram &program, const SceGxmProgramParameter &parameter) {
+    if (!program.is_vertex() || parameter.semantic == SCE_GXM_PARAMETER_SEMANTIC_INDEX || parameter.semantic == SCE_GXM_PARAMETER_SEMANTIC_INSTANCE)
+        return true;
+
+    // The metadata only describes the first 64 PA registers.
+    if (parameter.resource_index >= 64)
+        return true;
+
+    // Use symbol boundaries rather than assuming a packing/array stride for the PA range.
+    uint32_t end_register = 64;
+    const auto parameters = program.program_parameters();
+    for (uint32_t i = 0; i < program.parameter_count; ++i) {
+        const auto &next = parameters[i];
+        if (next.category == SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE && next.resource_index > parameter.resource_index)
+            end_register = std::min(end_register, next.resource_index);
+    }
+    const uint64_t mask = end_register == 64 ? ~uint64_t{ 0 } : (uint64_t{ 1 } << (end_register - parameter.resource_index)) - 1;
+    return ((program.vertex_varyings()->attrib_pa_regs >> parameter.resource_index) & mask) != 0;
 }
 
 GenericParameterType parameter_generic_type(const SceGxmProgramParameter &parameter) {

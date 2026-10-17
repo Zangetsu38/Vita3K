@@ -17,13 +17,22 @@
 
 #include <module/module.h>
 
+#include <cpu/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
 #include <util/log.h>
 #include <util/tracy.h>
+
+#include <cstring>
 
 #include <v3kprintf.h>
 
 TRACY_MODULE_NAME(SceSysclibForDriver);
+
+VAR_EXPORT(_stack_chk_guard) {
+    return make_stack_chk_guard(mem);
+}
 
 EXPORT(int, __aeabi_idiv, SceInt numerator, SceInt denominator) {
     TRACY_FUNC(__aeabi_idiv, numerator, denominator);
@@ -144,14 +153,22 @@ EXPORT(int, kmemcmp) {
 
 EXPORT(Ptr<void>, kmemcpy, Ptr<void> dst, Ptr<const void> src, SceSize size) {
     TRACY_FUNC(kmemcpy, dst, src, size);
-    if (dst.address() == src.address() || size == 0) {
-        return dst; // No operation needed
+    if (dst.address() == src.address() || size == 0)
+        return dst;
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        LOG_ERROR("kmemcpy: unknown thread {}", thread_id);
+        return {};
     }
-    auto res = memcpy(dst.get(emuenv.mem), src.get(emuenv.mem), size);
-    if (res == nullptr) {
-        return {}; // Error occurred
+    MemState &mem = thread->cpu->mem;
+    if (emuenv.kernel.is_primary_address_space(mem))
+        std::memcpy(dst.get(mem), src.get(mem), size);
+    else if (!copy_guest_memory(mem, dst.address(), src.address(), size)) {
+        LOG_ERROR("kmemcpy: invalid or overlapping secondary memory ranges");
+        thread->exit(static_cast<SceInt32>(SCE_KERNEL_ERROR_ILLEGAL_ADDR));
+        return {};
     }
-    return dst; // Success
+    return dst;
 }
 
 EXPORT(int, kmemmove) {
@@ -160,7 +177,21 @@ EXPORT(int, kmemmove) {
 
 EXPORT(Ptr<void>, kmemset, Ptr<void> dst, int val, SceSize size) {
     TRACY_FUNC(kmemset, dst, val, size);
-    memset(dst.get(emuenv.mem), val, size);
+    if (!size)
+        return dst;
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        LOG_ERROR("kmemset: unknown thread {}", thread_id);
+        return {};
+    }
+    MemState &mem = thread->cpu->mem;
+    if (emuenv.kernel.is_primary_address_space(mem))
+        std::memset(dst.get(mem), val, size);
+    else if (!fill_guest_memory(mem, dst.address(), static_cast<uint8_t>(val), size)) {
+        LOG_ERROR("kmemset: invalid secondary memory range at {} of size {}", log_hex(dst.address()), log_hex(size));
+        thread->exit(static_cast<SceInt32>(SCE_KERNEL_ERROR_ILLEGAL_ADDR));
+        return {};
+    }
     return dst;
 }
 
@@ -173,7 +204,7 @@ EXPORT(int, ksnprintf, char *s, size_t n, const char *format, module::vargs args
     TRACY_FUNC(ksnprintf, s, n, format);
 
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
-    return utils::snprintf(s, n, format, *(thread->cpu), emuenv.mem, args);
+    return utils::snprintf(s, n, format, *(thread->cpu), thread->cpu->mem, args);
 }
 
 EXPORT(int, kstrchr) {

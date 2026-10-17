@@ -204,3 +204,13 @@ EXPORT(int, sceMtpSuspend) {
 EXPORT(int, sceMtpTerminateExecution) {
     return UNIMPLEMENTED();
 }
+
+EXPORT(int, SceLibMtp_39CEBDD1) {
+    LOG_INFO("SceLibMtp_39CEBDD1 called; signature unknown");
+    return UNIMPLEMENTED();
+}
+
+EXPORT(int, SceLibMtp_E7CB0238) {
+    LOG_INFO("SceLibMtp_E7CB0238 called; signature unknown");
+    return UNIMPLEMENTED();
+}

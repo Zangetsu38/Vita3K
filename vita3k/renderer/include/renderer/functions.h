@@ -37,6 +37,22 @@ struct State;
 struct VertexProgram;
 struct YUVConversionCache;
 
+struct PrecomputedDrawSnapshot {
+    SceGxmPrecomputedDraw draw{};
+    SceGxmPrecomputedVertexState vertex{};
+    SceGxmPrecomputedFragmentState fragment{};
+    bool has_vertex = false;
+    bool has_fragment = false;
+    std::array<StreamData, SCE_GXM_MAX_VERTEX_STREAMS> streams{};
+    std::array<TextureData, SCE_GXM_MAX_TEXTURE_UNITS> vertex_textures{};
+    std::array<TextureData, SCE_GXM_MAX_TEXTURE_UNITS> fragment_textures{};
+    UniformBuffers vertex_buffers{};
+    UniformBuffers fragment_buffers{};
+};
+
+bool read_precomputed_draw(MemState &mem, Address draw, Address vertex, Address fragment, PrecomputedDrawSnapshot &snapshot);
+bool read_precomputed_max_index(MemState &mem, Ptr<const void> indices, SceGxmIndexFormat format, uint32_t count, uint32_t &maximum);
+
 bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProgram &program, const SceGxmBlendInfo *blend, GXPPtrMap &gxp_ptr_map);
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes);
 void create(SceGxmSyncObject *sync, State &state);
@@ -95,12 +111,12 @@ void set_visibility_index(State &state, Context *ctx, bool enable, uint32_t inde
 void set_context(State &state, Context *ctx, RenderTarget *target, SceGxmColorSurface *color_surface, SceGxmDepthStencilSurface *depth_stencil_surface);
 void set_vertex_stream(State &state, Context *ctx, const std::size_t index, const std::size_t data_len, const Ptr<const void> stream);
 void draw(State &state, Context *ctx, SceGxmPrimitiveType prim_type, SceGxmIndexFormat index_type, Ptr<const void> index_data, const std::uint32_t index_count, const std::uint32_t instance_count);
-void transfer_copy(State &state, uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode, const SceGxmTransferImage *images, SceGxmTransferType srcType, SceGxmTransferType destType);
-void transfer_downscale(State &state, const SceGxmTransferImage *src, const SceGxmTransferImage *dest);
-void transfer_fill(State &state, uint32_t fillColor, const SceGxmTransferImage *dest);
+void transfer_copy(State &state, MemState &mem, uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode, const SceGxmTransferImage *images, SceGxmTransferType srcType, SceGxmTransferType destType);
+void transfer_downscale(State &state, MemState &mem, const SceGxmTransferImage *src, const SceGxmTransferImage *dest);
+void transfer_fill(State &state, MemState &mem, uint32_t fillColor, const SceGxmTransferImage *dest);
 void sync_surface_data(State &state, Context *ctx, const SceGxmNotification vertex_notification, const SceGxmNotification fragment_notification);
 
-bool create_context(State &state, std::unique_ptr<Context> &context);
+bool create_context(State &state, std::unique_ptr<Context> &context, MemState &mem, bool select_context);
 void destroy_context(State &state, std::unique_ptr<Context> &context);
 void destroy_context_during_shutdown(State &state, std::unique_ptr<Context> &context);
 bool create_render_target(State &state, std::unique_ptr<RenderTarget> &rt, const SceGxmRenderTargetParams *params);
@@ -159,6 +175,26 @@ int send_single_command(State &state, Context *ctx, const CommandOpcode opcode, 
         return wait_for_status(state, &status, CommandErrorCodePending, false);
     else
         return 0;
+}
+
+template <typename... Args>
+int send_single_command(State &state, MemState &address_space, Context *ctx, const CommandOpcode opcode, bool wait, Args... arguments) {
+    int status = CommandErrorCodePending;
+    auto cmd = make_command(ctx ? ctx->alloc_func : generic_command_allocate, ctx ? ctx->free_func : generic_command_free,
+        opcode, wait ? &status : nullptr, arguments...);
+
+    if (!cmd)
+        return CommandErrorArgumentsTooLarge;
+
+    CommandList list;
+    list.first = cmd;
+    list.last = cmd;
+    list.address_space = &address_space;
+
+    submit_command_list(state, ctx, list);
+    if (wait)
+        return wait_for_status(state, &status, CommandErrorCodePending, false);
+    return 0;
 }
 
 struct VulkanDeviceInfo {

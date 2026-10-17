@@ -74,6 +74,15 @@ public:
     }
 
     template <typename T>
+    std::shared_ptr<T> get_or_create() {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto &object = objs[TypeInfo::registered<T>::index];
+        if (!object)
+            object = std::make_shared<T>();
+        return std::static_pointer_cast<T>(object);
+    }
+
+    template <typename T>
     void erase() {
         auto it = objs.find(TypeInfo::registered<T>::index);
         if (it == objs.end())

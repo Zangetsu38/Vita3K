@@ -17,11 +17,18 @@
 
 #include <module/module.h>
 
+#include "../SceAppMgr/SceAppMgr.h"
+
+#include <io/state.h>
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
 #include <np/functions.h>
 #include <np/state.h>
 #include <np/trophy/context.h>
 #include <rtc/rtc.h>
 #include <util/log.h>
+#include <v3kn/activity.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceNpTrophy);
@@ -143,22 +150,63 @@ EXPORT(int, sceNpTrophyAbortHandle) {
     return 0;
 }
 
-EXPORT(int, sceNpTrophyCreateContext, np::trophy::ContextHandle *context, const np::CommunicationID *comm_id,
-    void *comm_sign, const uint64_t options) {
+EXPORT(int, sceNpTrophyCreateContext, Ptr<np::trophy::ContextHandle> context, Ptr<const np::CommunicationID> comm_id,
+    Ptr<void> comm_sign, const uint64_t options) {
     TRACY_FUNC(sceNpTrophyCreateContext, context, comm_id, comm_sign, options);
-    if (!emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    MemState &mem = process->thread->cpu->mem;
+    NpTrophyState *state = find_process_trophy_state(emuenv, mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    std::unique_lock lock(state->access_mutex, std::defer_lock);
+    {
+        ThreadHostWait wait(process->thread);
+        lock.lock();
+    }
+    if (!state->inited) {
         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
     }
 
-    if (comm_id && comm_id->num > 99) {
+    if (!context)
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    np::CommunicationID selected{};
+    if (comm_id) {
+        if (!read_guest_memory(mem, comm_id.address(), &selected, sizeof(selected)))
+            return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    } else if (emuenv.kernel.is_primary_address_space(mem)) {
+        selected = emuenv.np.comm_id;
+    } else {
+        LOG_ERROR("{}: secondary process supplied no trophy communication ID", export_name);
+        return SCE_NP_TROPHY_ERROR_INVALID_NPCOMMID;
+    }
+    if (selected.num > 99) {
         return SCE_NP_TROPHY_ERROR_INVALID_NPCOMMID;
     }
 
+    const GuestMemoryRange output{ context.address(), sizeof(np::trophy::ContextHandle) };
+    const uint64_t pin = pin_guest_memory(mem, std::span(&output, 1));
+    if (!pin)
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    const np::trophy::ContextHandle invalid = np::trophy::INVALID_CONTEXT_HANDLE;
+    if (!write_guest_memory(mem, context.address(), &invalid, sizeof(invalid))) {
+        unpin_guest_memory(mem, pin);
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    }
     np::NpTrophyError err = np::NpTrophyError::TROPHY_ERROR_NONE;
-    *context = create_trophy_context(emuenv.np, &emuenv.io, emuenv.vita_fs_path, comm_id, static_cast<uint32_t>(emuenv.cfg.sys_lang),
-        &err);
+    const auto result = create_trophy_context(*state, process->io, emuenv.vita_fs_path, selected, static_cast<uint32_t>(emuenv.cfg.sys_lang), &err);
+    const bool output_written = write_guest_memory(mem, context.address(), &result, sizeof(result));
+    unpin_guest_memory(mem, pin);
+    if (!output_written) {
+        if (result != np::trophy::INVALID_CONTEXT_HANDLE)
+            destroy_trophy_context(*state, result);
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    }
 
-    if (*context == np::trophy::INVALID_CONTEXT_HANDLE) {
+    if (result == np::trophy::INVALID_CONTEXT_HANDLE) {
         switch (err) {
         case np::NpTrophyError::TROPHY_CONTEXT_EXIST: {
             return SCE_NP_TROPHY_ERROR_CONTEXT_ALREADY_EXISTS;
@@ -167,13 +215,16 @@ EXPORT(int, sceNpTrophyCreateContext, np::trophy::ContextHandle *context, const 
         case np::NpTrophyError::TROPHY_CONTEXT_FILE_NON_EXIST: {
             return SCE_NP_TROPHY_ERROR_TRP_FILE_NOT_FOUND;
         }
+        case np::NpTrophyError::TROPHY_INVALID_TRP: {
+            return SCE_NP_TROPHY_ERROR_INVALID_TRP_FILE_FORMAT;
+        }
 
         default:
-            break;
+            return SCE_NP_TROPHY_ERROR_ABORT;
         }
     }
 
-    np::trophy::Context *ctx_ptr = get_trophy_context(emuenv.np.trophy_state, *context);
+    np::trophy::Context *ctx_ptr = get_trophy_context(*state, result);
     LOG_TRACE("Trophy context for {}_{:0>2d} create successfuly!", std::string(ctx_ptr->comm_id.data, 9), ctx_ptr->comm_id.num);
 
     return 0;
@@ -190,7 +241,16 @@ EXPORT(int, sceNpTrophyCreateHandle, SceNpTrophyHandle *handle) {
 
 EXPORT(int, sceNpTrophyDestroyContext, np::trophy::ContextHandle handle) {
     TRACY_FUNC(sceNpTrophyDestroyContext, handle);
-    const bool result = destroy_trophy_context(emuenv.np.trophy_state, handle);
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    const std::lock_guard lock(state->access_mutex);
+    const bool result = destroy_trophy_context(*state, handle);
 
     if (!result) {
         return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
@@ -205,16 +265,25 @@ EXPORT(int, sceNpTrophyDestroyHandle, SceNpTrophyHandle handle) {
     return 0;
 }
 
-#define NP_TROPHY_GET_FUNCTION_STARTUP(context_handle)                                         \
-    if (!emuenv.np.trophy_state.inited) {                                                      \
-        return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;                                            \
-    }                                                                                          \
-    if (!size) {                                                                               \
-        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;                                           \
-    }                                                                                          \
-    np::trophy::Context *context = get_trophy_context(emuenv.np.trophy_state, context_handle); \
-    if (!context) {                                                                            \
-        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;                                            \
+#define NP_TROPHY_GET_FUNCTION_STARTUP(context_handle)                           \
+    const auto process = get_process_io_context(emuenv, thread_id, export_name); \
+    if (!process)                                                                \
+        return SCE_NP_TROPHY_ERROR_ABORT;                                        \
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);  \
+    if (!state) {                                                                \
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);  \
+        return SCE_NP_TROPHY_ERROR_ABORT;                                        \
+    }                                                                            \
+    const std::lock_guard lock(state->access_mutex);                             \
+    if (!state->inited) {                                                        \
+        return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;                              \
+    }                                                                            \
+    if (!size) {                                                                 \
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;                             \
+    }                                                                            \
+    np::trophy::Context *context = get_trophy_context(*state, context_handle);   \
+    if (!context) {                                                              \
+        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;                              \
     }
 
 EXPORT(int, sceNpTrophyGetGameIcon, np::trophy::ContextHandle context_handle, SceNpTrophyHandle api_handle,
@@ -226,7 +295,16 @@ EXPORT(int, sceNpTrophyGetGameIcon, np::trophy::ContextHandle context_handle, Sc
 
 EXPORT(int, sceNpTrophyGetGameInfo, np::trophy::ContextHandle context_handle, SceNpTrophyHandle api_handle, SceNpTrophyGameDetails *details, SceNpTrophyGameData *data) {
     TRACY_FUNC(sceNpTrophyGetGameInfo, context_handle, api_handle, details, data);
-    if (!emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    const std::lock_guard lock(state->access_mutex);
+    if (!state->inited) {
         return RET_ERROR(SCE_NP_TROPHY_ERROR_NOT_INITIALIZED);
     }
 
@@ -238,7 +316,7 @@ EXPORT(int, sceNpTrophyGetGameInfo, np::trophy::ContextHandle context_handle, Sc
         return RET_ERROR(SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT);
     }
 
-    np::trophy::Context *context = get_trophy_context(emuenv.np.trophy_state, context_handle);
+    np::trophy::Context *context = get_trophy_context(*state, context_handle);
     if (!context) {
         return RET_ERROR(SCE_NP_TROPHY_ERROR_INVALID_CONTEXT);
     }
@@ -312,7 +390,16 @@ EXPORT(int, sceNpTrophyGetGroupIcon) {
 EXPORT(int, sceNpTrophyGetGroupInfo, np::trophy::ContextHandle context_handle, SceNpTrophyHandle api_handle, SceNpTrophyGroupId group_id, SceNpTrophyGroupDetails *details, SceNpTrophyGroupData *data) {
     TRACY_FUNC(sceNpTrophyGetGroupInfo, context_handle, api_handle, group_id, details, data);
     STUBBED("More then one default trophies group is not supported");
-    if (!emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    const std::lock_guard lock(state->access_mutex);
+    if (!state->inited) {
         return RET_ERROR(SCE_NP_TROPHY_ERROR_NOT_INITIALIZED);
     }
 
@@ -325,7 +412,7 @@ EXPORT(int, sceNpTrophyGetGroupInfo, np::trophy::ContextHandle context_handle, S
         return RET_ERROR(SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT);
     }
 
-    np::trophy::Context *context = get_trophy_context(emuenv.np.trophy_state, context_handle);
+    np::trophy::Context *context = get_trophy_context(*state, context_handle);
     if (!context) {
         return RET_ERROR(SCE_NP_TROPHY_ERROR_INVALID_CONTEXT);
     }
@@ -411,7 +498,16 @@ EXPORT(int, sceNpTrophyGetTrophyIcon, np::trophy::ContextHandle context_handle, 
 
 EXPORT(int, sceNpTrophyGetTrophyInfo, np::trophy::ContextHandle context_handle, SceNpTrophyHandle api_handle, SceNpTrophyID trophy_id, SceNpTrophyDetails *details, SceNpTrophyData *data) {
     TRACY_FUNC(sceNpTrophyGetTrophyInfo, context_handle, api_handle, trophy_id, details, data);
-    if (!emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    const std::lock_guard lock(state->access_mutex);
+    if (!state->inited) {
         return RET_ERROR(SCE_NP_TROPHY_ERROR_NOT_INITIALIZED);
     }
 
@@ -424,7 +520,7 @@ EXPORT(int, sceNpTrophyGetTrophyInfo, np::trophy::ContextHandle context_handle, 
         return RET_ERROR(SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT);
     }
 
-    np::trophy::Context *context = get_trophy_context(emuenv.np.trophy_state, context_handle);
+    np::trophy::Context *context = get_trophy_context(*state, context_handle);
     if (!context) {
         return RET_ERROR(SCE_NP_TROPHY_ERROR_INVALID_CONTEXT);
     }
@@ -463,7 +559,16 @@ EXPORT(int, sceNpTrophyGetTrophyInfo, np::trophy::ContextHandle context_handle, 
 EXPORT(int, sceNpTrophyGetTrophyUnlockState, np::trophy::ContextHandle context_handle, SceNpTrophyHandle api_handle,
     np::trophy::TrophyFlagArray *flag_array, uint32_t *count) {
     TRACY_FUNC(sceNpTrophyGetTrophyUnlockState, context_handle, api_handle, flag_array, count);
-    if (!emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    const std::lock_guard lock(state->access_mutex);
+    if (!state->inited) {
         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
     }
 
@@ -472,7 +577,7 @@ EXPORT(int, sceNpTrophyGetTrophyUnlockState, np::trophy::ContextHandle context_h
     }
 
     // Get context
-    np::trophy::Context *context = get_trophy_context(emuenv.np.trophy_state, context_handle);
+    np::trophy::Context *context = get_trophy_context(*state, context_handle);
     if (!context) {
         return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
     }
@@ -485,11 +590,20 @@ EXPORT(int, sceNpTrophyGetTrophyUnlockState, np::trophy::ContextHandle context_h
 
 EXPORT(int, sceNpTrophyInit, void *opt) {
     TRACY_FUNC(sceNpTrophyInit, opt);
-    if (emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    const std::lock_guard lock(state->access_mutex);
+    if (state->inited) {
         return SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED;
     }
 
-    if (!init(emuenv.np.trophy_state)) {
+    if (!init(*state)) {
         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
     }
 
@@ -498,20 +612,28 @@ EXPORT(int, sceNpTrophyInit, void *opt) {
 
 EXPORT(int, sceNpTrophyTerm) {
     TRACY_FUNC(sceNpTrophyTerm);
-    if (!emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    const std::lock_guard lock(state->access_mutex);
+    if (!state->inited) {
         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
     }
 
-    if (!deinit(emuenv.np.trophy_state)) {
+    if (!deinit(*state)) {
         return SCE_NP_TROPHY_ERROR_ABORT;
     }
 
     return 0;
 }
 
-static int do_trophy_callback(EmuEnvState &emuenv, np::trophy::Context *context, SceNpTrophyID trophy_id) {
-    NpTrophyUnlockCallbackData callback_data;
-
+static int do_trophy_callback(np::trophy::Context *context, SceNpTrophyID trophy_id,
+    NpTrophyUnlockCallbackData &callback_data, ActivityPostStatus &status, bool load_icon) {
     if (context->trophy_kinds[trophy_id] == np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_UNKNOWN) {
         // Yes this ID is not present. So return INVALID_ID
         return SCE_NP_TROPHY_ERROR_INVALID_TROPHY_ID;
@@ -526,34 +648,63 @@ static int do_trophy_callback(EmuEnvState &emuenv, np::trophy::Context *context,
 
     LOG_INFO("Trophy unlocked, name: {}, detail: {}, id = {}", callback_data.trophy_name, callback_data.trophy_detail, trophy_id);
 
-    // Call all registered callbacks.
-    {
-        std::lock_guard lock(emuenv.np.trophy_state.callback_mutex);
-        if (!emuenv.np.trophy_state.trophy_unlock_callbacks.empty()) {
-            uint32_t buf_size = 0;
-
-            // Make filename
-            const std::string trophy_icon_filename = fmt::format("TROP{:0>3d}.PNG", trophy_id);
-            context->copy_file_data_from_trophy_file(trophy_icon_filename.c_str(), nullptr, &buf_size);
-
-            callback_data.icon_buf.resize(buf_size);
-            context->copy_file_data_from_trophy_file(trophy_icon_filename.c_str(), &callback_data.icon_buf[0], &buf_size);
-
-            for (auto &cb : emuenv.np.trophy_state.trophy_unlock_callbacks) {
-                cb(callback_data);
-            }
-        }
+    if (load_icon) {
+        uint32_t buf_size = 0;
+        const std::string trophy_icon_filename = fmt::format("TROP{:0>3d}.PNG", trophy_id);
+        context->copy_file_data_from_trophy_file(trophy_icon_filename.c_str(), nullptr, &buf_size);
+        callback_data.icon_buf.resize(buf_size);
+        if (buf_size)
+            context->copy_file_data_from_trophy_file(trophy_icon_filename.c_str(), callback_data.icon_buf.data(), &buf_size);
     }
 
+    std::string status_type = "trophy_acquisition";
+    if (context->is_trophy_hidden(trophy_id))
+        status_type += "_hidden";
+    else if (context->platinum_trophy_id == trophy_id)
+        status_type += "_platinum";
+
+    std::string grade;
+    switch (callback_data.trophy_kind) {
+    case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_PLATINUM: grade = "platinum"; break;
+    case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_GOLD: grade = "gold"; break;
+    case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_SILVER: grade = "silver"; break;
+    case np::trophy::SceNpTrophyGrade::SCE_NP_TROPHY_GRADE_BRONZE: grade = "bronze"; break;
+    default:
+        LOG_ERROR("Unknown trophy grade for {}", callback_data.trophy_id);
+        return SCE_NP_TROPHY_ERROR_INVALID_TROPHY_ID;
+    }
+
+    status = ActivityPostStatus{
+        .type = std::move(status_type),
+        .title_id = context->io->title_id,
+        .trophy_activity = {
+            .npcomm_id = callback_data.np_com_id,
+            .id = callback_data.trophy_id,
+            .grade = std::move(grade),
+            .name = callback_data.trophy_name,
+        },
+    };
     return 0;
 }
 
 EXPORT(int, sceNpTrophyUnlockTrophy, np::trophy::ContextHandle context_handle, SceNpTrophyHandle api_handle,
     SceNpTrophyID trophy_id, SceNpTrophyID *platinum_id) {
     TRACY_FUNC(sceNpTrophyUnlockTrophy, context_handle, api_handle, trophy_id, platinum_id);
-    if (!emuenv.np.trophy_state.inited) {
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+    std::unique_lock lock(state->access_mutex);
+    if (!state->inited) {
         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
     }
+
+    if (!platinum_id)
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
 
     // Trophy should only be in this region
     if (trophy_id < 0 || trophy_id >= np::trophy::MAX_TROPHIES) {
@@ -561,7 +712,7 @@ EXPORT(int, sceNpTrophyUnlockTrophy, np::trophy::ContextHandle context_handle, S
     }
 
     // Get context
-    np::trophy::Context *context = get_trophy_context(emuenv.np.trophy_state, context_handle);
+    np::trophy::Context *context = get_trophy_context(*state, context_handle);
     if (!context) {
         return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
     }
@@ -593,16 +744,112 @@ EXPORT(int, sceNpTrophyUnlockTrophy, np::trophy::ContextHandle context_handle, S
     } else
         *platinum_id = np::SCE_NP_TROPHY_INVALID_TROPHY_ID;
 
-    const int err = do_trophy_callback(emuenv, context, trophy_id);
-
-    if (err < 0) {
+    std::vector<NpTrophyUnlockCallback> callbacks;
+    {
+        const std::lock_guard callback_lock(emuenv.np.trophy_state.callback_mutex);
+        callbacks = emuenv.np.trophy_state.trophy_unlock_callbacks;
+    }
+    std::array<NpTrophyUnlockCallbackData, 2> callback_data{};
+    std::array<ActivityPostStatus, 2> status{};
+    const int err = do_trophy_callback(context, trophy_id, callback_data[0], status[0], !callbacks.empty());
+    if (err < 0)
         return err;
+    size_t count = 1;
+    if (*platinum_id != np::SCE_NP_TROPHY_INVALID_TROPHY_ID
+        && do_trophy_callback(context, context->platinum_trophy_id, callback_data[1], status[1], !callbacks.empty()) == 0)
+        count = 2;
+    lock.unlock();
+    for (size_t i = 0; i < count; ++i) {
+        for (auto &callback : callbacks)
+            callback(callback_data[i]);
+        v3kn::create_and_post_activity_status(emuenv, status[i]);
     }
 
-    if (*platinum_id != np::SCE_NP_TROPHY_INVALID_TROPHY_ID) {
-        // Do trophy callback for platinum too! But this time, ignore the error
-        do_trophy_callback(emuenv, context, context->platinum_trophy_id);
+    return 0;
+}
+
+EXPORT(int, SceNpTrophy_17FB1D9E, Ptr<SceInt32> session) {
+    TRACY_FUNC(SceNpTrophy_17FB1D9E, session.address());
+    if (!session)
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    auto *state = find_process_trophy_state(emuenv, process->thread->cpu->mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
     }
 
+    const std::lock_guard lock(state->access_mutex);
+    constexpr SceInt32 synchronous_session_handle = 1;
+    if (!write_guest_memory(process->thread->cpu->mem, session.address(), &synchronous_session_handle, sizeof(synchronous_session_handle)))
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    return 0;
+}
+
+EXPORT(int, SceNpTrophy_62E37599, SceInt32 session, SceUInt32 title, np::trophy::ContextHandle context_handle,
+    Ptr<SceInt32> status) {
+    TRACY_FUNC(SceNpTrophy_62E37599, session, title, context_handle, status.address());
+    if (status.address() == 0)
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    MemState &mem = process->thread->cpu->mem;
+    auto *state = find_process_trophy_state(emuenv, mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+
+    const std::lock_guard lock(state->access_mutex);
+    if (!state->inited)
+        return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+    if (session != 1 || title != 1)
+        return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
+    if (!get_trophy_context(*state, context_handle))
+        return SCE_NP_TROPHY_ERROR_INVALID_CONTEXT;
+
+    constexpr SceInt32 initial_install_state = 1;
+    if (!write_guest_memory(mem, status.address(), &initial_install_state, sizeof(initial_install_state)))
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    return 0;
+}
+
+EXPORT(int, SceNpTrophy_D70DAFA7, SceInt32 session, SceUInt32 arg1, SceUInt32 arg2, SceUInt32 arg3,
+    SceUInt32 arg4, SceUInt32 arg5, Ptr<SceUInt32> title) {
+    TRACY_FUNC(SceNpTrophy_D70DAFA7, session, arg1, arg2, arg3, arg4, arg5, title.address());
+    if (title.address() == 0)
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+
+    const auto process = get_process_io_context(emuenv, thread_id, export_name);
+    if (!process)
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    MemState &mem = process->thread->cpu->mem;
+    auto *state = find_process_trophy_state(emuenv, mem);
+    if (!state) {
+        LOG_ERROR("{}: no trophy state for thread {}", export_name, thread_id);
+        return SCE_NP_TROPHY_ERROR_ABORT;
+    }
+
+    const std::lock_guard lock(state->access_mutex);
+    if (!state->inited)
+        return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
+    if (session != 1)
+        return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
+
+    constexpr SceUInt32 synchronous_title_handle = 1;
+    if (!write_guest_memory(mem, title.address(), &synchronous_title_handle, sizeof(synchronous_title_handle)))
+        return SCE_NP_TROPHY_ERROR_INVALID_ARGUMENT;
+    return 0;
+}
+
+EXPORT(int, SceNpTrophy_97D19AB6, SceUInt32 title) {
+    TRACY_FUNC(SceNpTrophy_97D19AB6, title);
+    if (title != 1)
+        return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
     return 0;
 }

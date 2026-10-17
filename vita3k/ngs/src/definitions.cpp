@@ -196,7 +196,7 @@ uint32_t get_voice_definition_size(VoiceDefinition *definition) {
     return apply_definition<uint32_t, uint32_t>(definition->type, temp);
 }
 
-void voice_definition_init(State &ngs, MemState &mem) {
+bool voice_definition_init(State &ngs, MemState &mem) {
     uint32_t voice_output_counts[static_cast<int>(BussType::BUSS_MAX)];
     // most of them have only 1 output
     std::fill_n(voice_output_counts, static_cast<int>(BussType::BUSS_MAX), 1);
@@ -209,12 +209,15 @@ void voice_definition_init(State &ngs, MemState &mem) {
     voice_output_counts[static_cast<int>(BussType::BUSS_NORMAL_PLAYER)] = 4;
 
     ngs.definitions = Ptr<VoiceDefinition>(alloc(mem, static_cast<int>(BussType::BUSS_MAX) * sizeof(VoiceDefinition), "NGS voice definitions"));
+    if (!ngs.definitions)
+        return false;
     VoiceDefinition *definitions = ngs.definitions.get(mem);
 
     for (int i = 0; i < static_cast<int>(BussType::BUSS_MAX); i++) {
         definitions[i].type = static_cast<BussType>(i);
         definitions[i].output_count = voice_output_counts[i];
     }
+    return true;
 }
 
 } // namespace ngs

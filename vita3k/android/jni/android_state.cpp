@@ -135,7 +135,7 @@ uint32_t get_app_action_availability_mask(const std::string &title_id) {
     const auto app = find_app_by_title_id(title_id);
     const bool has_app = app.has_value();
 
-    if (has_app && (!controller || !controller->has_active_session()))
+    if (has_app && app->path.starts_with("ux0:app/") && (!controller || !controller->has_active_session()))
         mask |= ACTION_DELETE_APPLICATION;
 
     if (has_app && !app->savedata.empty() && fs::exists(emuenv->vita_fs_path / "ux0/user" / emuenv->io.user_id / "savedata" / app->savedata))
@@ -148,7 +148,9 @@ uint32_t get_app_action_availability_mask(const std::string &title_id) {
     if (has_app && !app->addcont.empty() && fs::exists(emuenv->vita_fs_path / "ux0/addcont" / app->addcont))
         mask |= ACTION_DELETE_DLC;
 
-    if (fs::exists(emuenv->vita_fs_path / "ux0/license" / title_id))
+    if (fs::exists(emuenv->vita_fs_path / "ux0/license/app" / title_id)
+        || fs::exists(emuenv->vita_fs_path / "ux0/license/addcont" / title_id)
+        || fs::exists(emuenv->vita_fs_path / "ux0/license" / title_id))
         mask |= ACTION_DELETE_LICENSE;
 
     if (fs::exists(emuenv->cache_path / "shaders" / title_id))

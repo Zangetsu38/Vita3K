@@ -140,7 +140,7 @@ struct State {
     std::atomic<bool> precompile_complete{ false };
     int precompile_progress = 0;
     int precompile_total = 0;
-    std::string precompile_bg_path;
+    std::vector<uint8_t> precompile_bg_data;
 
     // only support disabled by default
     int supported_mapping_methods_mask = 1;
@@ -182,7 +182,7 @@ struct State {
     virtual bool set_current() { return true; }
     virtual void done_current() {}
     // perform a screenshot of the (upscaled) frame to be rendered and return it in a vector in its rgba8 format
-    virtual std::vector<uint32_t> dump_frame(DisplayState &display, uint32_t &width, uint32_t &height) = 0;
+    virtual std::vector<uint32_t> dump_frame(DisplayState &display, uint32_t &width, uint32_t &height, bool include_background) = 0;
     // return a mask of the features which can influence the compiled shaders
     virtual uint32_t get_features_mask() {
         return 0;
@@ -212,7 +212,7 @@ struct State {
     virtual bool map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         return true;
     }
-    virtual void unmap_memory(MemState &mem, Ptr<void> address) {}
+    virtual bool unmap_memory(MemState &mem, Ptr<void> address) { return true; }
 #ifdef __ANDROID__
     virtual bool support_custom_drivers() {
         return false;

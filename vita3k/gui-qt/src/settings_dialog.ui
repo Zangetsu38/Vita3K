@@ -2072,6 +2072,24 @@ QGroupBox[flat=&quot;true&quot;]::title {
                      </item>
                     </layout>
                    </item>
+                   <item>
+                    <layout class="QHBoxLayout" name="savedata_identity_buttons">
+                     <item>
+                      <widget class="QPushButton" name="import_savedata_identity">
+                       <property name="text">
+                        <string>Import Identity from Save SFO</string>
+                       </property>
+                      </widget>
+                     </item>
+                     <item>
+                      <widget class="QPushButton" name="reset_savedata_identity">
+                       <property name="text">
+                        <string>Reset Identity</string>
+                       </property>
+                      </widget>
+                     </item>
+                    </layout>
+                   </item>
                   </layout>
                  </widget>
                 </item>
@@ -2535,6 +2553,42 @@ QGroupBox[flat=&quot;true&quot;]::title {
               <number>0</number>
              </property>
              <item>
+              <widget class="QGroupBox" name="gb_network_interfaces_section">
+               <property name="title">
+                <string>Host Network Interfaces</string>
+               </property>
+                <layout class="QVBoxLayout" name="gb_network_interfaces_section_layout">
+                <property name="spacing">
+                 <number>12</number>
+                </property>
+                <item>
+                 <widget class="QGroupBox" name="gb_ethernet_interfaces">
+                  <property name="title">
+                   <string>Ethernet</string>
+                  </property>
+                  <layout class="QVBoxLayout" name="gb_ethernet_interfaces_layout">
+                   <item>
+                    <widget class="QComboBox" name="ethernet_interfaces_combo"/>
+                   </item>
+                  </layout>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QGroupBox" name="gb_wifi_interfaces">
+                  <property name="title">
+                   <string>Wi-Fi</string>
+                  </property>
+                  <layout class="QVBoxLayout" name="gb_wifi_interfaces_layout">
+                   <item>
+                    <widget class="QComboBox" name="wifi_interfaces_combo"/>
+                   </item>
+                  </layout>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+             <item>
               <widget class="QGroupBox" name="gb_network_connection_section">
                <property name="title">
                 <string>Connection</string>
@@ -2574,52 +2628,52 @@ QGroupBox[flat=&quot;true&quot;]::title {
                   </layout>
                  </widget>
                 </item>
-                <item alignment="Qt::AlignmentFlag::AlignTop">
-                 <widget class="QGroupBox" name="gb_adhoc">
-                  <property name="title">
-                   <string>Ad-Hoc</string>
+               </layout>
+              </widget>
+             </item>
+             <item>
+              <widget class="QGroupBox" name="gb_adhoc">
+               <property name="title">
+                <string>Ad-Hoc</string>
+               </property>
+               <property name="flat">
+                <bool>true</bool>
+               </property>
+               <layout class="QVBoxLayout" name="gb_adhoc_layout">
+                <property name="spacing">
+                 <number>10</number>
+                </property>
+                <property name="leftMargin">
+                 <number>0</number>
+                </property>
+                <property name="topMargin">
+                 <number>6</number>
+                </property>
+                <property name="rightMargin">
+                 <number>0</number>
+                </property>
+                <property name="bottomMargin">
+                 <number>0</number>
+                </property>
+                <item>
+                 <widget class="QLabel" name="label_adhoc_address">
+                  <property name="text">
+                   <string>Ad-Hoc Address</string>
                   </property>
-                  <property name="flat">
-                   <bool>true</bool>
-                  </property>
-                  <layout class="QVBoxLayout" name="gb_adhoc_layout">
-                   <property name="spacing">
-                    <number>10</number>
-                   </property>
-                   <property name="leftMargin">
-                    <number>0</number>
-                   </property>
-                   <property name="topMargin">
-                    <number>6</number>
-                   </property>
-                   <property name="rightMargin">
-                    <number>0</number>
-                   </property>
-                   <property name="bottomMargin">
-                    <number>0</number>
-                   </property>
-                   <item>
-                    <widget class="QLabel" name="label_adhoc_address">
-                     <property name="text">
-                      <string>Ad-Hoc Address</string>
-                     </property>
-                    </widget>
-                   </item>
-                   <item>
-                    <widget class="QComboBox" name="adhoc_address_box"/>
-                   </item>
-                   <item>
-                    <widget class="QLabel" name="label_subnet_mask">
-                     <property name="text">
-                      <string>Subnet Mask:</string>
-                     </property>
-                    </widget>
-                   </item>
-                   <item>
-                    <widget class="QComboBox" name="subnet_mask_box"/>
-                   </item>
-                  </layout>
                  </widget>
+                </item>
+                <item>
+                 <widget class="QComboBox" name="adhoc_address_box"/>
+                </item>
+                <item>
+                 <widget class="QLabel" name="label_subnet_mask">
+                  <property name="text">
+                   <string>Subnet Mask:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QComboBox" name="subnet_mask_box"/>
                 </item>
                </layout>
               </widget>

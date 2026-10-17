@@ -22,12 +22,28 @@
 #include <config/state.h>
 #include <display/functions.h>
 #include <display/state.h>
+#include <kernel/callback.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <touch/functions.h>
 #include <util/log.h>
 
+#include <iterator>
+
+void update_keyboard_ps_alt_state(EmuEnvState &emuenv, bool pressed) {
+    auto &ctrl = emuenv.ctrl;
+    const bool was_pressed = ctrl.ps_alt_key_pressed.exchange(pressed, std::memory_order_relaxed);
+    if (pressed && !was_pressed && ctrl.shell_session_active.load(std::memory_order_acquire))
+        ctrl.ps_alt_key_press_pending.store(true, std::memory_order_release);
+}
+
 void update_keyboard_state(EmuEnvState &emuenv, const std::function<bool(input::PhysicalKeyCode)> &key_held) {
     const auto &cfg = emuenv.cfg;
+    const bool ps_alt_pressed = cfg.keyboard_button_psbutton_alt != input::PhysicalKeyCode::Unbound
+        && cfg.keyboard_button_psbutton_alt != cfg.keyboard_button_psbutton
+        && key_held(cfg.keyboard_button_psbutton_alt);
+    update_keyboard_ps_alt_state(emuenv, ps_alt_pressed);
+
     const auto is_pressed = [&](input::PhysicalKeyCode primary, input::PhysicalKeyCode alternate) {
         return (primary != input::PhysicalKeyCode::Unbound && key_held(primary))
             || (alternate != input::PhysicalKeyCode::Unbound && key_held(alternate));
@@ -365,30 +381,98 @@ SceUInt32 ctrl_peek_buttons(EmuEnvState &emuenv, int port) {
     return buttons;
 }
 
-int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
+void update_power_ps_button(EmuEnvState &emuenv, SceUInt32 buttons) {
+    constexpr SceInt32 ps_hold = 0x10000000;
+    constexpr SceInt32 ps_press = 0x20000000;
+    constexpr auto simple_press_threshold = std::chrono::milliseconds(500);
+    constexpr auto long_press_threshold = std::chrono::seconds(2);
+    const bool shell_running = emuenv.ctrl.shell_session_active.load(std::memory_order_acquire);
+    const auto hold_threshold = shell_running ? long_press_threshold : simple_press_threshold;
+    auto &state = emuenv.ctrl;
+    const std::lock_guard lock(state.power_callback_mutex);
+    const bool ps_alt_press_pending = state.ps_alt_key_press_pending.exchange(false, std::memory_order_acq_rel);
+    if (state.overlay_input_intercepted.load(std::memory_order_relaxed) || emuenv.drop_inputs) {
+        if (!state.ps_hold_sent) {
+            state.ps_pressed = false;
+            state.ps_hold_sent = false;
+        }
+        return;
+    }
+    const bool pressed = (buttons & SCE_CTRL_PSBUTTON) != 0;
+    const bool ps_alt_pressed = shell_running && state.ps_alt_key_pressed.load(std::memory_order_acquire);
+    const auto now = std::chrono::steady_clock::now();
+    SceInt32 event = 0;
+    if (shell_running && ps_alt_press_pending) {
+        event = ps_press;
+    }
+    if (!ps_alt_pressed) {
+        if (pressed && !state.ps_pressed) {
+            state.ps_press_started = now;
+            state.ps_hold_sent = false;
+        } else if (pressed && !state.ps_hold_sent && now - state.ps_press_started >= hold_threshold) {
+            event = ps_hold;
+            state.ps_hold_sent = true;
+        } else if (!pressed && state.ps_pressed && !state.ps_hold_sent) {
+            const auto press_duration = now - state.ps_press_started;
+            if (!shell_running && press_duration >= hold_threshold) {
+                event = ps_hold;
+                state.ps_hold_sent = true;
+            } else if (!shell_running || (press_duration >= simple_press_threshold && press_duration < long_press_threshold)) {
+                event = ps_press;
+            }
+        }
+        state.ps_pressed = pressed;
+    }
+    if (!event)
+        return;
+    LOG_DEBUG("Power PS button {}", event == ps_hold ? "held" : "pressed");
+    for (auto it = state.power_callbacks.begin(); it != state.power_callbacks.end();) {
+        const auto callback = emuenv.kernel.objects.find<Callback>(it->first);
+        const auto owner = callback ? emuenv.kernel.get_thread(callback->thread_id) : nullptr;
+        if (!owner) {
+            LOG_WARN("Removing Power callback {} because its owner no longer exists", it->first);
+            it = state.power_callbacks.erase(it);
+            continue;
+        }
+        if (it->second)
+            owner->notify_callback(*callback, event);
+        ++it;
+    }
+}
+
+int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, int count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
+    CtrlState &state = emuenv.ctrl;
+    const char *export_name = "sceCtrl*Buffer*";
+    if (port < 0 || port >= static_cast<int>(std::size(state.last_vcount)) || !pData || count <= 0)
+        return RET_ERROR(SCE_CTRL_ERROR_INVALID_ARG);
     if (port > 1 && !emuenv.cfg.current_config.pstv_mode) {
-        const char *export_name = "sceCtrl*Buffer*";
         return RET_ERROR(SCE_CTRL_ERROR_NO_DEVICE);
     }
 
     memset(pData, 0, sizeof(SceCtrlData2) * count);
-
-    CtrlState &state = emuenv.ctrl;
 
     int nb_returned_data = 1;
     if (is_peek) {
         nb_returned_data = count;
     } else {
         const uint64_t current_vcount = emuenv.display.vblank_count.load();
-        if (current_vcount <= state.last_vcount[port]) {
+        uint64_t last_vcount = 0;
+        {
+            const std::lock_guard lock(state.mutex);
+            last_vcount = state.last_vcount[port];
+        }
+        if (current_vcount <= last_vcount) {
             // sceCtrlRead is blocking, wait for the next vsync for the buffer to be updated
             auto thread = emuenv.kernel.get_thread(thread_id);
 
-            wait_vblank(emuenv.display, thread, state.last_vcount[port] + 1, false);
+            wait_vblank(emuenv.display, thread, last_vcount + 1, false);
         }
         uint64_t vblank_count = emuenv.display.vblank_count.load();
-        nb_returned_data = std::min<int32_t>(count, vblank_count - state.last_vcount[port]);
-        state.last_vcount[port] = vblank_count;
+        {
+            const std::lock_guard lock(state.mutex);
+            nb_returned_data = std::min<int32_t>(count, vblank_count - state.last_vcount[port]);
+            state.last_vcount[port] = vblank_count;
+        }
     }
 
     std::chrono::time_point<std::chrono::steady_clock> ts = std::chrono::steady_clock::now();

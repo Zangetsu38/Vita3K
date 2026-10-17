@@ -19,8 +19,12 @@
 
 #include <cpu/common.h>
 #include <kernel/callback.h>
+#include <kernel/codec_engine_block.h>
 #include <kernel/debugger.h>
 #include <kernel/object_store.h>
+#include <kernel/process_local_storage.h>
+#include <kernel/relocation.h>
+#include <kernel/scheduler.h>
 #include <kernel/sync_primitives.h>
 #include <kernel/types.h>
 #include <mem/allocator.h>
@@ -29,31 +33,112 @@
 #include <mem/util.h>
 #include <rtc/rtc.h>
 #include <util/containers.h>
+#include <util/self_auth_info.h>
 #include <util/types.h>
 
 #include <emuenv/app_launch_request.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 struct ThreadState;
 struct MemState;
+struct SecondaryMemblockState;
 
-struct CodecEngineBlock;
+struct ModuleImportSnapshot {
+    uint32_t library_nid = 0;
+    std::vector<uint32_t> function_nids;
+    std::vector<Ptr<uint32_t>> function_entries;
+    std::vector<std::vector<uint32_t>> function_relocations;
+    std::vector<uint32_t> variable_nids;
+    std::vector<Ptr<uint32_t>> variable_entries;
+    std::vector<std::vector<uint32_t>> variable_relocations;
+};
+
+struct ModuleExportSnapshot {
+    uint32_t library_nid = 0;
+    size_t function_count = 0;
+    std::vector<uint32_t> nids;
+    std::vector<Ptr<uint32_t>> entries;
+};
+
+struct ModuleLinkageSnapshot {
+    std::vector<ModuleImportSnapshot> imports;
+    std::vector<ModuleExportSnapshot> exports;
+};
+
+struct SharedModuleSegmentMapping {
+    uint8_t *backing = nullptr;
+    Address address = 0;
+    uint32_t size = 0;
+};
 
 struct KernelModule {
-    SceKernelModuleInfo info;
+    explicit KernelModule(MemState &mem)
+        : address_space(&mem) {}
+
+    SceKernelModuleInfo info{};
     Ptr<const uint8_t> info_segment_address;
-    uint32_t info_offset;
+    uint32_t info_offset = 0;
+    uint32_t module_nid = 0;
+    uint16_t module_flags = 0;
+    MemState *const address_space;
+    std::optional<ModuleLinkageSnapshot> linkage_snapshot;
+    std::array<std::vector<uint8_t>, MODULE_INFO_NUM_SEGMENTS> shared_initial_segments;
+    bool shared_module_original = false;
+    std::shared_ptr<KernelModule> shared_mapping_source;
+    std::vector<SharedModuleSegmentMapping> shared_mappings;
+    // Protected by module_linker_mutex; prevents unloading shared backing pages.
+    uint32_t shared_mapping_references = 0;
+    // Acquired under module_linker_mutex so unload cannot free segments during startup.
+    std::atomic_uint startup_references{ 0 };
+    // Protected by the secondary dynamic module loader's mutex.
+    std::optional<SceInt32> secondary_start_result;
+    bool secondary_start_pending = false;
 };
 using SceKernelModulePtr = std::shared_ptr<KernelModule>;
 
+class ModuleStartLease {
+public:
+    ModuleStartLease(const ModuleStartLease &) = delete;
+    ModuleStartLease &operator=(const ModuleStartLease &) = delete;
+    ModuleStartLease(ModuleStartLease &&other) noexcept
+        : module_(std::move(other.module_)) {}
+    ~ModuleStartLease() {
+        if (module_)
+            --module_->startup_references;
+    }
+    const SceKernelModulePtr &module() const { return module_; }
+
+private:
+    friend struct KernelState;
+    explicit ModuleStartLease(SceKernelModulePtr module)
+        : module_(std::move(module)) { ++module_->startup_references; }
+    SceKernelModulePtr module_;
+};
+
+struct ProcessStartModules {
+    ModuleStartLease main;
+    std::vector<SceKernelModulePtr> preloaded;
+};
+
 using ThreadStatePtr = std::shared_ptr<ThreadState>;
+enum class ProcessStartResult {
+    Success,
+    MainModuleUnavailable,
+    MainThreadCreationFailed,
+    MainThreadStartFailed,
+};
+
 using CodecEngineBlocks = std::map<SceUID, CodecEngineBlock>;
 using SlotToAddress = std::map<SceUID, Ptr<Ptr<void>>>;
 using ThreadStatePtrs = std::map<SceUID, ThreadStatePtr>;
@@ -69,11 +154,6 @@ constexpr uint64_t lib_export_key(uint32_t library_nid, uint32_t nid) {
 
 using NotFoundVars = std::map<Address, uint32_t>;
 using CallImportFunc = std::function<CallResult(CPUState &cpu, uint32_t nid, SceUID thread_id)>;
-
-struct CodecEngineBlock {
-    uint32_t size;
-    int32_t vaddr;
-};
 
 using LoadedSysmodules = std::map<SceSysmoduleModuleId, std::vector<SceUID>>;
 using LoadedInternalSysmodules = std::vector<SceSysmoduleInternalModuleId>;
@@ -92,6 +172,8 @@ struct VarBindingInfo {
     void *entries;
     uint32_t size;
     uint32_t module_nid;
+    SegmentInfosForReloc segments;
+    std::vector<uint32_t> relocation_entries;
 };
 
 struct FuncBindingInfo {
@@ -99,10 +181,77 @@ struct FuncBindingInfo {
     uint32_t library_nid;
 };
 
+struct ThreadTlsInfo {
+    Ptr<const void> address = Ptr<const void>(0);
+    unsigned int initialized_size = 0;
+    unsigned int total_size = 0;
+};
+
+struct ProcessIdentity {
+    std::string app_path;
+    std::string self_name;
+    SceUID pid = 0;
+    std::optional<SceSelfAuthInfo> self_auth_info;
+
+    bool is_shell() const { return app_path == "vs0:vsh/shell"; }
+    bool is_firmware_app() const { return is_shell() || app_path.starts_with("vs0:app/") || app_path.starts_with("vs0:vsh/"); }
+};
+
+struct ThreadEventRegistration {
+    Ptr<const void> handler = Ptr<const void>(0);
+    Address common = 0;
+    SceUID target = 0;
+    SceUID process_id = 0;
+};
+
+struct LibcExitHandler {
+    Ptr<void> function;
+    Ptr<void> object;
+    Ptr<void> dso;
+};
+
 using VarBindingInfos = std::multimap<uint32_t, VarBindingInfo>;
 using FuncBindingInfos = std::multimap<uint32_t, FuncBindingInfo>;
+using VariableStubs = std::map<uint32_t, Address>;
+
+struct VariableExportLayer {
+    Address module_segment;
+    Address address;
+};
+
+struct VariableExportStack {
+    std::optional<Address> fallback;
+    std::vector<VariableExportLayer> layers;
+};
+using VariableExportStacks = std::map<uint32_t, VariableExportStack>;
 
 using ModuleUidByNid = std::map<uint32_t, uint32_t>;
+using ModuleUidLayers = std::map<uint32_t, std::vector<uint32_t>>;
+
+struct ModuleBindingTables {
+    ExportNids exports;
+    LibExportNids library_exports;
+    ExportNidOwners export_owners;
+    FuncBindingInfos function_imports;
+    VarBindingInfos variable_imports;
+    VariableStubs variable_stubs;
+    VariableExportStacks variable_exports;
+};
+
+struct ProcessIpmiObjects {
+    Block client_vtable;
+    Block shellsvc_client;
+};
+
+struct ModuleBindingView {
+    ExportNids &exports;
+    LibExportNids &library_exports;
+    ExportNidOwners &export_owners;
+    FuncBindingInfos &function_imports;
+    VarBindingInfos &variable_imports;
+    VariableStubs &variable_stubs;
+    VariableExportStacks &variable_exports;
+};
 
 struct KernelState {
     KernelState();
@@ -110,14 +259,9 @@ struct KernelState {
     std::mutex mutex;
     CodecEngineBlocks codec_blocks;
 
-    Ptr<const void> tls_address = Ptr<const void>(0);
-    unsigned int tls_psize = 0;
-    unsigned int tls_msize = 0;
-
-    Ptr<const void> thread_event_start = Ptr<const void>(0);
-    Address thread_event_start_arg = 0;
-    Ptr<const void> thread_event_end = Ptr<const void>(0);
-    Address thread_event_end_arg = 0;
+    std::mutex thread_event_mutex;
+    ThreadEventRegistration thread_event_start;
+    ThreadEventRegistration thread_event_end;
 
     // Thread manager objects other than threads, by UID
     KernelObjects objects;
@@ -127,9 +271,11 @@ struct KernelState {
     void *jni_activity;
 
     SceKernelModuleInfoPtrs loaded_modules;
-    LoadedSysmodules loaded_sysmodules;
-    LoadedInternalSysmodules loaded_internal_sysmodules;
+    // Both maps are protected by mutex and keyed by the owning address space.
+    std::map<const MemState *, LoadedSysmodules> loaded_sysmodules;
+    std::map<const MemState *, LoadedInternalSysmodules> loaded_internal_sysmodules;
 
+    std::mutex module_linker_mutex;
     // the variables in this block must be accessed by first locking export_nids_mutex
     std::mutex export_nids_mutex;
     ExportNids export_nids;
@@ -137,14 +283,19 @@ struct KernelState {
     ExportNidOwners export_nid_owners;
     FuncBindingInfos func_binding_infos;
     VarBindingInfos var_binding_infos;
-    ModuleUidByNid module_uid_by_nid;
+    VariableStubs variable_stubs;
+    VariableExportStacks variable_exports;
+    std::map<const MemState *, ModuleUidByNid> module_uid_by_nid;
+    std::map<const MemState *, ModuleUidLayers> module_uid_layers;
+    std::map<const MemState *, ModuleBindingTables> secondary_module_bindings;
+
+    // The caller holds export_nids_mutex while using the returned references.
+    ModuleBindingView module_bindings(const MemState &mem);
 
     bool cpu_opt;
     CorenumAllocator corenum_allocator;
+    Scheduler sched;
     CallImportFunc call_import;
-
-    // Thumb NOP and WFI that guest functions called by the kernel return to
-    Block halt_instruction;
 
     ObjectStore obj_store;
 
@@ -152,11 +303,9 @@ struct KernelState {
     SceRtcTick base_tick;
     // Returns the process time at a time of the host clock that timers count with
     uint64_t process_time_at(uint64_t clock_time) const;
-    Ptr<SceProcessParam> process_param;
-    Ptr<void> client_vtable = Ptr<void>(0);
-    Ptr<Address> shellsvc_client = Ptr<Address>(0);
-    Ptr<void> libc_dso_handle_main = Ptr<void>(0);
-
+    // Protected by mutex; guest allocations must be released before their MemState.
+    std::map<MemState *, ProcessIpmiObjects> ipmi_objects_by_memory;
+    ProcessLocalStorage process_local_storage;
     Debugger debugger;
 
     // kubridge exception handlers (DABT=0, PABT=1, UNDEF=2)
@@ -170,15 +319,59 @@ struct KernelState {
         return static_cast<SceUID>(0x40000000 | next_uid++ << 1 | 1);
     }
 
-    bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
+    bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt, bool thread_scheduler);
     void deinit(MemState &mem);
+    // The caller holds export_nids_mutex when loading a module's process parameters.
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
+    // The caller holds export_nids_mutex when removing a module's process parameters.
+    void unload_process_param(MemState &mem, Ptr<uint32_t> ptr);
+    Ptr<SceProcessParam> get_process_param(MemState &mem);
+    bool register_process_identity(MemState &mem, ProcessIdentity identity);
+    bool set_process_identity_auth_info(MemState &mem, SceSelfAuthInfo auth_info);
+    std::optional<ProcessIdentity> get_process_identity(MemState &mem);
+    SceInt32 register_process_termination_callback(SceUID pid, SceUID callback_id);
+    SceInt32 unregister_process_termination_callback(SceUID pid, SceUID callback_id);
+    bool notify_process_termination_callbacks(MemState &mem);
+    std::optional<SceSelfAuthInfo> get_process_self_auth_info(SceUID pid);
+    // Valid only during a call from a registered guest thread; teardown waits for those calls.
+    ObjectStore *get_process_object_store(MemState &mem);
+    std::shared_ptr<SecondaryMemblockState> secondary_memblocks(MemState &mem, std::shared_ptr<SecondaryMemblockState> candidate);
+    std::optional<uint64_t> process_elapsed_time_at(MemState &mem, uint64_t clock_tick);
+    bool set_libc_dso_handle_main(MemState &mem, Ptr<void> handle);
+    std::optional<Ptr<void>> get_libc_dso_handle_main(MemState &mem);
+    bool register_libc_exit_handler(MemState &mem, LibcExitHandler handler);
+    std::optional<LibcExitHandler> take_libc_exit_handler(MemState &mem, Ptr<void> dso);
+    void set_thread_tls_info(MemState &mem, ThreadTlsInfo info);
+    ThreadTlsInfo get_thread_tls_info(MemState &mem);
+    // Call before destroying an address space, after its threads have stopped.
+    void clear_thread_tls_info(MemState &mem);
+    // Blocks until this address space's guest threads and in-flight creations have ended. Host only.
+    void stop_threads_in_address_space(MemState &mem);
+    // Release thread resources after stop_threads_in_address_space; the caller must prevent new
+    // uses of the address space, unload its modules, and release outstanding ThreadState references
+    // before destroying it.
+    bool release_thread_address_space(MemState &mem);
     // Creates a dormant thread with these creation arguments, attr without
     // SCE_KERNEL_THREAD_ATTR_USER, or returns null
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
+    ThreadStatePtr create_process_main_thread(MemState &mem, const char *name, Ptr<const void> entry_point);
+    SceInt32 start_process_main_thread(const ThreadStatePtr &thread, std::span<const std::string> args);
+    ProcessStartResult start_process(MemState &mem, const char *name, SceUID main_module_id, std::span<const std::string> args,
+        const std::function<void(const ThreadStatePtr &)> &on_main_created,
+        const std::function<void(const KernelModule &)> &start_module,
+        const std::function<void(const ThreadStatePtr &)> &on_preloaded_modules_started);
+    SceInt32 run_module_entry(const KernelModule &module, bool start, SceSize args, Ptr<const void> argp);
+    ThreadStatePtr create_thread_from_caller(const ThreadStatePtr &caller, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
 
     ThreadStatePtr get_thread(SceUID thread_id);
+    std::optional<SceUID> get_thread_process_id(SceUID thread_id);
+    bool is_primary_address_space(const MemState &mem) const { return primary_address_space == &mem; }
+    SceInt32 check_primary_address_space_access(SceUID thread_id, const char *operation);
+    SceInt32 check_primary_process_target(SceUID thread_id, SceUID target_pid, const char *operation);
+    // The session module loader currently only supports the primary address space.
+    SceInt32 check_primary_module_loader(SceUID thread_id);
 
+    Ptr<Ptr<void>> get_thread_tls_addr(SceUID thread_id, int key);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
     // Whether the emulator pause holds every thread. Threads read it without mutex, under their own lock.
@@ -192,15 +385,47 @@ struct KernelState {
     // Kill all guest threads and block until they have exited. Must only be called from a host thread.
     void process_exit();
     std::function<void(int, std::optional<AppLaunchRequest>)> process_exit_callback;
-    // Request process exit. Safe to call from a guest thread. Returns immediately.
-    // The registered process_exit_callback is invoked to notify the host layer.
-    void request_process_exit(int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
+    // The session callback is only valid for the primary address space until targeted exit exists.
+    SceInt32 request_process_exit(SceUID caller_id, int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
 
     void set_memory_watch(bool enabled);
-    void invalidate_jit_cache(Address start, size_t length);
-    SceKernelModuleInfo *find_module_by_addr(Address address);
+    void invalidate_jit_cache(MemState &mem, Address start, size_t length);
+    SceKernelModulePtr find_module(const MemState &mem, SceUID module_id);
+    std::optional<ProcessStartModules> get_process_start_modules(const MemState &mem, SceUID main_module_id);
+    std::optional<ModuleStartLease> acquire_module_start(const MemState &mem, const SceKernelModulePtr &module);
+    SceKernelModulePtr find_module_by_path(const MemState &mem, const std::string &path);
+    SceKernelModulePtr find_module_by_addr(const MemState &mem, Address address);
 
 private:
+    struct ThreadAddressSpaceState {
+        size_t creating = 0;
+        bool stopping = false;
+        bool releasing = false;
+        bool termination_callbacks_dispatching = false;
+        bool termination_callbacks_notified = false;
+        std::optional<ProcessIdentity> identity;
+        uint64_t start_tick = 0;
+        Ptr<void> libc_dso_handle_main{};
+        std::vector<LibcExitHandler> libc_exit_handlers;
+        bool libc_exit_warning_logged = false;
+        std::shared_ptr<SecondaryMemblockState> memblocks;
+        std::unique_ptr<ObjectStore> object_store;
+        std::vector<CallbackPtr> process_termination_callbacks;
+    };
+    Address get_thread_return_code(MemState &mem);
+    std::mutex process_param_mutex;
+    std::map<MemState *, Ptr<SceProcessParam>> process_params;
+    struct ProcessLibcExport {
+        Address published;
+        std::optional<Address> previous;
+    };
+    std::map<MemState *, ProcessLibcExport> process_libc_exports;
+    MemState *primary_address_space = nullptr;
+    std::map<MemState *, ThreadTlsInfo> thread_tls_by_memory;
+    std::map<MemState *, Block> thread_return_code_by_memory;
+    std::map<MemState *, ThreadAddressSpaceState> thread_address_spaces;
+    std::condition_variable termination_callbacks_cond;
+    SceUID next_process_id = 1;
     std::atomic<uint32_t> next_uid{ 1 };
     std::atomic<bool> threads_paused{ false };
     bool threads_suspended = false;

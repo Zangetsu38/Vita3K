@@ -96,6 +96,7 @@ enum class NpTrophyError {
     TROPHY_ID_INVALID = 3,
     TROPHY_ALREADY_UNLOCKED = 4,
     TROPHY_PLATINUM_IS_UNBREAKABLE = 5, // Platinum is unbreakable
+    TROPHY_INVALID_TRP = 6,
 };
 
 } // namespace np

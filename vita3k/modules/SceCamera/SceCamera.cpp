@@ -21,8 +21,13 @@
 
 #include <camera/camera.h>
 #include <kernel/state.h>
+#include <mem/functions.h>
 
 #include <util/tracy.h>
+
+#include <algorithm>
+#include <array>
+
 TRACY_MODULE_NAME(SceCamera);
 
 EXPORT(int, sceCameraOpen, SceCameraDevice devnum, SceCameraInfo *pInfo) {
@@ -183,15 +188,18 @@ EXPORT(int, sceCameraRead, SceCameraDevice devnum, SceCameraRead *pRead) {
         return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
     if (!pRead)
         return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
-    // conditions from disassembled code
-    if (pRead->size <= 24 || pRead->size > sizeof(SceCameraRead)) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
+    MemState &mem = caller->cpu->mem;
+    const Address read_address = caller->cpu->get_reg(1);
+    SceCameraRead read{};
+    SceSize read_size = 0;
+    if (!read_guest_memory(mem, read_address, &read_size, sizeof(read_size)) || read_size <= 24 || read_size > sizeof(read) || !read_guest_memory(mem, read_address, &read, read_size)) {
+        LOG_ERROR_ONCE("sceCameraRead rejected read structure at {} with size {}", log_hex(read_address), log_hex(read_size));
         return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
     }
-    SceCameraRead read{};
-    if (pRead->size != sizeof(SceCameraRead)) {
-        memcpy(&read, pRead, std::min<size_t>(pRead->size, sizeof(SceCameraRead)));
-        pRead = &read;
-    }
+
     auto &camera = emuenv.camera.cameras[devnum];
     if (!camera.is_opened)
         return RET_ERROR(SCE_CAMERA_ERROR_NOT_OPEN);
@@ -204,28 +212,76 @@ EXPORT(int, sceCameraRead, SceCameraDevice devnum, SceCameraRead *pRead) {
     SceSize sizeUBase;
     SceSize sizeVBase;
     if (camera.info.buffer == SCE_CAMERA_BUFFER_SETBYREAD) {
-        pIBase = pRead->pIBase.get(emuenv.mem);
-        pUBase = pRead->pUBase.get(emuenv.mem);
-        pVBase = pRead->pVBase.get(emuenv.mem);
-        sizeIBase = pRead->sizeIBase;
-        sizeUBase = pRead->sizeUBase;
-        sizeVBase = pRead->sizeVBase;
-        if (!pIBase || sizeIBase == 0)
-            return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
-        if (camera.info.format == SCE_CAMERA_FORMAT_YUV420_PLANE || camera.info.format == SCE_CAMERA_FORMAT_YUV422_PLANE) {
-            if (!pUBase || sizeUBase == 0 || !pVBase || sizeVBase == 0)
-                return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
-        }
+        pIBase = read.pIBase.get(mem);
+        pUBase = read.pUBase.get(mem);
+        pVBase = read.pVBase.get(mem);
+        sizeIBase = read.sizeIBase;
+        sizeUBase = read.sizeUBase;
+        sizeVBase = read.sizeVBase;
     } else {
-        pIBase = camera.info.pIBase.get(emuenv.mem);
-        pUBase = camera.info.pUBase.get(emuenv.mem);
-        pVBase = camera.info.pVBase.get(emuenv.mem);
+        pIBase = camera.info.pIBase.get(mem);
+        pUBase = camera.info.pUBase.get(mem);
+        pVBase = camera.info.pVBase.get(mem);
         sizeIBase = camera.info.sizeIBase;
         sizeUBase = camera.info.sizeUBase;
         sizeVBase = camera.info.sizeVBase;
     }
-    auto res = camera.read(pRead, pIBase, pUBase, pVBase, sizeIBase, sizeUBase, sizeVBase);
-    return res;
+
+    if (!pIBase || sizeIBase == 0) {
+        LOG_ERROR_ONCE("sceCameraRead has invalid image buffer {} with size {}", log_hex(camera.info.buffer == SCE_CAMERA_BUFFER_SETBYREAD ? read.pIBase.address() : camera.info.pIBase.address()), log_hex(sizeIBase));
+        return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
+    }
+    if (camera.info.format == SCE_CAMERA_FORMAT_YUV420_PLANE || camera.info.format == SCE_CAMERA_FORMAT_YUV422_PLANE) {
+        if (!pUBase || sizeUBase == 0 || !pVBase || sizeVBase == 0) {
+            LOG_ERROR_ONCE("sceCameraRead has invalid planar image buffers U={} ({}), V={} ({})",
+                log_hex(camera.info.buffer == SCE_CAMERA_BUFFER_SETBYREAD ? read.pUBase.address() : camera.info.pUBase.address()),
+                log_hex(sizeUBase), log_hex(camera.info.buffer == SCE_CAMERA_BUFFER_SETBYREAD ? read.pVBase.address() : camera.info.pVBase.address()),
+                log_hex(sizeVBase));
+            return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
+        }
+    }
+
+    const std::array ranges{ GuestMemoryRange{ read_address, read_size },
+        GuestMemoryRange{ camera.info.buffer == SCE_CAMERA_BUFFER_SETBYREAD ? read.pIBase.address() : camera.info.pIBase.address(), sizeIBase },
+        GuestMemoryRange{ camera.info.buffer == SCE_CAMERA_BUFFER_SETBYREAD ? read.pUBase.address() : camera.info.pUBase.address(), sizeUBase },
+        GuestMemoryRange{ camera.info.buffer == SCE_CAMERA_BUFFER_SETBYREAD ? read.pVBase.address() : camera.info.pVBase.address(), sizeVBase } };
+    const uint64_t pin = pin_guest_memory(mem, ranges);
+    if (!pin) {
+        LOG_ERROR_ONCE("sceCameraRead could not pin caller buffers: read={} size={}, I={} size={}, U={} size={}, V={} size={}",
+            log_hex(read_address), log_hex(read_size), log_hex(ranges[1].address), log_hex(ranges[1].size),
+            log_hex(ranges[2].address), log_hex(ranges[2].size), log_hex(ranges[3].address), log_hex(ranges[3].size));
+        return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
+    }
+
+    bool writable = true;
+    {
+        const std::lock_guard lock(mem.protect_mutex);
+        for (size_t i = 0; i < ranges.size(); ++i) {
+            if (ranges[i].size == 0)
+                continue;
+            const uint64_t end = uint64_t(ranges[i].address) + ranges[i].size;
+            for (const auto &[start, segment] : mem.protect_tree) {
+                if (uint64_t(start) >= end || uint64_t(start) + segment.size <= ranges[i].address)
+                    continue;
+                if (i == 0 ? segment.perm != MemPerm::ReadWrite : segment.perm == MemPerm::None || segment.perm == MemPerm::ReadOnly)
+                    writable = false;
+            }
+        }
+    }
+    if (!writable) {
+        unpin_guest_memory(mem, pin);
+        return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
+    }
+
+    auto *read_target = Ptr<uint8_t>(read_address).get(mem);
+    if (!read_target) {
+        unpin_guest_memory(mem, pin);
+        return RET_ERROR(SCE_CAMERA_ERROR_PARAM);
+    }
+    const int result = camera.read(&read, pIBase, pUBase, pVBase, sizeIBase, sizeUBase, sizeVBase);
+    memcpy(read_target, &read, read_size);
+    unpin_guest_memory(mem, pin);
+    return result;
 }
 
 EXPORT(int, sceCameraIsActive, SceCameraDevice devnum) {

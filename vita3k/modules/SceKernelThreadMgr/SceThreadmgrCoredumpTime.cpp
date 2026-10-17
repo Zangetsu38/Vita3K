@@ -25,6 +25,8 @@ TRACY_MODULE_NAME(SceThreadmgrCoredumpTime);
 EXPORT(int, sceKernelExitThread, int status) {
     TRACY_FUNC(sceKernelExitThread, status);
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     thread->exit(status);
 
     // the thread exits, the return value is not read anyway

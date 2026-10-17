@@ -25,6 +25,7 @@
 #include <string>
 
 struct Ime;
+struct MemState;
 
 enum DialogType {
     NO_DIALOG,
@@ -111,6 +112,7 @@ struct DialogState {
     MsgState msg;
     NetcheckState netcheck;
     TrophyState trophy;
+    const MemState *trophy_owner = nullptr;
     SavedataState savedata;
 
     void deinit() {
@@ -124,6 +126,7 @@ struct DialogState {
         msg = {};
         netcheck = {};
         trophy = {};
+        trophy_owner = nullptr;
         savedata = {};
     }
 };

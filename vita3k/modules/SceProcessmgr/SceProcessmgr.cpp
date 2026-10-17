@@ -17,9 +17,17 @@
 
 #include "SceProcessmgr.h"
 
+#include <../SceAppMgr/SceAppMgr.h>
+#include <../SceKernelThreadMgr/SceThreadmgr.h>
+#include <cpu/state.h>
 #include <io/functions.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
+#include <module/vargs.h>
 #include <rtc/rtc.h>
+
+#include <optional>
 
 #include <util/safe_time.h>
 
@@ -96,7 +104,13 @@ EXPORT(int, sceKernelCDialogSessionClose) {
 
 EXPORT(int, sceKernelCDialogSetLeaseLimit) {
     TRACY_FUNC(sceKernelCDialogSetLeaseLimit);
-    return UNIMPLEMENTED();
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (emuenv.kernel.is_primary_address_space(caller->cpu->mem))
+        return UNIMPLEMENTED();
+    STUBBED("Common-dialog lease limits are not enforced");
+    return SCE_KERNEL_OK;
 }
 
 EXPORT(int, sceKernelCallAbortHandler, uint32_t param1, uint32_t param2) {
@@ -106,25 +120,50 @@ EXPORT(int, sceKernelCallAbortHandler, uint32_t param1, uint32_t param2) {
 
 EXPORT(int, sceKernelGetCurrentProcess) {
     TRACY_FUNC(sceKernelGetCurrentProcess);
-    return UNIMPLEMENTED();
+    return CALL_EXPORT(sceKernelGetProcessId);
+}
+
+static SceUID open_process_terminal(EmuEnvState &emuenv, SceUID thread_id, const char *path, int flags, const char *export_name) {
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        LOG_ERROR("Cannot open process terminal for unknown thread {}", thread_id);
+        return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
+    }
+    if (!emuenv.kernel.is_primary_address_space(thread->cpu->mem))
+        return open_secondary_process_terminal(emuenv, thread->cpu->mem, path, flags, export_name);
+    return open_file(emuenv.io, path, flags, emuenv.vita_fs_path, export_name);
 }
 
 EXPORT(int, sceKernelGetExtraTty) {
     TRACY_FUNC(sceKernelGetExtraTty);
-    return UNIMPLEMENTED();
+    return open_process_terminal(emuenv, thread_id, "tty3:", SCE_O_WRONLY, export_name);
 }
 
 EXPORT(int, sceKernelGetProcessName, char *process_name, uint32_t len) {
     TRACY_FUNC(sceKernelGetProcessName, process_name, len);
     if (!process_name || len > 32 || len == 0)
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
-    strncpy(process_name, emuenv.kernel.process_param.get(emuenv.mem)->process_name.get(emuenv.mem), len);
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
+    const SceProcessParam *param = emuenv.kernel.get_process_param(mem).get(mem);
+    if (!param || !param->process_name) {
+        LOG_ERROR("Cannot get process name: thread {} has no process name", thread_id);
+        return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
+    }
+    strncpy(process_name, param->process_name.get(mem), len);
     return 0;
 }
 
 EXPORT(Ptr<SceProcessParam>, sceKernelGetProcessParam, void *args) {
     TRACY_FUNC(sceKernelGetProcessParam, args);
-    return emuenv.kernel.process_param;
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("Cannot get process parameters for unknown thread {}", thread_id);
+        return Ptr<SceProcessParam>{};
+    }
+    return emuenv.kernel.get_process_param(caller->cpu->mem);
 }
 
 EXPORT(int, sceKernelGetProcessTimeCore) {
@@ -142,11 +181,35 @@ EXPORT(int, sceKernelGetProcessTimeWideCore) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelGetProcessTitleId, char *title_id, uint32_t len) {
+EXPORT(int, sceKernelGetProcessTitleId, Ptr<char> title_id, uint32_t len) {
     TRACY_FUNC(sceKernelGetProcessTitleId, title_id, len);
     if (!title_id || len > 32 || len == 0)
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
-    strncpy(title_id, emuenv.io.title_id.c_str(), len);
+
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    const auto caller_pid = emuenv.kernel.get_thread_process_id(thread_id);
+    if (!caller_pid)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
+    if (!is_valid_addr_len(mem, title_id.address(), len))
+        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
+
+    const char *caller_title_id = nullptr;
+    std::optional<SecondaryAppStatus> secondary_app;
+    if (emuenv.kernel.is_primary_address_space(caller->cpu->mem)) {
+        caller_title_id = emuenv.io.title_id.c_str();
+    } else {
+        secondary_app = find_secondary_app_by_pid(emuenv, *caller_pid);
+        if (!secondary_app) {
+            LOG_ERROR("Cannot get title ID for untracked process {}", *caller_pid);
+            return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
+        }
+        caller_title_id = secondary_app->status.app_name;
+    }
+
+    strncpy(title_id.get(mem), caller_title_id, len);
     return 0;
 }
 
@@ -157,22 +220,22 @@ EXPORT(int, sceKernelGetRemoteProcessTime) {
 
 EXPORT(int, sceKernelGetStderr) {
     TRACY_FUNC(sceKernelGetStderr);
-    return open_file(emuenv.io, "tty0:", SCE_O_WRONLY, emuenv.vita_fs_path, export_name);
+    return open_process_terminal(emuenv, thread_id, "tty0:", SCE_O_WRONLY, export_name);
 }
 
 EXPORT(int, sceKernelGetStdin) {
     TRACY_FUNC(sceKernelGetStdin);
-    return open_file(emuenv.io, "tty0:", SCE_O_RDONLY, emuenv.vita_fs_path, export_name);
+    return open_process_terminal(emuenv, thread_id, "tty0:", SCE_O_RDONLY, export_name);
 }
 
 EXPORT(int, sceKernelGetStdout) {
     TRACY_FUNC(sceKernelGetStdout);
-    return open_file(emuenv.io, "tty0:", SCE_O_WRONLY, emuenv.vita_fs_path, export_name);
+    return open_process_terminal(emuenv, thread_id, "tty0:", SCE_O_WRONLY, export_name);
 }
 
 EXPORT(int, sceKernelIsCDialogAvailable) {
     TRACY_FUNC(sceKernelIsCDialogAvailable);
-    return UNIMPLEMENTED();
+    return 1;
 }
 
 EXPORT(int, sceKernelIsGameBudget) {
@@ -282,19 +345,39 @@ EXPORT(int, sceKernelPowerUnlock) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceKernelRegisterProcessTerminationCallback) {
-    TRACY_FUNC(sceKernelRegisterProcessTerminationCallback);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelRegisterProcessTerminationCallback, SceUID pid, SceUID callback_id) {
+    TRACY_FUNC(sceKernelRegisterProcessTerminationCallback, pid, callback_id);
+    const SceInt32 result = emuenv.kernel.register_process_termination_callback(pid, callback_id);
+    return result < 0 ? RET_ERROR(result) : result;
 }
 
-EXPORT(int, sceKernelUnregisterProcessTerminationCallback) {
-    TRACY_FUNC(sceKernelUnregisterProcessTerminationCallback);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceKernelUnregisterProcessTerminationCallback, SceUID pid, SceUID callback_id) {
+    TRACY_FUNC(sceKernelUnregisterProcessTerminationCallback, pid, callback_id);
+    const SceInt32 result = emuenv.kernel.unregister_process_termination_callback(pid, callback_id);
+    return result < 0 ? RET_ERROR(result) : result;
 }
 
 EXPORT(int, sceKernelGetMainModuleSdkVersion) {
     TRACY_FUNC(sceKernelGetMainModuleSdkVersion);
-    SceProcessParam *process_param = emuenv.kernel.process_param.get(emuenv.mem);
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
+    const Ptr<SceProcessParam> process_param_ptr = emuenv.kernel.get_process_param(mem);
+    SceProcessParam copied_param{};
+    SceProcessParam *process_param = process_param_ptr.get(mem);
+    if (!emuenv.kernel.is_primary_address_space(mem) && process_param_ptr) {
+        const GuestMemoryRange range{ process_param_ptr.address(), sizeof(copied_param) };
+        if (!module::read_pinned_guest_memory(mem, range, [&] {
+                auto *bytes = reinterpret_cast<uint8_t *>(&copied_param);
+                for (size_t i = 0; i < sizeof(copied_param); ++i)
+                    bytes[i] = *Ptr<const uint8_t>(range.address + static_cast<Address>(i)).get(mem);
+            })) {
+            LOG_ERROR("sceKernelGetMainModuleSdkVersion: invalid process parameter for thread {}", thread_id);
+            return RET_ERROR(SCE_KERNEL_ERROR_INVALID_MEMORY_ACCESS);
+        }
+        process_param = &copied_param;
+    }
     if (process_param && (process_param->magic == '2PSP') && (process_param->version != 0)) {
         return process_param->fw_version;
     } else {

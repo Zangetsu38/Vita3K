@@ -24,7 +24,6 @@
 #include <packages/pkg.h>
 #include <packages/sfo.h>
 #include <renderer/state.h>
-#include <rif2zrif.h>
 #include <touch/functions.h>
 #include <touch/state.h>
 #include <util/fs.h>
@@ -82,6 +81,10 @@ void update_keyboard_state(EmuEnvState &emuenv, input::PhysicalKeyCode key, bool
         pressed_keys.erase(key);
 
     const auto &cfg = emuenv.cfg;
+    update_keyboard_ps_alt_state(emuenv,
+        cfg.keyboard_button_psbutton_alt != input::PhysicalKeyCode::Unbound
+            && cfg.keyboard_button_psbutton_alt != cfg.keyboard_button_psbutton
+            && pressed_keys.contains(cfg.keyboard_button_psbutton_alt));
     const auto is_pressed = [](input::PhysicalKeyCode primary, input::PhysicalKeyCode alternate) {
         return (primary != input::PhysicalKeyCode::Unbound && pressed_keys.contains(primary))
             || (alternate != input::PhysicalKeyCode::Unbound && pressed_keys.contains(alternate));
@@ -228,6 +231,8 @@ void process_dropped_files(EmuEnvState &emuenv, const std::vector<fs::path> &dro
 
 void clear_keyboard_state(EmuEnvState &emuenv) {
     pressed_keys.clear();
+    emuenv.ctrl.ps_alt_key_pressed.store(false, std::memory_order_relaxed);
+    emuenv.ctrl.ps_alt_key_press_pending.store(false, std::memory_order_relaxed);
     const std::lock_guard<std::mutex> lock(emuenv.ctrl.mutex);
     emuenv.ctrl.keyboard_state = {};
 }

@@ -55,7 +55,7 @@ struct GLState : public renderer::State {
     void swap_window() override;
     bool set_current() override;
     void done_current() override;
-    std::vector<uint32_t> dump_frame(DisplayState &display, uint32_t &width, uint32_t &height) override;
+    std::vector<uint32_t> dump_frame(DisplayState &display, uint32_t &width, uint32_t &height, bool include_background) override;
 
     int get_supported_filters() override;
     void set_screen_filter(const std::string_view &filter) override;

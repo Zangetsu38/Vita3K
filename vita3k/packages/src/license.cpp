@@ -28,62 +28,139 @@
 #include <util/log.h>
 
 #include <zRIF/keyflate.h>
-#include <zrif2rif.h>
 
 #include <b64/cdecode.h>
+#include <b64/cencode.h>
 
+#include <algorithm>
+#include <array>
 #include <cstring>
+#include <system_error>
+#include <vector>
 
-bool validate_zrif(const std::string &zRIF) {
-    if (zRIF.empty())
+bool decode_zrif(const std::string &zRIF, std::array<uint8_t, 512> &license) {
+    if (zRIF.empty() || zRIF.size() > 2048)
         return false;
 
-    char buf[2048];
+    std::array<char, 2048> buf{};
     base64_decodestate state;
     base64_init_decodestate(&state);
-    const size_t decoded_len = base64_decode_block(zRIF.c_str(), static_cast<int>(zRIF.size()), buf, &state);
-    if (decoded_len == 0)
+    const int decoded_len = base64_decode_block(zRIF.c_str(), static_cast<int>(zRIF.size()), buf.data(), &state);
+    if (decoded_len <= 0)
         return false;
 
-    uint8_t license[512] = {};
-    const int inflated_len = inflateKey(reinterpret_cast<const uint8_t *>(buf), decoded_len, license, sizeof(license));
-    return inflated_len == 512;
+    return inflateKey(reinterpret_cast<const uint8_t *>(buf.data()), decoded_len, license.data(), license.size()) == license.size();
 }
 
-static bool open_license(const fs::path &license_path, SceNpDrmLicense &license_buf) {
+bool validate_zrif(const std::string &zRIF) {
+    std::array<uint8_t, 512> license{};
+    return decode_zrif(zRIF, license);
+}
+
+std::string rif2zrif(std::ifstream &binfile) {
+    std::array<uint8_t, 512> license{};
+    binfile.seekg(0, std::ios::beg);
+    if (!binfile.read(reinterpret_cast<char *>(license.data()), license.size()) || binfile.peek() != std::char_traits<char>::eof()) {
+        LOG_ERROR("Cannot convert an unreadable or invalid-size RIF license");
+        return {};
+    }
+    std::array<uint8_t, 2048> compressed{};
+    const int length = deflateKey(license.data(), license.size(), compressed.data(), compressed.size());
+    if (length <= 0 || static_cast<size_t>(length) > compressed.size() - 2) {
+        LOG_ERROR("Cannot compress RIF license");
+        return {};
+    }
+    const int padded = (length + 2) / 3 * 3;
+    std::vector<char> encoded(static_cast<size_t>(padded) * 2 + 16);
+    base64_encodestate state;
+    base64_init_encodestate(&state);
+    int size = base64_encode_block(reinterpret_cast<const char *>(compressed.data()), padded, encoded.data(), &state);
+    size += base64_encode_blockend(encoded.data() + size, &state);
+    return std::string(encoded.data(), size);
+}
+
+bool open_license(const fs::path &license_path, SceNpDrmLicense &license_buf) {
     memset(&license_buf, 0, sizeof(SceNpDrmLicense));
     std::ifstream license(license_path, std::ios::in | std::ios::binary);
     if (license.is_open()) {
-        license.read(reinterpret_cast<char *>(&license_buf), sizeof(SceNpDrmLicense));
-        license.close();
-        return true;
+        return static_cast<bool>(license.read(reinterpret_cast<char *>(&license_buf), sizeof(SceNpDrmLicense)));
     }
 
     return false;
 }
 
-bool copy_license(EmuEnvState &emuenv, const fs::path &license_path) {
+bool copy_license(EmuEnvState &emuenv, const fs::path &license_path, const fs::path &destination_directory) {
     SceNpDrmLicense license_buf;
     if (open_license(license_path, license_buf)) {
-        emuenv.license_content_id = license_buf.content_id;
+        const auto end = std::find(std::begin(license_buf.content_id), std::end(license_buf.content_id), '\0');
+        emuenv.license_content_id.assign(std::begin(license_buf.content_id), end);
+        if (emuenv.license_content_id.size() != 36 || emuenv.license_content_id[6] != '-' || emuenv.license_content_id[16] != '_' || emuenv.license_content_id[19] != '-'
+            || !std::all_of(emuenv.license_content_id.begin(), emuenv.license_content_id.end(), [](unsigned char c) {
+                   return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+               })) {
+            LOG_ERROR("License has an invalid content ID: {}", license_path);
+            return false;
+        }
         emuenv.license_title_id = emuenv.license_content_id.substr(7, 9);
-        const auto dst_path{ emuenv.vita_fs_path / "ux0/license" / emuenv.license_title_id };
-        fs::create_directories(dst_path);
-
-        const auto license_dst_path{ dst_path / fmt::format("{}.rif", emuenv.license_content_id) };
+        const auto account_id = fmt::format("{:016x}", byte_swap(license_buf.aid));
+        const auto license_directory = destination_directory.empty()
+            ? emuenv.vita_fs_path / "ux0/license/app" / emuenv.license_title_id
+            : destination_directory;
+        std::error_code error;
+        fs::create_directories(license_directory, error);
+        if (error) {
+            LOG_ERROR("Cannot create license directory '{}': {}", license_directory, error.message());
+            return false;
+        }
+        const auto license_dst_path = license_directory / fmt::format("{}.rif", account_id);
         if (license_path != license_dst_path) {
-            fs::copy_file(license_path, license_dst_path, fs::copy_options::overwrite_existing);
-            if (fs::exists(license_dst_path)) {
-                LOG_INFO("Success copy license file to: {}", license_dst_path);
-                return true;
-            } else
-                LOG_ERROR("Fail copy license file to: {}", license_dst_path);
-        } else
-            LOG_ERROR("Source and destination license is same at: {}", license_path);
+            fs::copy_file(license_path, license_dst_path, fs::copy_options::overwrite_existing, error);
+            if (error) {
+                LOG_ERROR("Fail copy license file to '{}': {}", license_dst_path, error.message());
+                return false;
+            }
+            LOG_INFO("Success copy license file to: {}", license_dst_path);
+        }
+        return true;
     } else
         LOG_ERROR("License file is corrupted at: {}", license_path);
 
     return false;
+}
+
+std::optional<fs::path> find_license_for_content_id(const fs::path &directory, const std::string &content_id) {
+    std::error_code error;
+    fs::directory_iterator entry(directory, error), end;
+    if (error == std::errc::no_such_file_or_directory)
+        return std::nullopt;
+    if (error) {
+        LOG_ERROR("Cannot enumerate license directory '{}': {}", directory, error.message());
+        return std::nullopt;
+    }
+
+    while (entry != end) {
+        const auto candidate = entry->path();
+        std::error_code status_error;
+        const auto status = entry->symlink_status(status_error);
+        if (status_error) {
+            LOG_ERROR("Cannot inspect license file '{}': {}", candidate, status_error.message());
+            return std::nullopt;
+        }
+        if (fs::is_regular_file(status) && candidate.extension() == ".rif") {
+            SceNpDrmLicense license{};
+            if (open_license(candidate, license)) {
+                const auto content_end = std::find(std::begin(license.content_id), std::end(license.content_id), '\0');
+                if (std::string(std::begin(license.content_id), content_end) == content_id)
+                    return candidate;
+            }
+        }
+        entry.increment(error);
+        if (error) {
+            LOG_ERROR("Cannot scan license directory '{}': {}", directory, error.message());
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
 }
 
 void get_license(EmuEnvState &emuenv, const std::string &title_id, const std::string &content_id) {
@@ -96,12 +173,10 @@ void get_license(EmuEnvState &emuenv, const std::string &title_id, const std::st
     license_buf = {};
 
     // Open license file
-    const auto license_path{ emuenv.vita_fs_path / "ux0/license" / title_id / fmt::format("{}.rif", content_id) };
-    if (!open_license(license_path, license_buf)) {
-        if (fs::exists(license_path))
-            fs::remove(license_path);
-
-        LOG_WARN("License file is corrupted or missing at: {}, using default value.", license_path);
+    const auto license_directory = emuenv.vita_fs_path / "ux0/license/app" / title_id;
+    auto license_path = find_license_for_content_id(license_directory, content_id);
+    if (!license_path || !open_license(*license_path, license_buf)) {
+        LOG_WARN("Matching app license is missing for '{}', using default value.", content_id);
         const auto RETAIL_APP_PATH{ emuenv.vita_fs_path / "ux0/app" / title_id / "sce_sys/retail/livearea" };
         if (fs::exists(RETAIL_APP_PATH))
             license_buf.sku_flag = 1;
@@ -111,8 +186,9 @@ void get_license(EmuEnvState &emuenv, const std::string &title_id, const std::st
         license_buf.sku_flag = byte_swap(license_buf.sku_flag); // Convert to little endian
 }
 
-bool create_license(EmuEnvState &emuenv, const std::string &zRIF) {
-    if (!validate_zrif(zRIF)) {
+bool create_license(EmuEnvState &emuenv, const std::string &zRIF, const fs::path &destination_directory) {
+    std::array<uint8_t, 512> license{};
+    if (!decode_zrif(zRIF, license)) {
         LOG_ERROR("Invalid zRIF key provided");
         return false;
     }
@@ -127,9 +203,19 @@ bool create_license(EmuEnvState &emuenv, const std::string &zRIF) {
         return false;
     }
 
-    // Convert zRIF to RIF
-    zrif2rif(zRIF, temp_file);
-    auto res = copy_license(emuenv, temp_license_path);
+    if (!temp_file.write(reinterpret_cast<const char *>(license.data()), license.size())) {
+        LOG_ERROR("Failed to write temporary license file at: {}", temp_license_path);
+        temp_file.close();
+        fs::remove(temp_license_path);
+        return false;
+    }
+    temp_file.close();
+    if (!temp_file) {
+        LOG_ERROR("Failed to finish temporary license file at: {}", temp_license_path);
+        fs::remove(temp_license_path);
+        return false;
+    }
+    auto res = copy_license(emuenv, temp_license_path, destination_directory);
     fs::remove(temp_license_path);
     return res;
 }

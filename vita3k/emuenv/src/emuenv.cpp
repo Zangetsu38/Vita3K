@@ -23,6 +23,7 @@
 #include <cheat/state.h>
 #include <compat/state.h>
 #include <config/state.h>
+#include <cpu/state.h>
 #include <ctrl/state.h>
 #include <dialog/state.h>
 #include <display/state.h>
@@ -31,6 +32,7 @@
 #include <ime/state.h>
 #include <io/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <motion/state.h>
 #include <net/state.h>
 #include <ngs/state.h>
@@ -47,7 +49,31 @@
 
 #include <gdbstub/state.h>
 
+#include <util/log.h>
 #include <util/warning.h>
+
+GxmContextAccess::GxmContextAccess(EmuEnvState &emuenv, SceUID thread_id, SceGxmContext *context, const char *export_name)
+    : process_lock(emuenv.gxm.process_states_mutex, std::defer_lock) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller || !context) {
+        LOG_ERROR("{}: invalid thread or GXM context", export_name);
+        return;
+    }
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        {
+            ThreadHostWait host_wait(caller);
+            process_lock.lock();
+        }
+        const auto process = emuenv.gxm.process_states.find(&mem);
+        if (emuenv.gxm.process_states_shutdown || process == emuenv.gxm.process_states.end()
+            || !process->second->owns_immediate_context(context)) {
+            LOG_ERROR("{}: invalid or unsupported secondary immediate GXM context", export_name);
+            return;
+        }
+    }
+    valid = true;
+}
 
 // initialize the unique_ptr then the reference each time
 // this is VERY repetitive

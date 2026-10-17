@@ -313,6 +313,14 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    if (active_cfg.boot_shell_on_startup && !active_cfg.run_app_path && !active_cfg.console) {
+        if (!app::ensure_current_user(emuenv)) {
+            LOG_ERROR("Could not initialize the current user for the PS Vita OS shell.");
+            return InitConfigFailed;
+        }
+        active_cfg.run_app_path = "vs0:vsh/shell";
+    }
+
     if (is_sdl_frontend) {
         const int exit_code = sdl_frontend::run_frontend(emuenv);
 #ifdef _WIN32

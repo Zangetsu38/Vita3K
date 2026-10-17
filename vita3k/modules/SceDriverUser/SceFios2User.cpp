@@ -17,7 +17,11 @@
 
 #include <module/module.h>
 
+#include "../SceAppMgr/SceAppMgr.h"
 #include "io/functions.h"
+#include <cpu/state.h>
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceFios2User);
@@ -46,8 +50,10 @@ std::string to_debug_str<SceFiosOverlayResolveMode>(const MemState &mem, SceFios
 
 EXPORT(int, sceFiosOverlayAddForProcess02, SceUID processId, SceFiosProcessOverlay *pOverlay, SceFiosOverlayID *pOutID) {
     TRACY_FUNC(sceFiosOverlayAddForProcess02, processId, pOverlay, pOutID);
-    if (pOverlay->type != SCE_FIOS_OVERLAY_TYPE_OPAQUE)
-        LOG_WARN("Using unimplemented overlay type {}.", fmt::underlying(pOverlay->type));
+    if (pOverlay->type > SCE_FIOS_OVERLAY_TYPE_WRITABLE) {
+        LOG_WARN("Invalid overlay type {}.", fmt::underlying(pOverlay->type));
+        return static_cast<int>(0x8082001au);
+    }
 
     *pOutID = create_overlay(emuenv.io, pOverlay);
 
@@ -61,10 +67,19 @@ EXPORT(int, sceFiosOverlayGetInfoForProcess02) {
 
 EXPORT(int, sceFiosOverlayGetList02, SceUID processId, uint32_t minOrder, uint32_t maxOrder, SceFiosOverlayID *pOutIDs, SceUInt32 maxIDs, SceUInt32 *pActualIDs) {
     TRACY_FUNC(sceFiosOverlayGetList02, processId, minOrder, maxOrder, pOutIDs, maxIDs, pActualIDs);
-    const std::lock_guard<std::mutex> guard(emuenv.io.overlay_mutex);
+    IOState *io = processId > 0 ? find_process_io_by_pid(emuenv, processId) : nullptr;
+    if (processId <= 0) {
+        const auto caller = emuenv.kernel.get_thread(thread_id);
+        if (!caller)
+            return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+        io = find_process_io(emuenv, caller->cpu->mem);
+    }
+    if (!io)
+        return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
+    const std::lock_guard<std::mutex> guard(io->overlay_mutex);
 
     std::vector<SceFiosOverlayID> overlay_ids;
-    for (const auto &overlay : emuenv.io.overlays) {
+    for (const auto &overlay : io->overlays) {
         if (overlay.order >= minOrder && overlay.order <= maxOrder)
             overlay_ids.push_back(overlay.id);
     }
@@ -106,12 +121,19 @@ EXPORT(int, sceFiosOverlayResolveSync02) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceFiosOverlayResolveWithRangeSync02, SceUID processId, SceFiosOverlayResolveMode resolveFlag, const char *pInPath, char *pOutPath, SceUInt32 maxPath, SceUInt32 min_order, SceUInt32 max_order) {
+EXPORT(int, sceFiosOverlayResolveWithRangeSync02, SceUID processId, SceFiosOverlayResolveMode resolveFlag, Ptr<const char> pInPath, Ptr<char> pOutPath, SceUInt32 maxPath, SceUInt32 min_order, SceUInt32 max_order) {
     TRACY_FUNC(sceFiosOverlayResolveWithRangeSync02, processId, resolveFlag, pInPath, pOutPath, maxPath, min_order, max_order);
-    const std::string resolved = resolve_path(emuenv.io, pInPath, min_order, max_order);
-    strncpy(pOutPath, resolved.c_str(), maxPath);
-
-    return SCE_FIOS_OK;
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    MemState &mem = context->thread->cpu->mem;
+    const auto identity = emuenv.kernel.get_process_identity(mem);
+    if (processId != PSP2_KERNEL_PROCESS_ID_SELF && (!identity || identity->pid != processId)) {
+        LOG_ERROR("{}: overlay resolution for another process {} is not implemented", export_name, processId);
+        return RET_ERROR(SCE_KERNEL_ERROR_NOT_IMPLEMENTED);
+    }
+    const int result = resolve_overlay_path_guest(*context->io, mem, pInPath, pOutPath, maxPath, resolveFlag, min_order, max_order, emuenv.vita_fs_path, export_name);
+    return result < 0 ? RET_ERROR(result) : result;
 }
 
 EXPORT(int, sceFiosOverlayThreadIsDisabled02) {

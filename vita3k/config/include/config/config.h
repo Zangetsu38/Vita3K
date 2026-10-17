@@ -175,6 +175,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "export-as-png", true, export_as_png)                                                    \
     code(std::string, "memory-mapping", "double-buffer", memory_mapping)                                \
     code(bool, "boot-apps-full-screen", false, boot_apps_full_screen)                                   \
+    code(bool, "boot-shell-on-startup", false, boot_shell_on_startup)                                   \
     code(bool, "enable-cheats", true, enable_cheats)                                                    \
     code(bool, "show-live-area-screen", false, show_live_area_screen)                                   \
     code(std::string, "audio-backend", "SDL", audio_backend)                                            \
@@ -220,6 +221,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "check-for-updates", true, check_for_updates)                                            \
     code(int, "check-for-updates-mode", static_cast<int>(UPDATE_STARTUP_PROMPT), check_for_updates_mode)\
     code(int, "file-loading-delay", 0, file_loading_delay)                                              \
+    code(bool, "thread-scheduler", true, thread_scheduler)                                               \
     code(bool, "shader-cache", true, shader_cache)                                                      \
     code(bool, "spirv-shader", false, spirv_shader)                                                     \
     code(bool, "fps-hack", false, fps_hack)                                                             \
@@ -231,6 +233,8 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "http-read-end-attempts", 10, http_read_end_attempts)                                     \
     code(int, "http-read-end-sleep-ms", 250, http_read_end_sleep_ms)                                    \
     code(int, "adhoc-addr", 0, adhoc_addr)                                                              \
+    code(int, "ethernet-addr", 0, ethernet_addr)                                                        \
+    code(int, "wifi-addr", 0, wifi_addr)                                                                \
     code(int, "front-camera-type", 2, front_camera_type)                                                \
     code(std::string, "front-camera-id", std::string{}, front_camera_id)                                \
     code(std::string, "front-camera-image", std::string{}, front_camera_image)                          \
@@ -250,6 +254,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::vector<short>, "controller-axis-binds", std::vector<short>{}, controller_axis_binds)      \
     code(std::vector<int>, "controller-led-color", std::vector<int>{}, controller_led_color)            \
     code(std::vector<std::string>, "lle-modules", std::vector<std::string>{}, lle_modules)              \
+    code(std::vector<std::string>, "firmware-apps", std::vector<std::string>{}, firmware_apps)          \
     code(std::vector<uint64_t>, "ime-langs", std::vector<uint64_t>{4}, ime_langs)                       \
     code(std::vector<std::string>, "tracy-advanced-profiling-modules", std::vector<std::string>{}, tracy_advanced_profiling_modules)
 

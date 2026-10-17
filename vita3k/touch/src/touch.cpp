@@ -312,6 +312,8 @@ int toggle_touchscreen(TouchState &state) {
 }
 
 int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 nBufs, bool is_peek) {
+    if (!pData || port >= SCE_TOUCH_PORT_MAX_NUM || nBufs == 0 || nBufs > MAX_TOUCH_BUFFER_SAVED)
+        return static_cast<int>(SCE_TOUCH_ERROR_INVALID_ARG);
     memset(pData, 0, sizeof(SceTouchData) * nBufs);
     // vitasdk says sceTouchGet/Peek should return 1 thru nBufs or < 0 on error
     if (emuenv.drop_inputs || emuenv.ctrl.overlay_input_intercepted.load(std::memory_order_relaxed))

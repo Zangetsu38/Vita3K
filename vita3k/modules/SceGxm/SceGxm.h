@@ -19,10 +19,22 @@
 
 #include <module/module.h>
 
+struct EmuEnvState;
+struct GxmState;
+struct MemState;
 struct SceGxmInitializeParams;
 struct SceGxmRenderTargetParams;
 struct SceGxmRenderTarget;
+struct SceGxmSyncObject;
+
+SceInt32 terminate_secondary_process_gxm(EmuEnvState &emuenv, MemState &mem, SceUID caller_id);
+SceInt32 sce_gxm_create_render_target(EmuEnvState &emuenv, SceUID thread_id, const SceGxmRenderTargetParams *params, Ptr<SceGxmRenderTarget> *renderTarget, bool internal_api, const char *export_name);
+bool sce_gxm_rendering_context_is_within_scene(EmuEnvState &emuenv, SceUID thread_id);
+bool sce_gxm_sync_object_is_within_scene(GxmState &gxm, Ptr<SceGxmSyncObject> syncObject);
 
 DECL_EXPORT(int, sceGxmInitialize, const SceGxmInitializeParams *params);
+DECL_EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject);
 DECL_EXPORT(int, sceGxmCreateRenderTarget, const SceGxmRenderTargetParams *params, Ptr<SceGxmRenderTarget> *renderTarget);
-DECL_EXPORT(int, sceGxmGetRenderTargetMemSize, const SceGxmRenderTargetParams *params, uint32_t *hostMemSize);
+DECL_EXPORT(int, sceGxmGetRenderTargetMemSize, Ptr<const SceGxmRenderTargetParams> params, Ptr<uint32_t> hostMemSize);
+DECL_EXPORT(int, sceGxmMapFragmentUsseMemory, Ptr<void> base, uint32_t size, Ptr<uint32_t> offset);
+DECL_EXPORT(int, sceGxmMapVertexUsseMemory, Ptr<void> base, uint32_t size, Ptr<uint32_t> offset);

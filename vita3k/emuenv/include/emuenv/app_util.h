@@ -20,6 +20,8 @@
 #include <mem/ptr.h>
 #include <util/types.h>
 
+#include <array>
+
 typedef SceUInt32 SceAppUtilBootAttribute;
 typedef SceUInt32 SceAppUtilAppEventType;
 typedef SceUInt32 SceAppUtilSaveDataSlotId;
@@ -180,8 +182,25 @@ inline constexpr uint32_t SDSLOT_MAX_SLOTS = 256;
 inline constexpr uint32_t SDSLOT_FLAG_BASE = 0x200;
 inline constexpr uint32_t SDSLOT_DATA_BASE = 0x400;
 inline constexpr uint32_t SDSLOT_BLOCK_SIZE = 0x400;
-inline constexpr size_t SDSLOT_TOTAL_SIZE = SDSLOT_DATA_BASE + static_cast<size_t>(SDSLOT_MAX_SLOTS) * SDSLOT_BLOCK_SIZE;
+inline constexpr size_t SDSLOT_IO_BLOCK_SIZE = 0x8000;
+inline constexpr size_t SDSLOT_TOTAL_SIZE = ((SDSLOT_DATA_BASE + static_cast<size_t>(SDSLOT_MAX_SLOTS) * SDSLOT_BLOCK_SIZE + SDSLOT_IO_BLOCK_SIZE - 1) / SDSLOT_IO_BLOCK_SIZE) * SDSLOT_IO_BLOCK_SIZE;
 inline constexpr uint8_t SDSLOT_MAGIC[10] = { 'S', 'D', 'S', 'L', 0, 0, 0, 0, 0, 1 };
 
 struct EmuEnvState;
-bool sdslot_read_slot_param(EmuEnvState &emuenv, uint32_t slot_id, SceAppUtilSaveDataSlotParam *param, const char *export_name);
+struct IOState;
+enum class SaveDataSlotReadResult { Found,
+    NotFound,
+    Error };
+using SaveDataSlotFlags = std::array<uint8_t, SDSLOT_MAX_SLOTS>;
+SaveDataSlotReadResult read_savedata_slot(EmuEnvState &emuenv, uint32_t slot_id, SceAppUtilSaveDataSlotParam &param, const char *export_name, IOState *io = nullptr);
+SaveDataSlotReadResult read_savedata_slot_flags(EmuEnvState &emuenv, SaveDataSlotFlags &flags, const char *export_name, IOState *io = nullptr);
+SaveDataSlotReadResult check_savedata_slot_file(EmuEnvState &emuenv, const char *export_name, IOState *io = nullptr);
+
+enum class SaveDataSlotWriteMode { Create,
+    CreateOnly,
+    Set,
+    Delete,
+    DeleteExisting,
+    UpdateTime };
+int write_savedata_slot(EmuEnvState &emuenv, uint32_t slot_id, const SceAppUtilSaveDataSlotParam *param,
+    SaveDataSlotWriteMode mode, const SceDateTime *time, const char *export_name, IOState *io = nullptr);

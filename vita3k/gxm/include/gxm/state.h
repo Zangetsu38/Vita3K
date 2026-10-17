@@ -22,14 +22,17 @@
 #include <threads/queue.h>
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
 struct EmuEnvState;
+struct MemState;
 struct SceGxmContext;
 struct SceGxmRenderTarget;
+struct SceGxmSyncObjectState;
 
 struct SceGxmInitializeParams {
     uint32_t flags = 0;
@@ -54,8 +57,19 @@ struct MemoryMapInfo {
     std::uint32_t perm;
 };
 
+struct GxmPrecomputedProgramInfo {
+    uint16_t texture_count;
+    uint16_t buffer_count;
+    uint16_t stream_count = 1;
+};
+
 struct GxmState {
     SceGxmInitializeParams params;
+    uint32_t vsh_init_flags = 0;
+
+    std::mutex process_states_mutex;
+    bool process_states_shutdown = false;
+    std::unordered_map<MemState *, std::shared_ptr<GxmState>> process_states;
 
     Queue<DisplayCallback> display_queue;
     std::mutex display_queue_add_mutex;
@@ -72,32 +86,66 @@ struct GxmState {
 
     std::mutex sync_objects_mutex;
     std::unordered_set<SceGxmSyncObject *> sync_objects;
+    std::unordered_map<SceGxmSyncObject *, size_t> display_sync_refs;
+    std::unordered_map<SceGxmSyncObject *, uint32_t> vsh_opened_sync_objects;
+    std::mutex vsh_sync_objects_mutex;
+    std::unordered_map<uint32_t, std::shared_ptr<SceGxmSyncObjectState>> vsh_sync_objects;
+
+    std::mutex program_info_mutex;
+    std::unordered_map<Address, GxmPrecomputedProgramInfo> vertex_program_info;
+    std::unordered_map<Address, GxmPrecomputedProgramInfo> fragment_program_info;
 
     std::map<Address, MemoryMapInfo> memory_mapped_regions;
     std::mutex callback_lock;
     std::unordered_map<SceGxmContext *, Address> immediate_contexts;
+    std::map<Address, uint32_t> context_host_regions;
     Address last_immediate_context = 0;
     std::unordered_map<SceGxmContext *, Address> deferred_contexts;
     std::unordered_map<SceGxmRenderTarget *, Address> render_targets;
+
+    bool owns_immediate_context(SceGxmContext *context) const {
+        return immediate_contexts.contains(context);
+    }
 
     void deinit() {
         if (display_host_thread.joinable())
             display_host_thread.join();
 
         {
+            const std::lock_guard<std::mutex> lock(process_states_mutex);
+            for (auto &[_, state] : process_states)
+                state->deinit();
+            process_states.clear();
+            process_states_shutdown = false;
+        }
+
+        {
             const std::lock_guard<std::mutex> lock(sync_objects_mutex);
             sync_objects.clear();
+            display_sync_refs.clear();
+            vsh_opened_sync_objects.clear();
+        }
+        {
+            const std::lock_guard<std::mutex> lock(vsh_sync_objects_mutex);
+            vsh_sync_objects.clear();
+        }
+        {
+            const std::lock_guard<std::mutex> lock(program_info_mutex);
+            vertex_program_info.clear();
+            fragment_program_info.clear();
         }
 
         memory_mapped_regions.clear();
         display_queue.reset();
         display_queue_closed = false;
         params = {};
+        vsh_init_flags = 0;
         display_queue_thread = 0;
         global_timestamp = 1;
         last_display_global = 0;
         notification_region = Ptr<uint32_t>(0);
         immediate_contexts.clear();
+        context_host_regions.clear();
         last_immediate_context = 0;
         deferred_contexts.clear();
         render_targets.clear();

@@ -17,6 +17,7 @@
 
 #include "SceRtc.h"
 
+#include <emuenv/state.h>
 #include <kernel/state.h>
 #include <rtc/rtc.h>
 #include <util/tracy.h>
@@ -28,22 +29,32 @@
 
 TRACY_MODULE_NAME(SceRtc);
 
+static int64_t rtc_local_time_offset_seconds(EmuEnvState &emuenv) {
+    {
+        std::lock_guard lock(emuenv.rtc_config_mutex);
+        if (emuenv.rtc_config_initialized)
+            return (static_cast<int64_t>(emuenv.rtc_timezone_minutes) + static_cast<int64_t>(emuenv.rtc_daylight_saving_minutes)) * 60;
+    }
+
+    const std::time_t now = std::time(nullptr);
+    tm local_tm = {};
+    tm gmt_tm = {};
+    SAFE_LOCALTIME(&now, &local_tm);
+    SAFE_GMTIME(&now, &gmt_tm);
+    return std::mktime(&local_tm) - std::mktime(&gmt_tm);
+}
+
+static void set_emulated_network_tick(SceRtcTick *tick, uint64_t base_tick) {
+    // Syscon's separate auxiliary network tick stores are not emulated.
+    tick->tick = rtc_get_ticks(base_tick);
+}
+
 EXPORT(int, _sceRtcConvertLocalTimeToUtc, const SceRtcTick *pLocalTime, SceRtcTick *pUtc) {
     TRACY_FUNC(_sceRtcConvertLocalTimeToUtc, pLocalTime, pUtc);
     if (pUtc == nullptr || pLocalTime == nullptr) {
         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
     }
-    std::time_t t = std::time(nullptr);
-
-    tm local_tm = {};
-    tm gmt_tm = {};
-
-    SAFE_LOCALTIME(&t, &local_tm);
-    SAFE_GMTIME(&t, &gmt_tm);
-
-    std::time_t local = std::mktime(&local_tm);
-    std::time_t gmt = std::mktime(&gmt_tm);
-    pUtc->tick = pLocalTime->tick - (local - gmt) * VITA_CLOCKS_PER_SEC;
+    pUtc->tick = pLocalTime->tick - rtc_local_time_offset_seconds(emuenv) * VITA_CLOCKS_PER_SEC;
 
     return 0;
 }
@@ -54,17 +65,7 @@ EXPORT(int, _sceRtcConvertUtcToLocalTime, const SceRtcTick *pUtc, SceRtcTick *pL
         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
     }
 
-    std::time_t t = std::time(nullptr);
-
-    tm local_tm = {};
-    tm gmt_tm = {};
-
-    SAFE_LOCALTIME(&t, &local_tm);
-    SAFE_GMTIME(&t, &gmt_tm);
-
-    std::time_t local = std::mktime(&local_tm);
-    std::time_t gmt = std::mktime(&gmt_tm);
-    pLocalTime->tick = pUtc->tick + (local - gmt) * VITA_CLOCKS_PER_SEC;
+    pLocalTime->tick = pUtc->tick + rtc_local_time_offset_seconds(emuenv) * VITA_CLOCKS_PER_SEC;
     return 0;
 }
 
@@ -88,9 +89,12 @@ EXPORT(int, _sceRtcFormatRFC3339LocalTime) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceRtcGetCurrentAdNetworkTick) {
-    TRACY_FUNC(_sceRtcGetCurrentAdNetworkTick);
-    return UNIMPLEMENTED();
+EXPORT(int, _sceRtcGetCurrentAdNetworkTick, SceRtcTick *tick) {
+    TRACY_FUNC(_sceRtcGetCurrentAdNetworkTick, tick);
+    if (tick == nullptr)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+    set_emulated_network_tick(tick, emuenv.kernel.base_tick.tick);
+    return 0;
 }
 
 EXPORT(int, _sceRtcGetCurrentClock, SceDateTime *datePtr, int iTimeZone) {
@@ -111,24 +115,17 @@ EXPORT(int, _sceRtcGetCurrentClockLocalTime, SceDateTime *datePtr) {
         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
     }
 
-    std::time_t t = std::time(nullptr);
-
-    tm local_tm = {};
-    tm gmt_tm = {};
-
-    SAFE_LOCALTIME(&t, &local_tm);
-    SAFE_GMTIME(&t, &gmt_tm);
-
-    std::time_t local = std::mktime(&local_tm);
-    std::time_t gmt = std::mktime(&gmt_tm);
-    uint64_t tick = rtc_get_ticks(emuenv.kernel.base_tick.tick) + (local - gmt) * VITA_CLOCKS_PER_SEC;
+    uint64_t tick = rtc_get_ticks(emuenv.kernel.base_tick.tick) + rtc_local_time_offset_seconds(emuenv) * VITA_CLOCKS_PER_SEC;
     __RtcTicksToPspTime(datePtr, tick);
     return 0;
 }
 
-EXPORT(int, _sceRtcGetCurrentDebugNetworkTick) {
-    TRACY_FUNC(_sceRtcGetCurrentDebugNetworkTick);
-    return UNIMPLEMENTED();
+EXPORT(int, _sceRtcGetCurrentDebugNetworkTick, SceRtcTick *tick) {
+    TRACY_FUNC(_sceRtcGetCurrentDebugNetworkTick, tick);
+    if (tick == nullptr)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+    set_emulated_network_tick(tick, emuenv.kernel.base_tick.tick);
+    return 0;
 }
 
 EXPORT(int, _sceRtcGetCurrentGpsTick) {
@@ -138,18 +135,18 @@ EXPORT(int, _sceRtcGetCurrentGpsTick) {
 
 EXPORT(int, _sceRtcGetCurrentNetworkTick, SceRtcTick *tick) {
     TRACY_FUNC(_sceRtcGetCurrentNetworkTick, tick);
-    if (tick == nullptr) {
+    if (tick == nullptr)
         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
-    }
-
-    tick->tick = rtc_get_ticks(emuenv.kernel.base_tick.tick);
-
+    set_emulated_network_tick(tick, emuenv.kernel.base_tick.tick);
     return 0;
 }
 
-EXPORT(int, _sceRtcGetCurrentRetainedNetworkTick) {
-    TRACY_FUNC(_sceRtcGetCurrentRetainedNetworkTick);
-    return UNIMPLEMENTED();
+EXPORT(int, _sceRtcGetCurrentRetainedNetworkTick, SceRtcTick *tick) {
+    TRACY_FUNC(_sceRtcGetCurrentRetainedNetworkTick, tick);
+    if (tick == nullptr)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+    set_emulated_network_tick(tick, emuenv.kernel.base_tick.tick);
+    return 0;
 }
 
 EXPORT(int, _sceRtcGetCurrentTick, SceRtcTick *tick) {

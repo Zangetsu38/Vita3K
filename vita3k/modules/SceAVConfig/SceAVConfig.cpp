@@ -15,7 +15,19 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
 #include <module/module.h>
+#include <regmgr/functions.h>
+
+#include "../SceSblACMgr/SceSblACMgrForDriver.h"
+
+static int get_sound_setting(EmuEnvState &emuenv, const char *name, int default_value) {
+    if (!emuenv.regmgr.system_dreg_valid)
+        return default_value;
+    return regmgr::get_int_value(emuenv.regmgr, "/CONFIG/SOUND", name);
+}
 
 EXPORT(int, sceAVConfigChangeReg) {
     return UNIMPLEMENTED();
@@ -53,12 +65,45 @@ EXPORT(int, sceAVConfigGetShutterVol) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceAVConfigGetSystemVol) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceAVConfigGetSystemVol, Ptr<int> volume) {
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    const auto caller_pid = emuenv.kernel.get_thread_process_id(thread_id);
+    if (!caller_pid)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    // if (CALL_EXPORT(SceSblACMgrForDriver_IsSystemProgram, 0) != 1)
+    //     return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    MemState &mem = caller->cpu->mem;
+    if (!volume || !is_valid_addr_len(mem, volume.address(), sizeof(int))) {
+        LOG_ERROR("sceAVConfigGetSystemVol: invalid pointer");
+        return static_cast<int>(0x803A0102);
+    }
+    *volume.get(mem) = get_sound_setting(emuenv, "main_volume", 21);
+    return 0;
 }
 
-EXPORT(int, sceAVConfigGetVolCtrlEnable) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceAVConfigGetVolCtrlEnable, Ptr<int> mode, Ptr<int> muted, Ptr<int> avls) {
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    const auto caller_pid = emuenv.kernel.get_thread_process_id(thread_id);
+    if (!caller_pid)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    // if (CALL_EXPORT(SceSblACMgrForDriver_IsSystemProgram, 0) != 1)
+    //    return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    MemState &mem = caller->cpu->mem;
+    if (!mode || !muted || !avls
+        || !is_valid_addr_len(mem, mode.address(), sizeof(int))
+        || !is_valid_addr_len(mem, muted.address(), sizeof(int))
+        || !is_valid_addr_len(mem, avls.address(), sizeof(int))) {
+        LOG_ERROR("sceAVConfigGetVolCtrlEnable: invalid pointer");
+        return static_cast<int>(0x803A0102);
+    }
+    *mode.get(mem) = 1;
+    *muted.get(mem) = get_sound_setting(emuenv, "speaker_mute", 0);
+    *avls.get(mem) = get_sound_setting(emuenv, "avls", 0);
+    return 0;
 }
 
 EXPORT(int, sceAVConfigHdmiCecCmdOneTouchPlay) {

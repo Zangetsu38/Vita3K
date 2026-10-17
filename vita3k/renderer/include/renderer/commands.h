@@ -22,6 +22,8 @@
 #include <functional>
 #include <vector>
 
+struct MemState;
+
 namespace renderer {
 #define REPORT_MISSING(backend) LOG_ERROR("Unimplemented graphics API handler with backend {}", (int)backend)
 #define REPORT_STUBBED() LOG_INFO("Stubbed")
@@ -90,7 +92,8 @@ enum class CommandOpcode : std::uint8_t {
 enum CommandErrorCode {
     CommandErrorCodeNone = 0,
     CommandErrorCodePending = -1,
-    CommandErrorArgumentsTooLarge = -2
+    CommandErrorArgumentsTooLarge = -2,
+    CommandErrorBackendFailure = -3
 };
 
 constexpr std::size_t MAX_COMMAND_DATA_SIZE = 0x20;
@@ -118,6 +121,7 @@ struct CommandList {
     Command *last{ nullptr };
 
     Context *context; ///< The HLE context that try to execute this buffer.
+    MemState *address_space = nullptr;
 };
 
 struct CommandHelper {

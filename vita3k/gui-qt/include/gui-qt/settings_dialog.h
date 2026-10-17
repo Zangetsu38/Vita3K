@@ -93,6 +93,7 @@ private:
     void populate_modules_list();
     void populate_tracy_modules_list();
     void populate_cameras_list();
+    void populate_network_interface_lists();
     void populate_adhoc_list();
     void setup_connections();
     void setup_dirty_tracking();

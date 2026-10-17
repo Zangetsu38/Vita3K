@@ -17,24 +17,32 @@
 
 #include <cpu/state.h>
 #include <kernel/state.h>
+#include <mem/functions.h>
 
 #include <ngs/modules/atrac9.h>
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/lock_and_find.h>
+#include <util/log.h>
 
 #include <util/vector_utils.h>
+
+#include <cstring>
+#include <limits>
 
 namespace ngs {
 Rack::Rack(System *mama, const Ptr<void> memspace, const uint32_t memspace_size)
     : MempoolObject(memspace, memspace_size)
-    , system(mama) {}
+    , system(mama)
+    , storage_size(memspace_size) {}
 
 System::System(const Ptr<void> memspace, const uint32_t memspace_size)
     : MempoolObject(memspace, memspace_size)
+    , storage_size(memspace_size)
     , max_voices(0)
     , granularity(0)
-    , sample_rate(0) {}
+    , sample_rate(0)
+    , flags(default_system_flags) {}
 
 bool Patch::is_active() const {
     return output_sub_index != -1;
@@ -114,7 +122,7 @@ ModuleData::ModuleData()
     , flags(0) {
 }
 
-SceNgsBufferInfo *ModuleData::lock_params(const MemState &mem) {
+SceNgsBufferInfo *ModuleData::lock_params(MemState &mem) {
     const std::lock_guard<std::mutex> guard(*parent->voice_mutex);
 
     // Save a copy of previous set of data
@@ -122,26 +130,64 @@ SceNgsBufferInfo *ModuleData::lock_params(const MemState &mem) {
         return nullptr;
     }
 
-    const uint8_t *current_data = info.data.cast<const uint8_t>().get(mem);
     last_info.resize(info.size);
-    memcpy(last_info.data(), current_data, info.size);
+    if (!read_guest_memory(mem, info.data.address(), last_info.data(), info.size)) {
+        LOG_ERROR("NGS parameter buffer at {:#x} is not readable (size {})", info.data.address(), info.size);
+        return nullptr;
+    }
 
     flags |= PARAMS_LOCK;
 
     return &info;
 }
 
-bool ModuleData::unlock_params(const MemState &mem) {
+void ModuleData::cancel_params_lock() {
+    const std::lock_guard<std::mutex> guard(*parent->voice_mutex);
+    flags &= ~PARAMS_LOCK;
+}
+
+bool ModuleData::unlock_params(MemState &mem, bool validate_memory) {
     const std::lock_guard<std::mutex> guard(*parent->voice_mutex);
 
-    parent->rack->modules[index]->on_param_change(mem, *this);
+    if (!(flags & PARAMS_LOCK))
+        return false;
 
-    if (flags & PARAMS_LOCK) {
+    if (validate_memory) {
+        if (info.size < parent->rack->modules[index]->get_buffer_parameter_size() || last_info.size() < info.size)
+            return false;
+    }
+    if (validate_memory && info.size) {
+        const GuestMemoryRange range{ info.data.address(), info.size };
+        const uint64_t pin = pin_guest_memory(mem, std::span(&range, 1));
+        if (!pin)
+            return false;
+        bool valid = true;
+        {
+            const std::lock_guard protect_lock(mem.protect_mutex);
+            const uint64_t end = uint64_t(range.address) + range.size;
+            for (const auto &[start, segment] : mem.protect_tree) {
+                if (segment.perm != MemPerm::ReadWrite && uint64_t(start) < end && uint64_t(start) + segment.size > range.address)
+                    valid = false;
+            }
+            // Parameter callbacks use a native pointer spanning the whole buffer.
+            const auto base = reinterpret_cast<uintptr_t>(Ptr<const uint8_t>(range.address).get(mem));
+            for (uint64_t address = (uint64_t(range.address) / STANDARD_PAGE_SIZE + 1) * STANDARD_PAGE_SIZE; address < end; address += STANDARD_PAGE_SIZE) {
+                if (reinterpret_cast<uintptr_t>(Ptr<const uint8_t>(static_cast<Address>(address)).get(mem)) != base + (address - range.address))
+                    valid = false;
+            }
+            if (valid)
+                parent->rack->modules[index]->on_param_change(mem, *this);
+        }
+        unpin_guest_memory(mem, pin);
+        if (!valid)
+            return false;
         flags &= ~PARAMS_LOCK;
         return true;
     }
 
-    return false;
+    parent->rack->modules[index]->on_param_change(mem, *this);
+    flags &= ~PARAMS_LOCK;
+    return true;
 }
 
 void ModuleData::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
@@ -169,7 +215,7 @@ void Voice::init(Rack *mama) {
 Ptr<Patch> Voice::patch(const MemState &mem, const int32_t index, int32_t subindex, int32_t dest_index, Ptr<Voice> source, Ptr<Voice> dest) {
     const std::lock_guard<std::mutex> guard(*voice_mutex);
 
-    if (index >= MAX_OUTPUT_PORT) {
+    if (index < 0 || index >= MAX_OUTPUT_PORT || subindex < -1) {
         // We don't have enough port for you!
         return {};
     }
@@ -184,7 +230,7 @@ Ptr<Patch> Voice::patch(const MemState &mem, const int32_t index, int32_t subind
         }
     }
 
-    if (subindex >= patches[index].size()) {
+    if (subindex < 0 || subindex >= patches[index].size()) {
         return {};
     }
 
@@ -195,7 +241,10 @@ Ptr<Patch> Voice::patch(const MemState &mem, const int32_t index, int32_t subind
 
     if (!patches[index][subindex]) {
         // Create the patch incase it's not yet existed
-        patches[index][subindex] = rack->alloc_and_init<Patch>(mem);
+        patches[index][subindex] = rack->alloc<Patch>();
+        if (!patches[index][subindex])
+            return {};
+        new (patches[index][subindex].get(mem)) Patch();
     }
 
     Patch *patch = patches[index][subindex].get(mem);
@@ -352,19 +401,53 @@ uint32_t Rack::get_required_memspace_size(MemState &mem, SceNgsRackDescription *
 }
 
 bool init(State &ngs, MemState &mem) {
-    voice_definition_init(ngs, mem);
-
-    return true;
+    return voice_definition_init(ngs, mem);
 }
 
 void deinit(State &ngs, MemState &mem) {
+    {
+        const std::lock_guard lock(ngs.process_states_mutex);
+        for (auto &[process_mem, state] : ngs.process_states) {
+            while (!state->systems.empty())
+                release_system(*state, *process_mem, state->systems.back());
+            if (state->definitions)
+                free(*process_mem, state->definitions.address());
+        }
+        ngs.process_states.clear();
+    }
     while (!ngs.systems.empty()) {
         release_system(ngs, mem, ngs.systems.back());
     }
 
-    Atrac9Module::free_swr_contexts();
-
     ngs.definitions = Ptr<VoiceDefinition>(0);
+}
+
+State *get_process_state(State &ngs, MemState &primary_mem, MemState &process_mem) {
+    if (&primary_mem == &process_mem)
+        return &ngs;
+    const std::lock_guard lock(ngs.process_states_mutex);
+    const auto existing = ngs.process_states.find(&process_mem);
+    if (existing != ngs.process_states.end())
+        return existing->second.get();
+    auto state = std::make_unique<State>();
+    if (!init(*state, process_mem))
+        return nullptr;
+    State *result = state.get();
+    ngs.process_states.emplace(&process_mem, std::move(state));
+    return result;
+}
+
+void release_process_state(State &ngs, MemState &process_mem) {
+    const std::lock_guard lock(ngs.process_states_mutex);
+    const auto it = ngs.process_states.find(&process_mem);
+    if (it == ngs.process_states.end())
+        return;
+    State &state = *it->second;
+    while (!state.systems.empty())
+        release_system(state, process_mem, state.systems.back());
+    if (state.definitions)
+        free(process_mem, state.definitions.address());
+    ngs.process_states.erase(it);
 }
 
 bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size) {
@@ -463,6 +546,30 @@ void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
     if (!rack)
         return;
 
+    auto &scheduler = system->voice_scheduler;
+    if (scheduler.is_updating) {
+        for (const auto &voice : rack->voices)
+            scheduler.released_voices_during_update.insert(voice.get(mem));
+    }
+
+    for (Rack *other : system->racks) {
+        if (!other || other == rack)
+            continue;
+        for (const auto &voice : other->voices) {
+            Voice *source = voice.get(mem);
+            const std::lock_guard lock(*source->voice_mutex);
+            for (const auto &patches : source->patches) {
+                for (const auto &patch_ptr : patches) {
+                    Patch *patch = patch_ptr.get(mem);
+                    if (patch && std::ranges::contains(rack->voices, patch->dest)) {
+                        patch->output_sub_index = -1;
+                        patch->dest = nullptr;
+                    }
+                }
+            }
+        }
+    }
+
     // remove all queued voices
     for (const auto &voice : rack->voices) {
         Voice *v = voice.get(mem);
@@ -476,6 +583,10 @@ void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
         v->~Voice();
     }
 
+    // A module callback can release its own rack before process() has returned.
+    if (scheduler.processing_rack == rack)
+        scheduler.processing_module_keepalive = std::move(rack->modules[scheduler.processing_module_index]);
+
     // remove from system
     vector_utils::erase_first(system->racks, rack);
 
@@ -483,7 +594,190 @@ void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
     rack->~Rack();
 }
 
+bool is_process_storage_available(const State &ngs, Address address, uint32_t size) {
+    const uint64_t end = uint64_t(address) + size;
+    const auto overlaps = [address, end](Address other, uint32_t other_size) {
+        return uint64_t(address) < uint64_t(other) + other_size && uint64_t(other) < end;
+    };
+    if (overlaps(ngs.definitions.address(), static_cast<uint32_t>(BussType::BUSS_MAX) * sizeof(VoiceDefinition)))
+        return false;
+    for (const System *system : ngs.systems) {
+        if (overlaps(system->memspace.address(), system->storage_size))
+            return false;
+        for (const Rack *rack : system->racks) {
+            if (rack && overlaps(rack->memspace.address(), rack->storage_size))
+                return false;
+        }
+    }
+    return true;
+}
+
+bool get_process_rack_required_size(State &ngs, const MemState &mem, const SceNgsRackDescription &description, uint32_t &size) {
+    const uint64_t base = ngs.definitions.address();
+    const uint64_t address = description.definition.address();
+    if (!base || address < base || address >= base + static_cast<uint32_t>(BussType::BUSS_MAX) * sizeof(VoiceDefinition) || (address - base) % sizeof(VoiceDefinition) != 0 || description.voice_count <= 0 || description.channels_per_voice < 0 || description.channels_per_voice > 2 || description.max_patches_per_input < 0 || description.patches_per_output < 0)
+        return false;
+    VoiceDefinition *definition = description.definition.get(mem);
+    if (definition->type >= BussType::BUSS_MAX || definition->output_count == 0 || definition->output_count > MAX_OUTPUT_PORT)
+        return false;
+    const uint64_t per_voice = sizeof(Voice) + uint64_t(2) * get_voice_definition_size(definition) + uint64_t(description.patches_per_output) * definition->output_count * sizeof(Patch);
+    const uint64_t max_size = std::numeric_limits<uint32_t>::max();
+    if (per_voice > (max_size - sizeof(Rack)) / static_cast<uint32_t>(description.voice_count))
+        return false;
+    size = static_cast<uint32_t>(sizeof(Rack) + uint64_t(description.voice_count) * per_voice);
+    return true;
+}
+
+Voice *find_process_voice(State &ngs, const MemState &mem, Ptr<Voice> voice) {
+    if (!voice)
+        return nullptr;
+    for (System *system : ngs.systems) {
+        for (Rack *rack : system->racks) {
+            if (rack && std::ranges::contains(rack->voices, voice))
+                return voice.get(mem);
+        }
+    }
+    return nullptr;
+}
+
+Patch *find_process_patch(State &ngs, const MemState &mem, Ptr<Patch> patch) {
+    if (!patch)
+        return nullptr;
+    for (System *system : ngs.systems) {
+        if (!system)
+            continue;
+        for (Rack *rack : system->racks) {
+            if (!rack)
+                continue;
+            for (const Ptr<Voice> voice_handle : rack->voices) {
+                Voice *voice = voice_handle.get(mem);
+                if (!voice)
+                    continue;
+                for (const auto &patches : voice->patches) {
+                    if (std::ranges::contains(patches, patch))
+                        return patch.get(mem);
+                }
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool get_process_voice_info(State &ngs, const MemState &mem, Ptr<Voice> voice, SceNgsVoiceInfo &info) {
+    Voice *owned = find_process_voice(ngs, mem, voice);
+    if (!owned)
+        return false;
+    const std::lock_guard lock(*owned->voice_mutex);
+    switch (owned->state) {
+    case VOICE_STATE_AVAILABLE: info.voice_state = SCE_NGS_VOICE_STATE_AVAILABLE; break;
+    case VOICE_STATE_ACTIVE: info.voice_state = SCE_NGS_VOICE_STATE_ACTIVE; break;
+    case VOICE_STATE_FINALIZING: info.voice_state = SCE_NGS_VOICE_STATE_FINALIZE; break;
+    case VOICE_STATE_UNLOADING: info.voice_state = SCE_NGS_VOICE_STATE_UNLOADING; break;
+    default: return false;
+    }
+    if (owned->is_pending)
+        info.voice_state |= SCE_NGS_VOICE_STATE_PENDING;
+    if (owned->is_paused)
+        info.voice_state |= SCE_NGS_VOICE_STATE_PAUSED;
+    if (owned->is_keyed_off)
+        info.voice_state |= SCE_NGS_VOICE_STATE_KEY_OFF;
+    info.num_modules = static_cast<SceUInt32>(owned->datas.size());
+    info.num_inputs = static_cast<SceUInt32>(owned->inputs.inputs.size());
+    info.num_outputs = owned->rack->vdef->output_count;
+    info.num_patches_per_output = static_cast<SceUInt32>(owned->rack->patches_per_output);
+    info.update_passed = owned->frame_count;
+    return true;
+}
+
+bool set_process_patch_volumes(State &ngs, const MemState &mem, Ptr<Patch> patch, uint32_t offset, const float *volumes, uint32_t count) {
+    constexpr uint32_t channels = SCE_NGS_MAX_SYSTEM_CHANNELS * SCE_NGS_MAX_SYSTEM_CHANNELS;
+    if (offset > channels || count > channels - offset || (count && !volumes))
+        return false;
+    Patch *owned = find_process_patch(ngs, mem, patch);
+    if (!owned)
+        return false;
+    Voice *source = find_process_voice(ngs, mem, owned->source);
+    if (!source)
+        return false;
+    const std::lock_guard lock(*source->voice_mutex);
+    if (!owned->is_active())
+        return false;
+    if (count)
+        std::memcpy(reinterpret_cast<uint8_t *>(owned->volume_matrix) + offset * sizeof(float), volumes, count * sizeof(float));
+    return true;
+}
+
+bool set_process_patch_matrix(State &ngs, MemState &mem, Ptr<Patch> patch, Ptr<const SceNgsVolumeMatrix> matrix) {
+    std::array<float, SCE_NGS_MAX_SYSTEM_CHANNELS * SCE_NGS_MAX_SYSTEM_CHANNELS> copied{};
+    if (!matrix || !read_guest_memory(mem, matrix.address(), copied.data(), sizeof(copied)))
+        return false;
+    return set_process_patch_volumes(ngs, mem, patch, 0, copied.data(), static_cast<uint32_t>(copied.size()));
+}
+
+bool play_process_voice(State &ngs, const MemState &mem, Ptr<Voice> voice) {
+    Voice *owned_voice = find_process_voice(ngs, mem, voice);
+    if (!owned_voice)
+        return false;
+    owned_voice->is_pending = true;
+    const bool played = owned_voice->rack->system->voice_scheduler.play(mem, owned_voice);
+    owned_voice->is_pending = false;
+    return played;
+}
+
+bool get_process_voice_state(State &ngs, const MemState &mem, Ptr<Voice> voice, uint32_t module, uint32_t max_size, std::vector<uint8_t> &data) {
+    Voice *owned_voice = find_process_voice(ngs, mem, voice);
+    if (!owned_voice)
+        return false;
+    const std::lock_guard lock(*owned_voice->voice_mutex);
+    const ModuleData *storage = owned_voice->module_storage(module);
+    if (!storage)
+        return false;
+    const size_t count = std::min<size_t>(max_size, storage->guest_state_data.size());
+    data.assign(storage->guest_state_data.begin(), storage->guest_state_data.begin() + count);
+    return true;
+}
+
+Ptr<Patch> create_process_voice_patch(State &ngs, const MemState &mem, SceNgsPatchSetupInfo &info) {
+    Voice *source = find_process_voice(ngs, mem, info.source);
+    Voice *dest = find_process_voice(ngs, mem, info.dest);
+    if (!source || !dest || source->rack->system != dest->rack->system || info.source_output_index < 0 || info.source_output_index >= MAX_OUTPUT_PORT || static_cast<uint32_t>(info.source_output_index) >= source->rack->vdef->output_count || info.source_output_subindex < -1 || info.dest_input_index < 0 || static_cast<size_t>(info.dest_input_index) >= dest->inputs.inputs.size())
+        return {};
+    return source->rack->system->voice_scheduler.patch(mem, &info);
+}
+
+bool remove_process_voice_patch(State &ngs, const MemState &mem, Ptr<Patch> patch) {
+    if (!patch)
+        return false;
+    for (System *system : ngs.systems) {
+        if (!system)
+            continue;
+        for (Rack *rack : system->racks) {
+            if (!rack)
+                continue;
+            for (const Ptr<Voice> voice_handle : rack->voices) {
+                Voice *voice = voice_handle.get(mem);
+                if (!voice)
+                    continue;
+                for (const auto &patches : voice->patches) {
+                    if (std::ranges::contains(patches, patch))
+                        return voice->remove_patch(mem, patch);
+                }
+            }
+        }
+    }
+    return false;
+}
+
 Ptr<VoiceDefinition> get_voice_definition(State &ngs, MemState &mem, ngs::BussType type) {
     return ngs.definitions + static_cast<int>(type);
+}
+
+Ptr<VoiceDefinition> get_process_voice_definition(State &ngs, MemState &primary_mem, MemState &process_mem, ngs::BussType type) {
+    State *state = get_process_state(ngs, primary_mem, process_mem);
+    if (!state) {
+        LOG_ERROR("Cannot initialize NGS definitions for the calling process");
+        return {};
+    }
+    return get_voice_definition(*state, process_mem, type);
 }
 } // namespace ngs

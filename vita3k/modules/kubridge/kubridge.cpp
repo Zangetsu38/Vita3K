@@ -27,8 +27,8 @@
 
 #include <cpu/state.h>
 #include <kernel/state.h>
+#include <kernel/sysmem_state.h>
 #include <mem/functions.h>
-#include <modules/sysmem_state.h>
 #include <util/align.h>
 #include <util/log.h>
 #include <util/tracy.h>

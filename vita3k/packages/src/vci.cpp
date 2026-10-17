@@ -23,7 +23,7 @@
  * (gc2nonpdrm.c + lib/gcauthmgr.c + lib/npdrm.c). Pipeline:
  *   VCI header -> cart_secret = SHA256(CMD56 keys) -> parse SceMBR ->
  *   extract gro0 (exFAT) -> read on-card RIF -> derive klicensee ->
- *   write a NoNpDrm work.bin -> reuse decrypt_install_nonpdrm() for the PFS.
+ *   write a NoNpDrm work.bin -> install its license and retain the PFS.
  */
 
 #include <openssl/evp.h>
@@ -110,7 +110,7 @@ static bool find_gro0(const SceMbr &mbr, uint64_t &offset, uint64_t &size) {
 // Build a NoNpDrm work.bin from the on-card RIF + derived klicensee.
 static void write_nonpdrm_license(const SceNpDrmLicense &old_license, const uint8_t klicensee[0x10], const fs::path &work_bin_path) {
     SceNpDrmLicense lic{};
-    lic.aid = 0x0123456789ABCDEFLL;
+    lic.aid = byte_swap<uint64_t>(0x0123456789ABCDEFLL);
     lic.version = byte_swap<uint16_t>(1);
     lic.version_flag = byte_swap<uint16_t>(1);
     lic.type = byte_swap<uint16_t>(1);
@@ -278,12 +278,18 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
     }
     progress(60);
 
-    // 12) PFS stage: decrypt in place + install the license (shared NoNpDrm tail)
+    // 12) Install the license and retain the authenticated PFS.
     const fs::path drmlicpath = path / "sce_sys" / "package" / "work.bin";
-    const auto decrypt_progress = [&](float frac) { progress(60.f + frac * 40.f); };
-    if (!decrypt_install_nonpdrm(emuenv, drmlicpath, path, decrypt_progress)) {
-        LOG_ERROR("VCI: failed to decrypt {} [{}]", emuenv.app_info.app_title, emuenv.app_info.app_title_id);
+    if (!install_nonpdrm_license(emuenv, drmlicpath, path)) {
+        LOG_ERROR("VCI: failed to authenticate {} [{}]", emuenv.app_info.app_title, emuenv.app_info.app_title_id);
         fs::remove_all(path);
+        fs::remove_all(staging);
+        return false;
+    }
+
+    if (!create_appmeta(emuenv.io, emuenv.vita_fs_path, emuenv.app_info.app_title_id,
+            AppmetaInstallType::Application, AppmetaFormat::Protected, AppmetaCache::Populate)) {
+        LOG_ERROR("VCI: app was copied, but appmeta or its shell cache could not be completed for {}", title_id);
         fs::remove_all(staging);
         return false;
     }

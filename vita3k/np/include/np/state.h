@@ -22,15 +22,21 @@
 
 #include <mem/util.h> // Address.
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <vector>
+
+struct MemState;
 
 struct SceNpServiceStateCallback {
     Address pc;
     Address data;
+    // Callback pointers are virtual addresses; bind them to their owning memory, not a reusable PID.
+    const MemState *address_space;
 };
 
 using np_callbacks = std::map<int, SceNpServiceStateCallback>;
@@ -87,8 +93,13 @@ struct NpTusState {
 
 struct NpState {
     bool inited = false;
+    std::mutex process_mutex;
+    std::set<const MemState *> initialized_processes;
+    std::map<const MemState *, bool> process_psn_signed_in;
+    std::atomic<bool> activity_inited{ false };
     np_callbacks cbs;
-    SceUID state_cb_id;
+    std::map<const MemState *, SceUID> state_cb_ids;
+    std::mutex callback_mutex;
 
     NpTrophyState trophy_state;
     NpTusState tus_state;

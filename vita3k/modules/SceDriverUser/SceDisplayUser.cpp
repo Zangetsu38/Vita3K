@@ -16,9 +16,18 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "../SceDisplay/SceDisplay.h"
+#include "display_guest.h"
+#include <cpu/state.h>
+#include <display/guest_frame.h>
+#include <display/process_frames.h>
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <module/module.h>
+#include <renderer/state.h>
 
 #include <util/tracy.h>
+
+#include <new>
 
 TRACY_MODULE_NAME(SceDisplayUser);
 
@@ -33,9 +42,43 @@ EXPORT(SceInt32, sceDisplayGetFrameBuf, SceDisplayFrameBuf *pFrameBuf, SceDispla
     return CALL_EXPORT(_sceDisplayGetFrameBuf, pFrameBuf, sync, &pFrameBuf_size);
 }
 
-EXPORT(int, sceDisplayGetFrameBufInternal) {
-    TRACY_FUNC(sceDisplayGetFrameBufInternal);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceDisplayGetFrameBufInternal, uint32_t head, uint32_t plane, Ptr<SceDisplayFrameBuf> pFrameBuf, SceDisplaySetBufSync sync) {
+    TRACY_FUNC(sceDisplayGetFrameBufInternal, head, plane, pFrameBuf, sync);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    const auto pid = emuenv.kernel.get_thread_process_id(thread_id);
+    if (!caller || !pid)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+    if (head > 1 || plane > 1)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_HEAD);
+    if (!pFrameBuf)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+    if (sync != SCE_DISPLAY_SETBUF_NEXTFRAME && sync != SCE_DISPLAY_SETBUF_IMMEDIATE)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_UPDATETIMING);
+
+    auto &mem = caller->cpu->mem;
+    SceDisplayFrameBuf frame{};
+    if (!threadmgr::copy_sync_guest_bytes(mem, pFrameBuf.address(), &frame, sizeof(frame), false))
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+    if (frame.size != sizeof(SceDisplayFrameBuf) && frame.size != sizeof(SceDisplayFrameBuf2))
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_VALUE);
+    SceDisplayFrameBuf2 result{};
+    if (!threadmgr::copy_sync_guest_bytes(mem, pFrameBuf.address(), &result, frame.size, false))
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+
+    DisplayFrameInfo info{};
+    {
+        const std::lock_guard lock(emuenv.display.display_info_mutex);
+        const auto process_frame = emuenv.display.process_frames.find(*pid);
+        info = process_frame != emuenv.display.process_frames.end() ? process_frame->second : emuenv.display.sce_frame;
+    }
+    result.base = info.base;
+    result.pitch = info.pitch;
+    result.pixelformat = info.pixelformat;
+    result.width = static_cast<uint32_t>(info.image_size.x);
+    result.height = static_cast<uint32_t>(info.image_size.y);
+    if (!threadmgr::copy_sync_guest_bytes(mem, pFrameBuf.address(), &result, frame.size, true))
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+    return SCE_DISPLAY_ERROR_OK;
 }
 
 EXPORT(SceInt32, sceDisplayGetMaximumFrameBufResolution, SceInt32 *width, SceInt32 *height) {
@@ -48,12 +91,66 @@ EXPORT(int, sceDisplayGetResolutionInfoInternal) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, SceDisplaySetBufSync sync) {
+EXPORT(SceInt32, sceDisplaySetFrameBuf, Ptr<const SceDisplayFrameBuf> pFrameBuf, SceDisplaySetBufSync sync) {
     TRACY_FUNC(sceDisplaySetFrameBuf, pFrameBuf, sync);
-    uint32_t pFrameBuf_size = 0; // In the case that pFrameBuf is actually 0 _sceDisplaySetFrameBuf will handle it, we just need this to not cause a segfault
-    if (pFrameBuf)
-        pFrameBuf_size = pFrameBuf->size;
-    return CALL_EXPORT(_sceDisplaySetFrameBuf, pFrameBuf, sync, &pFrameBuf_size);
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    const auto pid = emuenv.kernel.get_thread_process_id(thread_id);
+    if (!thread || !pid)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+    auto &mem = thread->cpu->mem;
+    const bool primary = emuenv.kernel.is_primary_address_space(mem);
+    if (!pFrameBuf) {
+        if (primary) {
+            uint32_t size = 0;
+            return CALL_EXPORT(_sceDisplaySetFrameBuf, nullptr, sync, &size);
+        }
+        if (sync != SCE_DISPLAY_SETBUF_NEXTFRAME && sync != SCE_DISPLAY_SETBUF_IMMEDIATE)
+            return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_UPDATETIMING);
+        if (display::clear_process_frame(emuenv.display, *pid))
+            emuenv.renderer->should_display = true;
+        return SCE_DISPLAY_ERROR_OK;
+    }
+
+    const auto request = display_guest::read_frame(mem, pFrameBuf);
+    if (!request)
+        return RET_ERROR(request.error());
+    const SceDisplayFrameBuf &frame_buf = *request;
+    if (primary) {
+        uint32_t size = frame_buf.size;
+        return CALL_EXPORT(_sceDisplaySetFrameBuf, &frame_buf, sync, &size);
+    }
+    if (!frame_buf.base)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+    if (frame_buf.pitch < frame_buf.width)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_PITCH);
+    if (frame_buf.pixelformat != SCE_DISPLAY_PIXELFORMAT_A8B8G8R8)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_PIXELFORMAT);
+    if (sync != SCE_DISPLAY_SETBUF_NEXTFRAME && sync != SCE_DISPLAY_SETBUF_IMMEDIATE)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_UPDATETIMING);
+    if (frame_buf.width < 480 || frame_buf.height < 272 || frame_buf.pitch < 480
+        || frame_buf.width > 1920 || frame_buf.height > 1088)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_RESOLUTION);
+    if (sync == SCE_DISPLAY_SETBUF_IMMEDIATE)
+        STUBBED("SCE_DISPLAY_SETBUF_IMMEDIATE is not supported");
+
+    DisplayFrameInfo frame{};
+    frame.base = frame_buf.base;
+    frame.pitch = frame_buf.pitch;
+    frame.pixelformat = frame_buf.pixelformat;
+    frame.image_size = { static_cast<int32_t>(frame_buf.width), static_cast<int32_t>(frame_buf.height) };
+    frame.owner_pid = *pid;
+    try {
+        if (!display::capture_software_frame(mem, frame))
+            return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+        if (display::submit_process_frame(emuenv.display, *pid, std::move(frame))) {
+            emuenv.frame_count.fetch_add(1, std::memory_order_relaxed);
+            emuenv.renderer->should_display = true;
+        }
+    } catch (const std::bad_alloc &) {
+        return RET_ERROR(SCE_DISPLAY_ERROR_NO_PIXEL_DATA);
+    }
+    LOG_WARN_ONCE("Secondary display uses software framebuffer snapshots and simplified Shell alpha composition");
+    return SCE_DISPLAY_ERROR_OK;
 }
 
 EXPORT(int, sceDisplaySetFrameBufForCompat) {
@@ -67,5 +164,8 @@ EXPORT(int, sceDisplaySetFrameBufInternal, uint32_t maybe_buffer_idx, uint32_t u
     if (maybe_buffer_idx != 0)
         return 0;
 
-    return CALL_EXPORT(_sceDisplaySetFrameBuf, pFrameBuf, sync, nullptr);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_DISPLAY_ERROR_INVALID_ADDR);
+    return CALL_EXPORT(sceDisplaySetFrameBuf, Ptr<const SceDisplayFrameBuf>(pFrameBuf, caller->cpu->mem), sync);
 }

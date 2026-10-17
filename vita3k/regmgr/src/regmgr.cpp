@@ -15,10 +15,29 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
+#include <kernel/types.h>
+#include <limits>
+#include <mem/functions.h>
+#include <mem/state.h>
 #include <regex>
 #include <regmgr/functions.h>
+#include <set>
 #include <sstream>
+#include <system_error>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include <util/bytes.h>
 #include <util/log.h>
@@ -28,6 +47,7 @@
 namespace regmgr {
 
 constexpr std::array<unsigned char, 16> xorKey = { 0x89, 0xFA, 0x95, 0x48, 0xCB, 0x6D, 0x77, 0x9D, 0xA2, 0x25, 0x34, 0xFD, 0xA9, 0x35, 0x59, 0x6E };
+static constexpr uint32_t spaceSize = 32;
 
 static std::string decryptRegistryFile(const fs::path &reg_path) {
     std::vector<char> encryptedData(0);
@@ -54,7 +74,7 @@ static std::string decryptRegistryFile(const fs::path &reg_path) {
     return decryptedData;
 }
 
-static void init_reg_template(RegMgrState &regmgr, const std::string &reg) {
+static bool init_reg_template(RegMgrState &regmgr, const std::string &reg) {
     regmgr.reg_category_template.clear();
     regmgr.reg_template.clear();
 
@@ -112,8 +132,14 @@ static void init_reg_template(RegMgrState &regmgr, const std::string &reg) {
                             values.push_back(s);
                     }
 
-                    const auto valueType = static_cast<RegType>(string_utils::stoi_def(values[0]));
-                    const auto valueSize = static_cast<uint32_t>(string_utils::stoi_def(values[1]));
+                    if (values.size() < 2)
+                        return false;
+                    const auto valueType = static_cast<RegType>(string_utils::stoi_def(values[0], -1));
+                    const auto parsedSize = string_utils::stoi_def(values[1], -1);
+                    if (parsedSize < 0 || (valueType != REG_TYPE_INT && valueType != REG_TYPE_STR && valueType != REG_TYPE_BIN)
+                        || (valueType == REG_TYPE_INT && (parsedSize < 4 || valueName.size() >= spaceSize || static_cast<size_t>(parsedSize) > spaceSize - valueName.size() - 1)))
+                        return false;
+                    const auto valueSize = static_cast<uint32_t>(parsedSize);
                     const auto valueDefault = values.back();
 
                     // Init the value depending on the type
@@ -151,13 +177,379 @@ static void init_reg_template(RegMgrState &regmgr, const std::string &reg) {
             }
         }
     }
+    return !regmgr.reg_template.empty();
 }
 
-static constexpr uint32_t spaceSize = 32;
 static uint32_t get_space_size(const uint32_t str_size) {
     const uint32_t line = 16;
 
-    return spaceSize > str_size ? spaceSize - str_size : ((str_size / line) + 1) * line - str_size;
+    return spaceSize > str_size ? spaceSize - str_size : line - str_size % line;
+}
+
+constexpr const char *account_category = "/CONFIG/NP/";
+constexpr const char *account_name = "account_id";
+
+struct CheckedRegistry {
+    std::vector<char> bytes;
+    size_t account_offset;
+    std::vector<char> *account_value;
+    std::map<std::pair<std::string, std::string>, size_t> value_offsets;
+};
+
+// Validate the complete loaded image against the template and disk before using it.
+static std::optional<CheckedRegistry> check_registry(RegMgrState &regmgr) {
+    if (!regmgr.system_dreg_valid || regmgr.system_dreg_path.empty() || regmgr.reg_category_template.empty() || regmgr.reg_template.empty()) {
+        LOG_ERROR("Registry is not initialized");
+        return std::nullopt;
+    }
+
+    std::ifstream file(regmgr.system_dreg_path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        LOG_ERROR("Cannot open registry");
+        return std::nullopt;
+    }
+    const auto length = file.tellg();
+    if (length < 0 || static_cast<uintmax_t>(length) > std::numeric_limits<size_t>::max()) {
+        LOG_ERROR("Invalid registry size");
+        return std::nullopt;
+    }
+    CheckedRegistry result{ std::vector<char>(static_cast<size_t>(length)), 0, nullptr, {} };
+    file.seekg(0);
+    if (!file || (!result.bytes.empty() && !file.read(result.bytes.data(), length))) {
+        LOG_ERROR("Cannot read complete registry");
+        return std::nullopt;
+    }
+
+    size_t offset = 0;
+    const auto consume = [&](size_t count, size_t &start) {
+        if (count > result.bytes.size() - offset) {
+            LOG_ERROR("Truncated registry");
+            return false;
+        }
+        start = offset;
+        offset += count;
+        return true;
+    };
+    const auto padding = [](size_t size) -> size_t {
+        return size < spaceSize ? spaceSize - size : 16 - size % 16;
+    };
+
+    size_t ignored = 0;
+    if (!consume(spaceSize + 1, ignored))
+        return std::nullopt;
+    std::set<std::string> categories;
+    for (const auto &category : regmgr.reg_category_template) {
+        if (!categories.insert(category).second) {
+            LOG_ERROR("Duplicate registry category");
+            return std::nullopt;
+        }
+        const auto tmpl = regmgr.reg_template.find(category);
+        const auto values = regmgr.system_dreg.find(category);
+        if (tmpl == regmgr.reg_template.end() || values == regmgr.system_dreg.end()) {
+            LOG_ERROR("Missing registry category");
+            return std::nullopt;
+        }
+        size_t cat_offset;
+        if (!consume(category.size(), cat_offset))
+            return std::nullopt;
+        if (std::memcmp(result.bytes.data() + cat_offset, category.data(), category.size()) != 0) {
+            LOG_ERROR("Invalid registry category");
+            return std::nullopt;
+        }
+        if (!consume(padding(category.size()), ignored))
+            return std::nullopt;
+        std::set<std::string> names;
+        for (const auto &entry : tmpl->second) {
+            if (!names.insert(entry.name).second || (entry.type != REG_TYPE_INT && entry.type != REG_TYPE_STR && entry.type != REG_TYPE_BIN)) {
+                LOG_ERROR("Invalid registry template");
+                return std::nullopt;
+            }
+            if (entry.type == REG_TYPE_INT && (entry.name.size() >= spaceSize || entry.size > spaceSize - entry.name.size() - 1)) {
+                LOG_ERROR("Invalid integer registry entry");
+                return std::nullopt;
+            }
+            const auto value = values->second.find(entry.name);
+            if (value == values->second.end() || value->second.size() != entry.size) {
+                LOG_ERROR("Invalid loaded registry value {}{} (expected {} bytes, loaded {})", category, entry.name, entry.size,
+                    value == values->second.end() ? 0 : value->second.size());
+                return std::nullopt;
+            }
+            size_t name_offset;
+            if (!consume(entry.name.size(), name_offset))
+                return std::nullopt;
+            if (std::memcmp(result.bytes.data() + name_offset, entry.name.data(), entry.name.size()) != 0) {
+                LOG_ERROR("Invalid registry entry name");
+                return std::nullopt;
+            }
+            size_t value_offset;
+            if (!consume(entry.type == REG_TYPE_INT ? spaceSize - entry.name.size() - entry.size - 1 : padding(entry.name.size()) - 1, ignored)
+                || !consume(entry.size, value_offset))
+                return std::nullopt;
+            result.value_offsets.emplace(std::make_pair(category, entry.name), value_offset);
+            if (entry.size && std::memcmp(result.bytes.data() + value_offset, value->second.data(), entry.size) != 0) {
+                LOG_ERROR("Loaded registry differs from disk");
+                return std::nullopt;
+            }
+            if (!consume(entry.type == REG_TYPE_INT ? 1 : padding(entry.size) + 1, ignored))
+                return std::nullopt;
+            if (category == account_category && entry.name == account_name) {
+                if (entry.type != REG_TYPE_BIN || entry.size != 8) {
+                    LOG_ERROR("Invalid account ID template");
+                    return std::nullopt;
+                }
+                result.account_offset = value_offset;
+                result.account_value = &value->second;
+            }
+        }
+    }
+    if (categories.size() != regmgr.reg_template.size() || !result.account_value) {
+        LOG_ERROR("Missing account ID template");
+        return std::nullopt;
+    }
+    return result;
+}
+
+class ExclusiveRegistryFile {
+public:
+    explicit ExclusiveRegistryFile(const fs::path &path)
+        : path_(path) {}
+
+    std::error_code create(const fs::path &original) {
+#ifdef _WIN32
+        DWORD needed = 0;
+        GetFileSecurityW(original.c_str(), DACL_SECURITY_INFORMATION, nullptr, 0, &needed);
+        const auto security_error = GetLastError();
+        if (!needed || security_error != ERROR_INSUFFICIENT_BUFFER)
+            return { static_cast<int>(security_error == ERROR_SUCCESS ? ERROR_INVALID_SECURITY_DESCR : security_error), std::system_category() };
+        std::vector<char> descriptor(needed);
+        if (!GetFileSecurityW(original.c_str(), DACL_SECURITY_INFORMATION, descriptor.data(), needed, &needed))
+            return { static_cast<int>(GetLastError()), std::system_category() };
+        SECURITY_ATTRIBUTES attributes{ sizeof(attributes), descriptor.data(), FALSE };
+        handle_ = CreateFileW(path_.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE)
+            return { static_cast<int>(GetLastError()), std::system_category() };
+#else
+        (void)original;
+        handle_ = open(path_.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (handle_ < 0)
+            return { errno, std::generic_category() };
+#endif
+        remove_ = true;
+        return {};
+    }
+
+    ExclusiveRegistryFile(const ExclusiveRegistryFile &) = delete;
+    ExclusiveRegistryFile &operator=(const ExclusiveRegistryFile &) = delete;
+
+    ~ExclusiveRegistryFile() {
+#ifdef _WIN32
+        if (handle_ != INVALID_HANDLE_VALUE)
+            CloseHandle(handle_);
+#else
+        if (handle_ >= 0)
+            close(handle_);
+#endif
+        if (remove_) {
+            std::error_code ignored;
+            fs::remove(path_, ignored);
+        }
+    }
+
+    bool write_and_close(const std::vector<char> &bytes, std::error_code *failure = nullptr) {
+        size_t offset = 0;
+        while (offset < bytes.size()) {
+#ifdef _WIN32
+            DWORD written = 0;
+            const DWORD count = static_cast<DWORD>(std::min(bytes.size() - offset, static_cast<size_t>(std::numeric_limits<DWORD>::max())));
+            if (!WriteFile(handle_, bytes.data() + offset, count, &written, nullptr)) {
+                const std::error_code error(static_cast<int>(GetLastError()), std::system_category());
+                if (failure)
+                    *failure = error;
+                LOG_ERROR("Cannot write registry file: {}", error.message());
+                return false;
+            }
+#else
+            const auto count = std::min(bytes.size() - offset, static_cast<size_t>(std::numeric_limits<ssize_t>::max()));
+            const auto written = write(handle_, bytes.data() + offset, count);
+            if (written < 0 && errno == EINTR)
+                continue;
+            if (written < 0) {
+                const std::error_code error(errno, std::generic_category());
+                if (failure)
+                    *failure = error;
+                LOG_ERROR("Cannot write registry file: {}", error.message());
+                return false;
+            }
+#endif
+            if (!written) {
+                if (failure)
+                    *failure = std::make_error_code(std::errc::io_error);
+                LOG_ERROR("Short registry write");
+                return false;
+            }
+            offset += static_cast<size_t>(written);
+        }
+#ifdef _WIN32
+        if (!FlushFileBuffers(handle_)) {
+            const std::error_code error(static_cast<int>(GetLastError()), std::system_category());
+            if (failure)
+                *failure = error;
+            LOG_ERROR("Cannot flush registry file: {}", error.message());
+            return false;
+        }
+        if (!CloseHandle(handle_)) {
+            const auto error = GetLastError();
+            handle_ = INVALID_HANDLE_VALUE;
+            if (failure)
+                *failure = std::error_code(static_cast<int>(error), std::system_category());
+            LOG_ERROR("Cannot close registry file: {}", std::error_code(static_cast<int>(error), std::system_category()).message());
+            return false;
+        }
+        handle_ = INVALID_HANDLE_VALUE;
+#else
+        if (fsync(handle_) != 0) {
+            const std::error_code error(errno, std::generic_category());
+            if (failure)
+                *failure = error;
+            LOG_ERROR("Cannot flush registry file: {}", error.message());
+            return false;
+        }
+        if (close(handle_) != 0) {
+            const auto error = errno;
+            handle_ = -1;
+            if (failure)
+                *failure = std::error_code(error, std::generic_category());
+            LOG_ERROR("Cannot close registry file: {}", std::error_code(error, std::generic_category()).message());
+            return false;
+        }
+        handle_ = -1;
+#endif
+        return true;
+    }
+
+    void keep() { remove_ = false; }
+
+private:
+    fs::path path_;
+    bool remove_ = false;
+#ifdef _WIN32
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+    int handle_ = -1;
+#endif
+};
+
+enum class RegistryReplaceResult { failed,
+    replaced,
+    replaced_not_synced };
+
+static RegistryReplaceResult replace_registry_image(const fs::path &path, const std::vector<char> &bytes, std::error_code *failure = nullptr) {
+    if (failure)
+        *failure = {};
+    static std::atomic<uint64_t> next_temp{ 0 };
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        auto temp_path = path;
+        temp_path += ".registry.tmp." + std::to_string(next_temp.fetch_add(1, std::memory_order_relaxed));
+        ExclusiveRegistryFile temp(temp_path);
+        const auto error = temp.create(path);
+        if (error) {
+#ifdef _WIN32
+            if (error.value() == ERROR_FILE_EXISTS || error.value() == ERROR_ALREADY_EXISTS)
+#else
+            if (error.value() == EEXIST)
+#endif
+                continue;
+            if (failure)
+                *failure = error;
+            LOG_ERROR("Cannot create registry staging file: {}", error.message());
+            return RegistryReplaceResult::failed;
+        }
+        if (!temp.write_and_close(bytes, failure))
+            return RegistryReplaceResult::failed;
+#ifdef _WIN32
+        if (!MoveFileExW(temp_path.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            const std::error_code error(static_cast<int>(GetLastError()), std::system_category());
+            if (failure)
+                *failure = error;
+            LOG_ERROR("Cannot replace registry: {}", error.message());
+            return RegistryReplaceResult::failed;
+        }
+#else
+        if (::rename(temp_path.c_str(), path.c_str()) != 0) {
+            const std::error_code error(errno, std::generic_category());
+            if (failure)
+                *failure = error;
+            LOG_ERROR("Cannot replace registry: {}", error.message());
+            return RegistryReplaceResult::failed;
+        }
+#endif
+        temp.keep();
+#ifndef _WIN32
+        const int directory = open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY);
+        if (directory < 0) {
+            const std::error_code error(errno, std::generic_category());
+            if (failure)
+                *failure = error;
+            LOG_ERROR("Cannot open registry directory for synchronization: {}", error.message());
+            return RegistryReplaceResult::replaced_not_synced;
+        }
+        const int result = fsync(directory);
+        const int sync_error = errno;
+        close(directory);
+        if (result != 0) {
+            const std::error_code error(sync_error, std::generic_category());
+            if (failure)
+                *failure = error;
+            LOG_ERROR("Cannot synchronize registry directory: {}", error.message());
+            return RegistryReplaceResult::replaced_not_synced;
+        }
+#endif
+        return RegistryReplaceResult::replaced;
+    }
+    if (failure)
+        *failure = std::make_error_code(std::errc::file_exists);
+    LOG_ERROR("Cannot allocate a registry staging file");
+    return RegistryReplaceResult::failed;
+}
+
+std::optional<std::array<uint8_t, 8>> get_account_id(RegMgrState &regmgr) {
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
+    const auto registry = check_registry(regmgr);
+    if (!registry)
+        return std::nullopt;
+    std::array<uint8_t, 8> account_id;
+    std::memcpy(account_id.data(), registry->account_value->data(), account_id.size());
+    return account_id;
+}
+
+bool set_account_id(RegMgrState &regmgr, const std::array<uint8_t, 8> &account_id) {
+    return set_account_id(regmgr, account_id, false);
+}
+
+bool set_account_id(RegMgrState &regmgr, const std::array<uint8_t, 8> &account_id, bool backup_original) {
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
+    auto registry = check_registry(regmgr);
+    if (!registry)
+        return false;
+    if (backup_original) {
+        auto backup_path = regmgr.system_dreg_path;
+        backup_path += ".bak";
+        ExclusiveRegistryFile backup(backup_path);
+        const auto error = backup.create(regmgr.system_dreg_path);
+        if (error) {
+            LOG_ERROR("Cannot create registry backup: {}", error.message());
+            return false;
+        }
+        if (!backup.write_and_close(registry->bytes))
+            return false;
+        backup.keep();
+    }
+    std::memcpy(registry->bytes.data() + registry->account_offset, account_id.data(), account_id.size());
+
+    const auto result = replace_registry_image(regmgr.system_dreg_path, registry->bytes);
+    if (result != RegistryReplaceResult::failed)
+        std::memcpy(registry->account_value->data(), account_id.data(), account_id.size());
+    return result == RegistryReplaceResult::replaced;
 }
 
 static bool load_system_dreg(RegMgrState &regmgr) {
@@ -168,15 +560,19 @@ static bool load_system_dreg(RegMgrState &regmgr) {
 
         // Skip the space
         file.read(space.data(), spaceSize + 1);
+        if (!file)
+            return false;
 
         for (const auto &cat : regmgr.reg_category_template) {
             // Read the category
             const uint32_t cat_size = static_cast<uint32_t>(cat.size());
             std::vector<char> category(cat_size);
             file.read(category.data(), cat_size);
+            if (!file)
+                return false;
             const auto category_str = std::string(category.begin(), category.end());
             if (category_str != cat) {
-                LOG_ERROR("Invalid category: {}, expected: {}", category_str, cat);
+                LOG_ERROR("Invalid registry category, expected: {}", cat);
                 return false;
             }
 
@@ -184,15 +580,19 @@ static bool load_system_dreg(RegMgrState &regmgr) {
             const auto diff_cat = get_space_size(cat_size);
             space.resize(diff_cat);
             file.read(space.data(), diff_cat);
+            if (!file)
+                return false;
 
             for (const auto &entry : regmgr.reg_template[cat]) {
                 // Read the name
                 const uint32_t name_size = static_cast<uint32_t>(entry.name.size());
                 std::vector<char> name(name_size);
                 file.read(name.data(), name_size);
+                if (!file)
+                    return false;
                 const auto name_str = std::string(name.begin(), name.end());
                 if (name_str != entry.name) {
-                    LOG_ERROR("Invalid entry name: {}, expected: {}, in category: {}", name_str, entry.name, cat);
+                    LOG_ERROR("Invalid registry entry name, expected: {} in category: {}", entry.name, cat);
                     return false;
                 }
 
@@ -200,17 +600,23 @@ static bool load_system_dreg(RegMgrState &regmgr) {
                 const auto diff_name = (entry.type == REG_TYPE_INT ? spaceSize - name_size - entry.size : get_space_size(name_size)) - 1;
                 space.resize(diff_name);
                 file.read(space.data(), diff_name);
+                if (!file)
+                    return false;
 
                 // Read the value
                 const uint32_t value_size = entry.size;
                 auto &value = regmgr.system_dreg[cat][entry.name];
                 value.resize(value_size);
                 file.read(value.data(), value_size);
+                if (!file)
+                    return false;
 
                 // Skip the space
                 const auto diff_value = (entry.type == REG_TYPE_INT) ? 1 : get_space_size(value_size) + 1;
                 space.resize(diff_value);
                 file.read(space.data(), diff_value);
+                if (!file)
+                    return false;
             }
         }
 
@@ -221,6 +627,21 @@ static bool load_system_dreg(RegMgrState &regmgr) {
 }
 
 static void save_system_dreg(RegMgrState &regmgr) {
+    for (const auto &category : regmgr.reg_category_template) {
+        const auto entries = regmgr.reg_template.find(category);
+        const auto values = regmgr.system_dreg.find(category);
+        if (entries == regmgr.reg_template.end() || values == regmgr.system_dreg.end()) {
+            LOG_ERROR("Cannot save registry: missing category {}", category);
+            return;
+        }
+        for (const auto &entry : entries->second) {
+            const auto value = values->second.find(entry.name);
+            if (value == values->second.end() || value->second.size() != entry.size) {
+                LOG_ERROR("Cannot save registry: invalid value {}{}", category, entry.name);
+                return;
+            }
+        }
+    }
     std::ofstream file(regmgr.system_dreg_path, std::ios::out | std::ios::binary);
     if (file.is_open()) {
         // Initialize the space buffer
@@ -270,25 +691,218 @@ static void save_system_dreg(RegMgrState &regmgr) {
     }
 }
 
-static void init_system_dreg(RegMgrState &regmgr) {
-    // Initialize the system.dreg with the default values from the template
-    for (const auto &reg : regmgr.reg_template) {
-        for (const auto &entry : reg.second) {
-            auto &value = regmgr.system_dreg[reg.first][entry.name];
-            value.resize(entry.size);
-            value = entry.init_value;
+static bool init_system_dreg(RegMgrState &regmgr) {
+    std::vector<char> bytes(spaceSize + 1, 0);
+    const auto append_padding = [&](size_t count) { bytes.insert(bytes.end(), count, 0); };
+    for (const auto &category : regmgr.reg_category_template) {
+        const auto cat = regmgr.reg_template.find(category);
+        if (cat == regmgr.reg_template.end() || category.size() > UINT32_MAX) {
+            LOG_ERROR("Invalid registry template");
+            return false;
+        }
+        bytes.insert(bytes.end(), category.begin(), category.end());
+        append_padding(get_space_size(static_cast<uint32_t>(category.size())));
+        for (const auto &entry : cat->second) {
+            if (entry.name.size() > UINT32_MAX || (entry.type == REG_TYPE_INT && (entry.name.size() >= spaceSize || entry.size > spaceSize - entry.name.size() - 1))) {
+                LOG_ERROR("Invalid registry template");
+                return false;
+            }
+            bytes.insert(bytes.end(), entry.name.begin(), entry.name.end());
+            append_padding(entry.type == REG_TYPE_INT ? spaceSize - entry.name.size() - entry.size - 1 : get_space_size(static_cast<uint32_t>(entry.name.size())) - 1);
+            auto value = entry.init_value;
+            value.resize(entry.size, 0);
+            bytes.insert(bytes.end(), value.begin(), value.end());
+            append_padding(entry.type == REG_TYPE_INT ? 1 : get_space_size(entry.size) + 1);
         }
     }
-
-    save_system_dreg(regmgr);
+    // No original exists yet. Exclusive creation also protects against races.
+    ExclusiveRegistryFile file(regmgr.system_dreg_path);
+#ifdef _WIN32
+    // A newly created registry has no source ACL to copy; use its parent directory.
+    const auto error = file.create(regmgr.system_dreg_path.parent_path());
+#else
+    const auto error = file.create(regmgr.system_dreg_path);
+#endif
+    if (error) {
+        LOG_ERROR("Cannot create registry file: {}", error.message());
+        return false;
+    }
+    if (!file.write_and_close(bytes))
+        return false;
+    file.keep();
+    return true;
 }
 
 static bool reg_category_or_name_is_empty(const RegMgrState &regmgr, const std::string &category, const std::string &name) {
-    return regmgr.reg_template.empty() || category.empty() || name.empty();
+    return !regmgr.system_dreg_valid || regmgr.reg_template.empty() || category.empty() || name.empty();
 }
 
 static std::string fix_category(const std::string &category) {
     return category.back() == '/' ? category : category + '/';
+}
+
+static std::string normalize_callback_path(const std::string &path) {
+    if (path.empty())
+        return {};
+    if (path.front() != '/')
+        return {};
+    std::string normalized = path;
+    while (normalized.size() > 1 && normalized.back() == '/')
+        normalized.pop_back();
+    if (normalized.find("//") != std::string::npos)
+        return {};
+    return normalized;
+}
+
+static bool path_matches(const std::string &path, const std::string &key_path) {
+    return path == key_path || (key_path.size() > path.size() && key_path.compare(0, path.size(), path) == 0 && key_path[path.size()] == '/');
+}
+
+static bool callback_path_exists(const RegMgrState &regmgr, const std::string &path) {
+    for (const auto &category : regmgr.reg_category_template) {
+        std::string category_path = category;
+        if (!category_path.empty() && category_path.back() == '/')
+            category_path.pop_back();
+        if (path_matches(path, category_path))
+            return true;
+        const auto entries = regmgr.reg_template.find(category);
+        if (entries == regmgr.reg_template.end())
+            continue;
+        for (const auto &entry : entries->second) {
+            const std::string key_path = category + entry.name;
+            if (path_matches(path, key_path))
+                return true;
+        }
+    }
+    return false;
+}
+
+void reset_callback_registrations(RegMgrState &regmgr) {
+    std::lock_guard lock(regmgr.callback_mutex);
+    regmgr.callbacks = {};
+}
+
+uint32_t register_callback(RegMgrState &regmgr, const int32_t callback_id, const int32_t owner_thread_id) {
+    std::lock_guard lock(regmgr.callback_mutex);
+    for (const auto &callback : regmgr.callbacks) {
+        if (callback && callback->callback_id == callback_id)
+            return SCE_REGMGR_ERROR_CALLBACK_ALREADY_REGISTERED;
+    }
+    for (size_t i = 0; i < regmgr.callbacks.size(); ++i) {
+        if (!regmgr.callbacks[i]) {
+            regmgr.callbacks[i] = RegMgrCallback{ callback_id, owner_thread_id };
+            return static_cast<int32_t>(i);
+        }
+    }
+    return SCE_REGMGR_ERROR_CALLBACK_LIMIT_REACHED;
+}
+
+bool callback_registered(RegMgrState &regmgr, const int32_t callback_id, const int32_t owner_thread_id) {
+    std::lock_guard lock(regmgr.callback_mutex);
+    return std::any_of(regmgr.callbacks.begin(), regmgr.callbacks.end(), [&](const auto &callback) {
+        return callback && callback->callback_id == callback_id && callback->owner_thread_id == owner_thread_id;
+    });
+}
+
+uint32_t add_registry_callback(RegMgrState &regmgr, const int32_t callback_id, const int32_t owner_thread_id, const std::string &path) {
+    if (!callback_registered(regmgr, callback_id, owner_thread_id))
+        return SCE_REGMGR_ERROR_CALLBACK_NOT_REGISTERED;
+    if (path.size() >= 0x100)
+        return SCE_REGMGR_ERROR_PATH_TOO_LONG;
+    const std::string normalized_path = normalize_callback_path(path);
+    if (normalized_path.empty())
+        return SCE_REGMGR_ERROR_INVALID_ARGUMENT;
+
+    {
+        std::lock_guard lock(regmgr.mutex);
+        if (!regmgr.system_dreg_valid || !callback_path_exists(regmgr, normalized_path))
+            return SCE_REGMGR_ERROR_INVALID_ARGUMENT;
+    }
+
+    std::lock_guard lock(regmgr.callback_mutex);
+    for (auto &callback : regmgr.callbacks) {
+        if (!callback || callback->callback_id != callback_id || callback->owner_thread_id != owner_thread_id)
+            continue;
+        if (callback->paths.size() >= 5)
+            return SCE_REGMGR_ERROR_CALLBACK_LIMIT_REACHED;
+        callback->paths.push_back(normalized_path);
+        return static_cast<int32_t>(callback->paths.size() - 1);
+    }
+    return SCE_REGMGR_ERROR_CALLBACK_NOT_REGISTERED;
+}
+
+static auto find_callback(RegMgrState &regmgr, const int32_t callback_id, const int32_t owner_thread_id) {
+    return std::find_if(regmgr.callbacks.begin(), regmgr.callbacks.end(), [&](const auto &callback) {
+        return callback && callback->callback_id == callback_id && callback->owner_thread_id == owner_thread_id;
+    });
+}
+
+uint32_t start_callback(RegMgrState &regmgr, const int32_t callback_id, const int32_t owner_thread_id) {
+    std::lock_guard lock(regmgr.callback_mutex);
+    const auto callback = find_callback(regmgr, callback_id, owner_thread_id);
+    if (callback == regmgr.callbacks.end())
+        return SCE_REGMGR_ERROR_CALLBACK_NOT_REGISTERED;
+    (*callback)->started = true;
+    return 0;
+}
+
+uint32_t stop_callback(RegMgrState &regmgr, const int32_t callback_id, const int32_t owner_thread_id) {
+    std::lock_guard lock(regmgr.callback_mutex);
+    const auto callback = find_callback(regmgr, callback_id, owner_thread_id);
+    if (callback == regmgr.callbacks.end())
+        return SCE_REGMGR_ERROR_CALLBACK_NOT_REGISTERED;
+    (*callback)->started = false;
+    return 0;
+}
+
+uint32_t unregister_callback(RegMgrState &regmgr, const int32_t callback_id, const int32_t owner_thread_id) {
+    std::lock_guard lock(regmgr.callback_mutex);
+    const auto callback = find_callback(regmgr, callback_id, owner_thread_id);
+    if (callback == regmgr.callbacks.end())
+        return SCE_REGMGR_ERROR_CALLBACK_NOT_REGISTERED;
+    callback->reset();
+    return 0;
+}
+
+std::vector<RegMgrCallbackNotification> callbacks_for_key(RegMgrState &regmgr, const std::string &category, const std::string &name) {
+    std::vector<RegMgrCallbackNotification> notifications;
+    if (category.empty() || name.empty())
+        return notifications;
+
+    const std::string key_path = fix_category(category) + name;
+    int32_t key_index = 0;
+    {
+        std::lock_guard lock(regmgr.mutex);
+        int32_t index = 0;
+        for (const auto &category_entry : regmgr.reg_category_template) {
+            const auto entries = regmgr.reg_template.find(category_entry);
+            if (entries == regmgr.reg_template.end())
+                continue;
+            for (const auto &entry : entries->second) {
+                ++index;
+                if (category_entry + entry.name == key_path) {
+                    key_index = index;
+                    break;
+                }
+            }
+            if (key_index)
+                break;
+        }
+    }
+    if (!key_index)
+        return notifications;
+
+    std::lock_guard lock(regmgr.callback_mutex);
+    for (const auto &callback : regmgr.callbacks) {
+        if (!callback || !callback->started)
+            continue;
+        const bool matches = callback->paths.empty() || std::any_of(callback->paths.begin(), callback->paths.end(), [&](const auto &path) {
+            return path_matches(path, key_path);
+        });
+        if (matches)
+            notifications.push_back({ callback->callback_id, callback->owner_thread_id, key_index });
+    }
+    return notifications;
 }
 
 static std::string set_default_value(RegMgrState &regmgr, const std::string &category, const std::string &name) {
@@ -305,9 +919,8 @@ static std::string set_default_value(RegMgrState &regmgr, const std::string &cat
     }
 
     auto &sys = regmgr.system_dreg[category][name];
-    sys.clear();
-    sys.resize(reg->size);
     sys = reg->init_value;
+    sys.resize(reg->size, 0);
 
     LOG_INFO("Successfully set default value for {}{}", category, name);
 
@@ -316,26 +929,139 @@ static std::string set_default_value(RegMgrState &regmgr, const std::string &cat
     return std::string(reg->init_value.begin(), reg->init_value.end());
 }
 
-void get_bin_value(RegMgrState &regmgr, const std::string &category, const std::string &name, void *buf, uint32_t bufSize) {
-    if (reg_category_or_name_is_empty(regmgr, category, name))
-        return;
+bool category_exists(RegMgrState &regmgr, const std::string &category) {
+    if (category.empty())
+        return false;
 
     std::lock_guard<std::mutex> lock(regmgr.mutex);
-    const auto &sys = regmgr.system_dreg[fix_category(category)][name];
-
-    memcpy(buf, sys.data(), bufSize);
+    return regmgr.system_dreg_valid && regmgr.reg_template.contains(fix_category(category));
 }
 
-void set_bin_value(RegMgrState &regmgr, const std::string &category, const std::string &name, const void *buf, const uint32_t bufSize) {
+int32_t set_result_to_error(RegMgrSetResult result) {
+    switch (result) {
+    case RegMgrSetResult::success:
+        return 0;
+    case RegMgrSetResult::invalid_value:
+        return SCE_REGMGR_ERROR_BAD_VALUE;
+    case RegMgrSetResult::no_access:
+        return SCE_REGMGR_ERROR_NO_ACCESS;
+    case RegMgrSetResult::io_error:
+        return SCE_KERNEL_ERROR_ERROR;
+    }
+    return SCE_KERNEL_ERROR_ERROR;
+}
+
+int32_t is_blue_screen_error(int32_t error) {
+    uint32_t error_code = static_cast<uint32_t>(error);
+    if ((error_code & 0xFFFF0000u) == 0x800D0000u)
+        error_code &= ~0x8000u;
+    return error_code - 0x800D2711u <= 0x271Au;
+}
+
+int32_t get_key_type_error(RegMgrState &regmgr, const std::string &category, const std::string &name, RegType expected_type) {
+    if (category.empty() || name.empty())
+        return SCE_REGMGR_ERROR_INVALID_ARGUMENT;
+    if (!category_exists(regmgr, category))
+        return SCE_REGMGR_ERROR_BAD_CATEGORY;
+    const auto info = get_value_info(regmgr, category, name);
+    if (!info)
+        return SCE_REGMGR_ERROR_BAD_NAME;
+    return info->type == expected_type ? 0 : SCE_REGMGR_ERROR_BAD_TYPE;
+}
+
+std::optional<RegValue> get_value_info(RegMgrState &regmgr, const std::string &category, const std::string &name) {
     if (reg_category_or_name_is_empty(regmgr, category, name))
-        return;
+        return std::nullopt;
 
     std::lock_guard<std::mutex> lock(regmgr.mutex);
+    const auto category_template = regmgr.reg_template.find(fix_category(category));
+    if (category_template == regmgr.reg_template.end())
+        return std::nullopt;
+    const auto entry = std::find_if(category_template->second.begin(), category_template->second.end(), [&](const RegValue &item) {
+        return item.name == name;
+    });
+    if (entry == category_template->second.end())
+        return std::nullopt;
+    return *entry;
+}
 
-    const char *data = static_cast<const char *>(buf);
-    regmgr.system_dreg[fix_category(category)][name].assign(data, data + bufSize);
+std::optional<uint32_t> get_value_size(RegMgrState &regmgr, const std::string &category, const std::string &name, RegType type) {
+    const auto info = get_value_info(regmgr, category, name);
+    if (!info || info->type != type)
+        return std::nullopt;
+    return info->size;
+}
 
-    save_system_dreg(regmgr);
+bool get_bin_value(RegMgrState &regmgr, const std::string &category, const std::string &name, void *buf, uint32_t bufSize) {
+    if (reg_category_or_name_is_empty(regmgr, category, name) || (bufSize && !buf))
+        return false;
+
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
+    const auto category_values = regmgr.system_dreg.find(fix_category(category));
+    if (category_values == regmgr.system_dreg.end())
+        return false;
+    const auto value = category_values->second.find(name);
+    if (value == category_values->second.end() || bufSize > value->second.size())
+        return false;
+    if (bufSize)
+        std::memcpy(buf, value->second.data(), bufSize);
+    return true;
+}
+
+static RegMgrSetResult set_variable_value(RegMgrState &regmgr, const std::string &category, const std::string &name,
+    const void *data, uint32_t size, RegType type) {
+    const std::lock_guard<std::mutex> lock(regmgr.mutex);
+    if (reg_category_or_name_is_empty(regmgr, category, name) || (!data && size)) {
+        LOG_ERROR("Cannot update registry: invalid key or buffer");
+        return RegMgrSetResult::invalid_value;
+    }
+    const auto fixed_category = fix_category(category);
+    const auto category_template = regmgr.reg_template.find(fixed_category);
+    if (category_template == regmgr.reg_template.end()) {
+        LOG_ERROR("Cannot update unknown registry category {}", fixed_category);
+        return RegMgrSetResult::invalid_value;
+    }
+    const auto entry = std::find_if(category_template->second.begin(), category_template->second.end(), [&](const RegValue &item) {
+        return item.name == name;
+    });
+    if (entry == category_template->second.end() || entry->type != type || size > entry->size) {
+        LOG_ERROR("Cannot update registry value {}{}: unknown key, wrong type, or oversized input", fixed_category, name);
+        return RegMgrSetResult::invalid_value;
+    }
+    auto checked = check_registry(regmgr);
+    if (!checked)
+        return RegMgrSetResult::invalid_value;
+    const auto offset = checked->value_offsets.find({ fixed_category, name });
+    if (offset == checked->value_offsets.end()) {
+        LOG_ERROR("Cannot locate registry value {}{} in the checked image", fixed_category, name);
+        return RegMgrSetResult::invalid_value;
+    }
+    std::vector<char> new_value(entry->size, 0);
+    if (size)
+        std::memcpy(new_value.data(), data, size);
+    std::copy(new_value.begin(), new_value.end(), checked->bytes.begin() + offset->second);
+    std::error_code failure;
+    const auto result = replace_registry_image(regmgr.system_dreg_path, checked->bytes, &failure);
+    if (result != RegistryReplaceResult::failed)
+        regmgr.system_dreg.at(fixed_category).at(name) = std::move(new_value);
+    if (result == RegistryReplaceResult::replaced)
+        return RegMgrSetResult::success;
+#ifdef _WIN32
+    if (failure.category() == std::system_category() && failure.value() == ERROR_ACCESS_DENIED)
+        return RegMgrSetResult::no_access;
+#else
+    if (failure == std::errc::permission_denied || failure == std::errc::operation_not_permitted || failure == std::errc::read_only_file_system)
+        return RegMgrSetResult::no_access;
+#endif
+    return RegMgrSetResult::io_error;
+}
+
+bool set_bin_value(RegMgrState &regmgr, const std::string &category, const std::string &name, const void *buf, const uint32_t bufSize) {
+    return set_bin_value_result(regmgr, category, name, buf, bufSize) == RegMgrSetResult::success;
+}
+
+RegMgrSetResult set_bin_value_result(RegMgrState &regmgr, const std::string &category, const std::string &name, const void *buf, uint32_t bufSize) {
+    return set_variable_value(regmgr, category, name, buf, bufSize, REG_TYPE_BIN);
 }
 
 int32_t get_int_value(RegMgrState &regmgr, const std::string &category, const std::string &name) {
@@ -343,21 +1069,64 @@ int32_t get_int_value(RegMgrState &regmgr, const std::string &category, const st
         return 0;
 
     std::lock_guard<std::mutex> lock(regmgr.mutex);
-
     const auto cat = fix_category(category);
-
-    return byte_swap(*reinterpret_cast<const uint32_t *>(regmgr.system_dreg[cat][name].data()));
+    const auto category_template = regmgr.reg_template.find(cat);
+    const auto category_values = regmgr.system_dreg.find(cat);
+    if (category_template == regmgr.reg_template.end() || category_values == regmgr.system_dreg.end())
+        return 0;
+    const auto entry = std::find_if(category_template->second.begin(), category_template->second.end(), [&](const RegValue &item) {
+        return item.name == name && item.type == REG_TYPE_INT && item.size >= sizeof(uint32_t);
+    });
+    const auto value = category_values->second.find(name);
+    if (entry == category_template->second.end() || value == category_values->second.end() || value->second.size() < sizeof(uint32_t))
+        return 0;
+    uint32_t encoded_value;
+    std::memcpy(&encoded_value, value->second.data(), sizeof(encoded_value));
+    return byte_swap(encoded_value);
 }
 
-void set_int_value(RegMgrState &regmgr, const std::string &category, const std::string &name, const int32_t value) {
-    if (reg_category_or_name_is_empty(regmgr, category, name))
+bool set_int_value(RegMgrState &regmgr, const std::string &category, const std::string &name, const int32_t value) {
+    return set_int_value_result(regmgr, category, name, value) == RegMgrSetResult::success;
+}
+
+RegMgrSetResult set_int_value_result(RegMgrState &regmgr, const std::string &category, const std::string &name, int32_t value) {
+    const int32_t encoded_value = byte_swap(value);
+    return set_variable_value(regmgr, category, name, &encoded_value, sizeof(encoded_value), REG_TYPE_INT);
+}
+
+void ensure_pstv_ethernet_profile(RegMgrState &regmgr, bool pstv_mode) {
+    if (!pstv_mode)
+        return;
+    if (!regmgr.system_dreg_valid) {
+        LOG_ERROR("Cannot initialize the default PSTV Ethernet profile: system registry is invalid");
+        return;
+    }
+
+    constexpr auto common_category = "/CONFIG/NET/ETH/COMMON";
+    constexpr auto ip_category = "/CONFIG/NET/ETH/IP";
+    constexpr auto app_category = "/CONFIG/NET/ETH/APP";
+    if (get_int_value(regmgr, "/CONFIG/NET", "net_flag") == 0) {
+        if (!set_int_value(regmgr, "/CONFIG/NET", "net_flag", 1)) {
+            LOG_ERROR("Failed to enable the network registry flag for PSTV");
+            return;
+        }
+        LOG_INFO("Enabled the network registry flag for PSTV");
+    }
+
+    if (get_int_value(regmgr, common_category, "config_done") != 0)
         return;
 
-    std::lock_guard<std::mutex> lock(regmgr.mutex);
+    if (!set_int_value(regmgr, common_category, "mtu", 1500) || !set_int_value(regmgr, ip_category, "ip_config", 0) || !set_int_value(regmgr, ip_category, "dns_flag", 0) || !set_int_value(regmgr, app_category, "http_proxy_flag", 0)) {
+        LOG_ERROR("Failed to initialize the default PSTV Ethernet profile");
+        return;
+    }
 
-    *reinterpret_cast<int32_t *>(regmgr.system_dreg[fix_category(category)][name].data()) = byte_swap(value);
+    if (!set_int_value(regmgr, common_category, "config_done", 1)) {
+        LOG_ERROR("Failed to mark the default PSTV Ethernet profile as configured");
+        return;
+    }
 
-    save_system_dreg(regmgr);
+    LOG_INFO("Initialized the default PSTV Ethernet profile using DHCP");
 }
 
 std::string get_str_value(RegMgrState &regmgr, const std::string &category, const std::string &name) {
@@ -365,37 +1134,83 @@ std::string get_str_value(RegMgrState &regmgr, const std::string &category, cons
         return {};
 
     std::lock_guard<std::mutex> lock(regmgr.mutex);
-    const auto &sys = regmgr.system_dreg[fix_category(category)][name];
-
-    return std::string(sys.begin(), sys.end());
+    const auto cat = fix_category(category);
+    const auto category_template = regmgr.reg_template.find(cat);
+    const auto category_values = regmgr.system_dreg.find(cat);
+    if (category_template == regmgr.reg_template.end() || category_values == regmgr.system_dreg.end())
+        return {};
+    const auto entry = std::find_if(category_template->second.begin(), category_template->second.end(), [&](const RegValue &item) {
+        return item.name == name && item.type == REG_TYPE_STR;
+    });
+    const auto value = category_values->second.find(name);
+    if (entry == category_template->second.end() || value == category_values->second.end())
+        return {};
+    return std::string(value->second.begin(), value->second.end());
 }
 
-void set_str_value(RegMgrState &regmgr, const std::string &category, const std::string &name, const char *value, const uint32_t bufSize) {
-    if (reg_category_or_name_is_empty(regmgr, category, name))
-        return;
+bool set_str_value(RegMgrState &regmgr, const std::string &category, const std::string &name, const char *value, const uint32_t bufSize) {
+    return set_str_value_result(regmgr, category, name, value, bufSize) == RegMgrSetResult::success;
+}
 
+RegMgrSetResult set_str_value_result(RegMgrState &regmgr, const std::string &category, const std::string &name, const char *value, uint32_t bufSize) {
+    return set_variable_value(regmgr, category, name, value, bufSize, REG_TYPE_STR);
+}
+
+static void reset_regmgr_unlocked(RegMgrState &regmgr) {
+    regmgr.system_dreg.clear();
+    regmgr.system_dreg_path.clear();
+    regmgr.system_dreg_valid = false;
+    regmgr.reg_category_template.clear();
+    regmgr.reg_template.clear();
+    reset_callback_registrations(regmgr);
+}
+
+void reset_regmgr(RegMgrState &regmgr) {
     std::lock_guard<std::mutex> lock(regmgr.mutex);
-    regmgr.system_dreg[fix_category(category)][name].assign(value, value + bufSize);
-
-    save_system_dreg(regmgr);
+    reset_regmgr_unlocked(regmgr);
 }
 
 void init_regmgr(RegMgrState &regmgr, const fs::path &vita_fs_path) {
+    std::lock_guard<std::mutex> lock(regmgr.mutex);
     // Load the registry template
     const auto reg = decryptRegistryFile(vita_fs_path / "os0/kd/registry.db0");
     if (reg.empty()) {
+        regmgr.system_dreg_valid = false;
+        if (regmgr.system_dreg_path != vita_fs_path / "vd0/registry/system.dreg")
+            reset_regmgr_unlocked(regmgr);
         return;
     }
 
     // Initialize the registry template
-    init_reg_template(regmgr, reg);
+    regmgr.system_dreg_valid = false;
+    if (!init_reg_template(regmgr, reg)) {
+        regmgr.system_dreg.clear();
+        regmgr.reg_category_template.clear();
+        regmgr.reg_template.clear();
+        LOG_WARN("Invalid registry template");
+        return;
+    }
 
     // Initialize the system.dreg
     regmgr.system_dreg_path = vita_fs_path / "vd0/registry/system.dreg";
     regmgr.system_dreg.clear();
-    if (!load_system_dreg(regmgr)) {
-        LOG_WARN("Failed to load system.dreg, attempting to create it");
-        init_system_dreg(regmgr);
+    regmgr.system_dreg_valid = load_system_dreg(regmgr);
+    if (!regmgr.system_dreg_valid) {
+        regmgr.system_dreg.clear();
+        std::error_code error;
+        const auto status = fs::symlink_status(regmgr.system_dreg_path, error);
+        if (error == std::errc::no_such_file_or_directory || (!error && status.type() == fs::file_type::not_found)) {
+            LOG_WARN("system.dreg not found, attempting to create it");
+            if (!init_system_dreg(regmgr)) {
+                LOG_WARN("Failed to create system.dreg");
+            }
+            regmgr.system_dreg.clear();
+            regmgr.system_dreg_valid = load_system_dreg(regmgr);
+            if (!regmgr.system_dreg_valid)
+                regmgr.system_dreg.clear();
+        } else {
+            LOG_WARN("Failed to load existing system.dreg; leaving it unchanged");
+        }
     }
 }
 
@@ -534,3 +1349,57 @@ std::pair<std::string, std::string> get_category_and_name_by_id(const int id, co
 }
 
 } // namespace regmgr
+
+namespace sce_regmgr {
+
+SceInt32 copy_from_guest(MemState &mem, Address address, void *destination, SceSize size) {
+    if (!size)
+        return 0;
+    if (!address || !destination || !is_valid_addr_len(mem, address, size))
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    return read_guest_memory(mem, address, destination, size) ? 0 : SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+}
+
+SceInt32 copy_to_guest(MemState &mem, Address address, const void *source, SceSize size) {
+    if (!size)
+        return 0;
+    if (!address || !source || !is_valid_addr_len(mem, address, size))
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    return write_guest_memory(mem, address, source, size) ? 0 : SCE_KERNEL_ERROR_ILLEGAL_PERMISSION;
+}
+
+SceInt32 copy_padded_to_guest(MemState &mem, Address address, const void *source, SceSize source_size, SceSize size) {
+    if (!size)
+        return 0;
+    if (!address || !is_valid_addr_len(mem, address, size))
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    return write_guest_memory_padded(mem, address, source, source_size, size) ? 0 : SCE_KERNEL_ERROR_ILLEGAL_PERMISSION;
+}
+
+SceInt32 copy_guest_c_string(MemState &mem, Address address, const std::string &source, SceSize size) {
+    const size_t terminator = source.find(char(0));
+    const size_t source_size = terminator == std::string::npos ? source.size() : terminator;
+    return copy_padded_to_guest(mem, address, source.data(), static_cast<SceSize>(std::min<size_t>(source_size, size)), size);
+}
+
+SceInt32 copy_guest_string(MemState &mem, Ptr<const char> source, std::string &destination, size_t max_size) {
+    destination.clear();
+    if (!source)
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+
+    for (size_t i = 0; i < max_size; ++i) {
+        const Address address = source.address() + static_cast<Address>(i);
+        if (address < source.address())
+            return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+        char character;
+        const SceInt32 result = copy_from_guest(mem, address, &character, sizeof(character));
+        if (result < 0)
+            return result;
+        if (!character)
+            return 0;
+        destination.push_back(character);
+    }
+    return SCE_REGMGR_ERROR_PATH_TOO_LONG;
+}
+
+} // namespace sce_regmgr

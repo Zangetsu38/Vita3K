@@ -19,6 +19,9 @@
 
 #include <mem/ptr.h>
 
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 struct MemState;
@@ -30,8 +33,12 @@ struct System;
 struct State {
     Ptr<VoiceDefinition> definitions;
     std::vector<System *> systems;
+    std::mutex process_states_mutex;
+    std::unordered_map<MemState *, std::unique_ptr<State>> process_states;
 };
 
 bool init(State &ngs, MemState &mem);
 void deinit(State &ngs, MemState &mem);
+State *get_process_state(State &ngs, MemState &primary_mem, MemState &process_mem);
+void release_process_state(State &ngs, MemState &process_mem);
 } // namespace ngs

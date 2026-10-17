@@ -90,7 +90,7 @@ static int run_frontend_loop(EmuEnvState &emuenv, MainWindow &main_window) {
 
     if (emuenv.cfg.run_app_path) {
         const auto result = run(emuenv, session, *window,
-            AppLaunchRequest{ .app_path = *emuenv.cfg.run_app_path }, hooks);
+            AppLaunchRequest{ .app_path = *emuenv.cfg.run_app_path, .self_path = emuenv.cfg.self_path }, hooks);
         if (result.window_closed || result.app_exited || result.exit_code != Success)
             return result.exit_code;
         sdl::update_viewport(window, emuenv.cfg.current_config.stretch_the_display_area,

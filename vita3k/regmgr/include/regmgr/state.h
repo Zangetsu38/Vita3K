@@ -19,8 +19,11 @@
 
 #include <util/fs.h>
 
+#include <array>
+#include <cstdint>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -37,11 +40,27 @@ struct RegValue {
     std::vector<char> init_value;
 };
 
+struct RegMgrCallback {
+    int32_t callback_id;
+    int32_t owner_thread_id;
+    bool started = false;
+    std::vector<std::string> paths;
+};
+
+struct RegMgrCallbackNotification {
+    int32_t callback_id;
+    int32_t owner_thread_id;
+    int32_t notify_arg;
+};
+
 struct RegMgrState {
     std::mutex mutex;
+    std::mutex callback_mutex;
     fs::path system_dreg_path;
+    bool system_dreg_valid = false;
 
     std::map<std::string, std::map<std::string, std::vector<char>>> system_dreg;
     std::vector<std::string> reg_category_template;
     std::map<std::string, std::vector<RegValue>> reg_template;
+    std::array<std::optional<RegMgrCallback>, 16> callbacks;
 };

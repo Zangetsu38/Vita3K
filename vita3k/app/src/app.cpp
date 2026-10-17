@@ -18,6 +18,7 @@
 #include <app/functions.h>
 
 #include <audio/state.h>
+#include <bgm_player/functions.h>
 #include <camera/camera.h>
 #include <config/functions.h>
 #include <config/state.h>
@@ -27,12 +28,15 @@
 #include <kernel/state.h>
 #include <packages/license.h>
 #include <packages/sfo.h>
+#include <regmgr/functions.h>
 #include <renderer/functions.h>
 #include <renderer/shaders.h>
 #include <renderer/state.h>
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/net_utils.h>
+#include <vfs/appmeta.h>
+#include <vfs/mounts.h>
 
 #include <SDL3/SDL_camera.h>
 #include <SDL3/SDL_gamepad.h>
@@ -52,7 +56,7 @@ bool has_installed_firmware_content(const fs::path &path) {
 } // namespace
 
 void reset_perf_metrics(EmuEnvState &emuenv) {
-    emuenv.frame_count = 0;
+    emuenv.frame_count.store(0, std::memory_order_relaxed);
     emuenv.fps = 0;
     emuenv.avg_fps = 0;
     emuenv.min_fps = 0;
@@ -213,13 +217,24 @@ bool switch_emulator_path(EmuEnvState &emuenv, const fs::path &vita_fs_path) {
     if (vita_fs_path.empty())
         return false;
 
+    if (emuenv.vita_fs_path != vita_fs_path)
+        regmgr::reset_regmgr(emuenv.regmgr);
     emuenv.vita_fs_path = vita_fs_path;
     emuenv.cfg.set_vita_fs_path(emuenv.vita_fs_path);
 
+    bgm_player::clear_current_bgm();
     ::io_deinit(emuenv.io);
+    pfsmgr::clear_application_mounts(emuenv.io);
+    pfsmgr::clear_shell_mounts(emuenv.io);
     if (!::init(emuenv.io, emuenv.cache_path, emuenv.log_path, emuenv.vita_fs_path, emuenv.cfg.console)) {
         LOG_ERROR("Failed to initialize file system for switched emulator path '{}'.", emuenv.vita_fs_path);
         return false;
+    }
+    regmgr::init_regmgr(emuenv.regmgr, emuenv.vita_fs_path);
+    try {
+        recover_savedata_identity(emuenv.regmgr, emuenv.vita_fs_path);
+    } catch (const std::runtime_error &error) {
+        LOG_ERROR("Cannot recover savedata identity for switched emulator path: {}", error.what());
     }
 
     load_users(emuenv);
@@ -258,8 +273,9 @@ bool setup_game_launch(EmuEnvState &emuenv, const std::string &app_path, const b
 
     get_license(emuenv, emuenv.io.title_id, emuenv.io.content_id);
     if (update_last_time_used)
-        update_last_time_app_used(emuenv, app_path);
-    set_current_config(emuenv, app_path);
+        update_last_time_app_used(emuenv, emuenv.io.app_path);
+    set_current_config(emuenv, emuenv.io.app_path);
+    regmgr::ensure_pstv_ethernet_profile(emuenv.regmgr, emuenv.cfg.current_config.pstv_mode);
     reset_perf_metrics(emuenv);
     return true;
 }
@@ -269,16 +285,14 @@ void prepare_game_launch_overlay(EmuEnvState &emuenv) {
         return;
 
     auto &renderer = *emuenv.renderer;
-    renderer.precompile_bg_path.clear();
+    renderer.precompile_bg_data.clear();
     renderer.precompile_queue.clear();
     renderer.precompile_total = 0;
     renderer.precompile_progress = 0;
     renderer.precompile_requested = false;
     renderer.precompile_complete.store(false, std::memory_order_relaxed);
 
-    const auto bg_path = emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / "sce_sys/pic0.png";
-    if (fs::exists(bg_path))
-        renderer.precompile_bg_path = fs_utils::path_to_utf8(bg_path);
+    vfs::read_app_livearea_file(renderer.precompile_bg_data, emuenv.vita_fs_path, emuenv.io.app_path, "sce_sys/pic0.png", emuenv.io.title_id);
 
     if (renderer::get_shaders_cache_hashs(renderer) && emuenv.cfg.shader_cache) {
         renderer.precompile_queue = renderer.shaders_cache_hashs;
@@ -291,13 +305,13 @@ void prepare_game_launch_overlay(EmuEnvState &emuenv) {
 bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) {
     sync_perf_overlay_config(emuenv);
 
-    if (emuenv.frame_count == 0)
+    if (emuenv.frame_count.load(std::memory_order_relaxed) == 0)
         return false;
 
     if (!metrics.tracking_started) {
         metrics.tracking_started = true;
         metrics.last_fps_time = std::chrono::steady_clock::now();
-        emuenv.frame_count = 0;
+        emuenv.frame_count.store(0, std::memory_order_relaxed);
         return false;
     }
 
@@ -307,7 +321,7 @@ bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) 
     if (ms < 1000)
         return false;
 
-    const uint32_t frame_count = static_cast<uint32_t>(emuenv.frame_count);
+    const uint32_t frame_count = static_cast<uint32_t>(emuenv.frame_count.exchange(0, std::memory_order_relaxed));
     if (frame_count == 0) {
         metrics.last_fps_time = now;
         return false;
@@ -316,8 +330,6 @@ bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) 
     emuenv.fps = (frame_count * 1000 + ms / 2) / ms;
     emuenv.ms_per_frame = (ms + frame_count / 2) / frame_count;
     metrics.last_fps_time = now;
-    emuenv.frame_count = 0;
-
     emuenv.fps_values[emuenv.current_fps_offset] = static_cast<float>(emuenv.fps);
     emuenv.current_fps_offset = (emuenv.current_fps_offset + 1) % perf_frames_size;
 

@@ -33,6 +33,7 @@ bool init(NpState &state, const np::CommunicationID *comm_id) {
 
 bool deinit(NpState &state) {
     deinit(state.trophy_state);
+    state.activity_inited.store(false);
 
     {
         std::lock_guard lock(state.tus_state.access_mutex);
@@ -40,8 +41,11 @@ bool deinit(NpState &state) {
         state.tus_state.requests.clear();
         state.tus_state.inited = false;
     }
-    state.cbs.clear();
-    state.state_cb_id = 0;
+    {
+        std::lock_guard lock(state.callback_mutex);
+        state.cbs.clear();
+        state.state_cb_ids.clear();
+    }
     state.comm_id = {};
     state.inited = false;
     return true;

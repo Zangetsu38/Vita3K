@@ -19,22 +19,49 @@
 
 #include <kernel/types.h>
 
+#include <array>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <utility>
 
 struct EmuEnvState;
 struct MemState;
 
-// Shared SysmemState definition used by SceSysmem and kubridge HLE.
+struct MemBlockClientInfo {
+    SceUInt32 open_flags = 0;
+    std::array<SceUInt32, 8> capabilities{};
+};
+
+struct MemBlockOpenLease;
 
 struct KernelMemBlock : SceKernelMemBlockInfo {
     char name[SCE_UID_NAMELEN + 1];
+    std::optional<MemBlockClientInfo> client_info;
+    std::atomic<SceUInt32> open_clients{ 0 };
+    std::shared_ptr<MemBlockOpenLease> base_lease;
+    uint8_t *shared_backing = nullptr;
+    bool mirror = false;
 };
 
 using KernelMemBlockPtr = std::shared_ptr<KernelMemBlock>;
 using Blocks = std::map<SceUID, KernelMemBlockPtr>;
+
+struct MemBlockOpenLease {
+    KernelMemBlockPtr base;
+
+    explicit MemBlockOpenLease(KernelMemBlockPtr base)
+        : base(std::move(base)) {
+        this->base->open_clients.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    ~MemBlockOpenLease() {
+        base->open_clients.fetch_sub(1, std::memory_order_relaxed);
+    }
+};
 
 struct SysmemState {
     std::mutex mutex;

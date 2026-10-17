@@ -34,6 +34,7 @@ struct AudioOutPort {
 
     // shutdown flag
     std::atomic<bool> stopping{ false };
+    std::atomic<bool> first_output_logged{ false };
     // Channel range from 0 - 32768
     int left_channel_volume = SCE_AUDIO_VOLUME_0DB;
     int right_channel_volume = SCE_AUDIO_VOLUME_0DB;
@@ -51,6 +52,7 @@ struct AudioOutPort {
     int len = 0;
     int freq = 0;
     int mode = 0;
+    int32_t owner_pid = 0;
 };
 
 typedef std::shared_ptr<AudioOutPort> AudioOutPortPtr;

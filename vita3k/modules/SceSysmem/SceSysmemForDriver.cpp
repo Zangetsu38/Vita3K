@@ -17,9 +17,10 @@
 
 #include "SceSysmemForDriver.h"
 #include "SceSysmem.h"
-#include <modules/sysmem_state.h>
+#include <kernel/sysmem_state.h>
 
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <mem/functions.h>
 #include <util/align.h>
 
@@ -159,7 +160,8 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
     Address base_address = 0;
 
     if (opt) {
-        constexpr SceUInt32 IMPLEMENTED_ATTRS = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_VBASE | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT;
+        constexpr SceUInt32 IMPLEMENTED_ATTRS = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_VBASE | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT
+            | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_ENABLE_OPEN | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_CLIENT_INFO;
         if (const SceUInt32 ignored = opt->attr & ~IMPLEMENTED_ATTRS)
             LOG_WARN("ksceKernelAllocMemBlock: ignoring attributes {} of block {}", log_hex(ignored), name);
         if (opt->attr & SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_VBASE) {
@@ -194,7 +196,18 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
         }
     }
 
-    return add_block(*state, emuenv.kernel.get_next_uid(), name, type, address.address(), size);
+    const SceUID uid = add_block(*state, emuenv.kernel.get_next_uid(), name, type, address.address(), size);
+    if (uid < 0)
+        return uid;
+    if (opt && (opt->attr & SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_ENABLE_OPEN)) {
+        const auto block = state->blocks.at(uid);
+        block->client_info.emplace();
+        if (opt->attr & SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_CLIENT_INFO) {
+            block->client_info->open_flags = opt->openFlags;
+            std::copy(std::begin(opt->capabilities), std::end(opt->capabilities), block->client_info->capabilities.begin());
+        }
+    }
+    return uid;
 }
 
 EXPORT(int, ksceKernelAllocMemBlockWithInfo) {
@@ -284,9 +297,14 @@ EXPORT(int, ksceKernelFreeMemBlock, SceUID uid) {
     const Blocks::const_iterator block = state->blocks.find(uid);
     if (block == state->blocks.end())
         return RET_ERROR(SCE_KERNEL_ERROR_INVALID_UID);
+    if (block->second->open_clients.load(std::memory_order_relaxed) != 0)
+        return RET_ERROR(SCE_KERNEL_ERROR_BLOCK_IN_USE);
 
+    if (block->second->shared_backing)
+        remove_external_mapping(emuenv.mem, block->second->shared_backing, block->second->mappedSize);
     free(emuenv.mem, block->second->mappedBase.address());
-    count_block(*state, block->second->type, -static_cast<SceSSize>(block->second->mappedSize));
+    if (!block->second->mirror)
+        count_block(*state, block->second->type, -static_cast<SceSSize>(block->second->mappedSize));
     state->blocks.erase(block);
     return SCE_KERNEL_OK;
 }
@@ -463,8 +481,16 @@ EXPORT(int, ksceKernelMemRangeRetainWithPerm) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, ksceKernelMemcpyKernelToUser) {
-    return UNIMPLEMENTED();
+EXPORT(int, ksceKernelMemcpyKernelToUser, Ptr<void> dst, Ptr<const void> src, SceSize len) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (!dst || !src || !copy_guest_memory(caller->cpu->mem, dst.address(), src.address(), len)) {
+        LOG_WARN("ksceKernelMemcpyKernelToUser rejected caller-process ranges dst={} src={} len={}",
+            log_hex(dst.address()), log_hex(src.address()), len);
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    }
+    return 0;
 }
 
 EXPORT(int, ksceKernelMemcpyKernelToUserForPid) {
@@ -476,7 +502,14 @@ EXPORT(int, ksceKernelMemcpyKernelToUserForPidUnchecked) {
 }
 
 EXPORT(int, ksceKernelMemcpyUserToKernel, Ptr<void> dst, Ptr<const void> src, SceSize len) {
-    memcpy(dst.get(emuenv.mem), src.get(emuenv.mem), len);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (!dst || !src || !copy_guest_memory(caller->cpu->mem, dst.address(), src.address(), len)) {
+        LOG_WARN("ksceKernelMemcpyUserToKernel rejected caller-process ranges dst={} src={} len={}",
+            log_hex(dst.address()), log_hex(src.address()), len);
+        return SCE_KERNEL_ERROR_ILLEGAL_ADDR;
+    }
     return 0;
 }
 

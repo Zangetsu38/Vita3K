@@ -58,6 +58,7 @@ uint32_t Atrac9DecoderState::get_es_size() {
 }
 
 void Atrac9DecoderState::flush() {
+    const std::lock_guard lock(codec_mutex);
     Atrac9CodecInfo *info = static_cast<Atrac9CodecInfo *>(atrac9_info);
     superframe_frame_idx = 0;
     superframe_data_left = info->superframeSize;

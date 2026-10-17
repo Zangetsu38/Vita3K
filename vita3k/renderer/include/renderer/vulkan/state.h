@@ -27,6 +27,7 @@
 #include <renderer/vulkan/types.h>
 
 #include <chrono>
+#include <unordered_map>
 
 struct Config;
 
@@ -106,6 +107,7 @@ struct VKState : public renderer::State {
 
     // only used when memory mapping is enabled
     std::map<Address, MappedMemory, std::greater<Address>> mapped_memories;
+    std::unordered_map<MemState *, std::map<Address, MappedMemory, std::greater<Address>>> process_mapped_memories;
     // used with double buffer memory trapping
     BufferTrapping buffer_trapping;
     // modify the behavior of trapping on vertex buffers if there are shader stores
@@ -120,6 +122,8 @@ struct VKState : public renderer::State {
     uint64_t last_frame_waited = 0;
 
     vkutil::Image default_image;
+    vkutil::Image default_cube_image;
+    vkutil::Image default_raw_image;
     vkutil::Buffer default_buffer;
 
     bool support_fsr = false;
@@ -128,6 +132,9 @@ struct VKState : public renderer::State {
     bool supports_shader_interlock = false;
     bool support_rasterized_order_access = false;
     bool support_native_rgba4_surface = false;
+    bool support_gpu_checkpoints = false;
+    // Protected by queue_mutex; report a lost device only once across renderer threads.
+    bool device_lost_reported = false;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;
 
 #ifdef __ANDROID__
@@ -142,6 +149,11 @@ struct VKState : public renderer::State {
     void late_init(const Config &cfg, const std::string_view game_id, MemState &mem) override;
     void cleanup(bool preserve_frontend = false) override;
     void wait_thread_function(const MemState &mem);
+    bool wait_for_gpu_requests();
+    bool sync_process_buffer(MemState &mem, const BufferSyncRequest &request);
+
+    vk::Result wait_for_fences(vk::ArrayProxy<const vk::Fence> fences, uint64_t timeout);
+    void report_device_lost(std::string_view operation);
 
     TextureCache *get_texture_cache() override {
         return &texture_cache;
@@ -149,7 +161,7 @@ struct VKState : public renderer::State {
 
     void render_frame(DisplayState &display, const GxmState &gxm, MemState &mem) override;
     void swap_window() override;
-    std::vector<uint32_t> dump_frame(DisplayState &display, uint32_t &width, uint32_t &height) override;
+    std::vector<uint32_t> dump_frame(DisplayState &display, uint32_t &width, uint32_t &height, bool include_background) override;
 
     uint32_t get_features_mask() override;
     int get_supported_filters() override;
@@ -160,11 +172,11 @@ struct VKState : public renderer::State {
     void set_async_compilation(bool enable) override;
 
     bool map_memory(MemState &mem, Ptr<void> address, uint32_t size) override;
-    void unmap_memory(MemState &mem, Ptr<void> address) override;
+    bool unmap_memory(MemState &mem, Ptr<void> address) override;
     // return the matching buffer and offset for the memory location
-    std::tuple<vk::Buffer, uint32_t> get_matching_mapping(const Ptr<void> address);
+    std::tuple<vk::Buffer, uint32_t> get_matching_mapping(MemState &mem, const Ptr<void> address);
     // return the GPU buffer device address matching this one
-    uint64_t get_matching_device_address(const Address address);
+    uint64_t get_matching_device_address(MemState &mem, const Address address);
 #ifdef __ANDROID__
     bool support_custom_drivers() override;
     void set_turbo_mode(bool set) override;

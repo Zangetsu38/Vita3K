@@ -17,11 +17,49 @@
 
 #include "SceIofilemgr.h"
 
+#include <../SceAppMgr/SceAppMgr.h>
+#include <../SceKernelThreadMgr/lightweight.h>
+#include <cpu/state.h>
 #include <io/functions.h>
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <kernel/types.h>
+
+#include <io/io.h>
+
+#include <map>
+#include <mutex>
+#include <string>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceIofilemgr);
+
+namespace {
+
+constexpr int IO_FLOCK_UNLOCK = 0x110;
+constexpr int IO_FLOCK_SHARED = 0x101;
+constexpr int IO_FLOCK_EXCLUSIVE = 0x102;
+constexpr int IO_FLOCK_RESERVED = 0x104;
+
+using FileLockOwner = std::pair<SceUID, SceUID>;
+using FileLockOwners = std::map<FileLockOwner, int>;
+
+std::mutex file_flocks_mutex;
+std::map<std::string, FileLockOwners> file_flocks;
+
+void release_file_flock(SceUID process_id, SceUID fd) {
+    const std::lock_guard lock(file_flocks_mutex);
+    const FileLockOwner owner{ process_id, fd };
+    for (auto file = file_flocks.begin(); file != file_flocks.end();) {
+        file->second.erase(owner);
+        if (file->second.empty())
+            file = file_flocks.erase(file);
+        else
+            ++file;
+    }
+}
+
+} // namespace
 
 EXPORT(int, _sceIoChstat) {
     TRACY_FUNC(_sceIoChstat);
@@ -53,22 +91,28 @@ EXPORT(int, _sceIoDevctlAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoDopen, const char *dir) {
+EXPORT(int, _sceIoDopen, Ptr<const char> dir) {
     TRACY_FUNC(_sceIoDopen, dir);
-    return open_dir(emuenv.io, dir, emuenv.vita_fs_path, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return open_dir_guest(*context->io, context->thread->cpu->mem, dir, emuenv.vita_fs_path, export_name);
 }
 
-EXPORT(int, _sceIoDread, const SceUID fd, SceIoDirent *dir) {
+EXPORT(int, _sceIoDread, const SceUID fd, Ptr<SceIoDirent> dir) {
     TRACY_FUNC(_sceIoDread, fd, dir);
-    if (dir == nullptr) {
-        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
-    }
-    return read_dir(emuenv.io, fd, dir, emuenv.vita_fs_path, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return read_dir_guest(*context->io, context->thread->cpu->mem, fd, dir, emuenv.vita_fs_path, export_name);
 }
 
-EXPORT(int, _sceIoGetstat, const char *file, SceIoStat *stat) {
+EXPORT(int, _sceIoGetstat, Ptr<const char> file, Ptr<SceIoStat> stat) {
     TRACY_FUNC(_sceIoGetstat, file, stat);
-    return stat_file(emuenv.io, file, stat, emuenv.vita_fs_path, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return stat_file_guest(*context->io, context->thread->cpu->mem, file, stat, emuenv.vita_fs_path, export_name);
 }
 
 EXPORT(int, _sceIoGetstatAsync) {
@@ -76,9 +120,12 @@ EXPORT(int, _sceIoGetstatAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoGetstatByFd, const SceUID fd, SceIoStat *stat) {
+EXPORT(int, _sceIoGetstatByFd, const SceUID fd, Ptr<SceIoStat> stat) {
     TRACY_FUNC(_sceIoGetstatByFd, fd, stat);
-    return stat_file_by_fd(emuenv.io, fd, stat, emuenv.vita_fs_path, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return stat_file_by_fd_guest(*context->io, context->thread->cpu->mem, fd, stat, emuenv.vita_fs_path, export_name);
 }
 
 EXPORT(int, _sceIoIoctl) {
@@ -93,7 +140,13 @@ EXPORT(int, _sceIoIoctlAsync) {
 
 EXPORT(SceOff, _sceIoLseek, const SceUID fd, Ptr<_sceIoLseekOpt> opt) {
     TRACY_FUNC(_sceIoLseek, fd, opt);
-    return seek_file(fd, opt.get(emuenv.mem)->offset, opt.get(emuenv.mem)->whence, emuenv.io, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    _sceIoLseekOpt options{};
+    if (!opt || !threadmgr::copy_sync_guest_bytes(context->thread->cpu->mem, opt.address(), &options, sizeof(options), false))
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+    return seek_file(fd, options.offset, options.whence, *context->io, export_name);
 }
 
 EXPORT(int, _sceIoLseekAsync) {
@@ -101,9 +154,12 @@ EXPORT(int, _sceIoLseekAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoMkdir, const char *dir, const SceMode mode) {
+EXPORT(int, _sceIoMkdir, Ptr<const char> dir, const SceMode mode) {
     TRACY_FUNC(_sceIoMkdir, dir, mode);
-    return create_dir(emuenv.io, dir, mode, emuenv.vita_fs_path, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return create_dir_guest(*context->io, context->thread->cpu->mem, dir, mode, emuenv.vita_fs_path, export_name);
 }
 
 EXPORT(int, _sceIoMkdirAsync) {
@@ -111,13 +167,12 @@ EXPORT(int, _sceIoMkdirAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoOpen, const char *file, const int flags, const SceMode mode) {
+EXPORT(int, _sceIoOpen, Ptr<const char> file, const int flags, const SceMode mode) {
     TRACY_FUNC(_sceIoOpen, file, flags, mode);
-    if (file == nullptr) {
-        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
-    }
-    LOG_INFO("Opening file: {}", file);
-    return open_file(emuenv.io, file, flags, emuenv.vita_fs_path, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return open_file_guest(*context->io, context->thread->cpu->mem, file, flags, emuenv.vita_fs_path, export_name);
 }
 
 EXPORT(int, _sceIoOpenAsync) {
@@ -197,7 +252,14 @@ EXPORT(int, sceIoChstatByFdAsync) {
 
 EXPORT(int, sceIoClose, const SceUID fd) {
     TRACY_FUNC(sceIoClose, fd);
-    return close_file(emuenv.io, fd, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    const auto identity = emuenv.kernel.get_process_identity(context->thread->cpu->mem);
+    const int result = close_file(*context->io, fd, export_name);
+    if (result >= 0 && identity)
+        release_file_flock(identity->pid, fd);
+    return result;
 }
 
 EXPORT(int, sceIoCloseAsync) {
@@ -205,14 +267,17 @@ EXPORT(int, sceIoCloseAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceIoComplete) {
-    TRACY_FUNC(sceIoComplete);
-    return UNIMPLEMENTED();
+EXPORT(int, sceIoComplete, SceUID request_id) {
+    TRACY_FUNC(sceIoComplete, request_id);
+    return complete_async_io(emuenv.io, request_id, export_name);
 }
 
 EXPORT(int, sceIoDclose, const SceUID fd) {
     TRACY_FUNC(sceIoDclose, fd);
-    return close_dir(emuenv.io, fd, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return close_dir(*context->io, fd, export_name);
 }
 
 EXPORT(int, sceIoDcloseAsync) {
@@ -230,9 +295,72 @@ EXPORT(int, sceIoDreadAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceIoFlockForSystem) {
-    TRACY_FUNC(sceIoFlockForSystem);
-    return UNIMPLEMENTED();
+EXPORT(int, sceIoFlockForSystem, SceUID fd, int operation) {
+    TRACY_FUNC(sceIoFlockForSystem, fd, operation);
+    if (operation != IO_FLOCK_UNLOCK && operation != IO_FLOCK_SHARED
+        && operation != IO_FLOCK_RESERVED && operation != IO_FLOCK_EXCLUSIVE) {
+        LOG_ERROR("sceIoFlockForSystem received unsupported operation {}", log_hex(operation));
+        return RET_ERROR(SCE_ERROR_ERRNO_EINVAL);
+    }
+
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    const auto identity = emuenv.kernel.get_process_identity(context->thread->cpu->mem);
+    if (!identity) {
+        LOG_ERROR("sceIoFlockForSystem could not identify the calling process");
+        return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
+    }
+
+    std::shared_ptr<FileStats> file;
+    {
+        const std::lock_guard lock(context->io->fd_mutex);
+        const auto it = context->io->std_files.find(fd);
+        if (it == context->io->std_files.end())
+            return RET_ERROR(SCE_ERROR_ERRNO_EBADFD);
+        file = it->second;
+    }
+    std::string path;
+    {
+        const std::lock_guard lock(file->mutex);
+        if (file->closed || !file->is_regular_file())
+            return RET_ERROR(SCE_ERROR_ERRNO_EBADFD);
+        path = file->get_system_location().generic_string();
+    }
+    if (path.empty()) {
+        LOG_ERROR("sceIoFlockForSystem received a file descriptor without a system path");
+        return RET_ERROR(SCE_ERROR_ERRNO_EBADFD);
+    }
+
+    const FileLockOwner owner{ identity->pid, fd };
+    const std::lock_guard lock(file_flocks_mutex);
+    auto file_locks = file_flocks.find(path);
+    if (operation == IO_FLOCK_UNLOCK) {
+        if (file_locks != file_flocks.end()) {
+            file_locks->second.erase(owner);
+            if (file_locks->second.empty())
+                file_flocks.erase(file_locks);
+        }
+        LOG_TRACE("sceIoFlockForSystem released fd {} for process {}", fd, identity->pid);
+        return 0;
+    }
+
+    auto &owners = file_flocks[path];
+    for (const auto &[other_owner, other_operation] : owners) {
+        if (other_owner == owner)
+            continue;
+        if (operation == IO_FLOCK_EXCLUSIVE
+            || other_operation == IO_FLOCK_EXCLUSIVE
+            || (operation == IO_FLOCK_RESERVED && other_operation == IO_FLOCK_RESERVED)) {
+            LOG_DEBUG("sceIoFlockForSystem operation {} would block for fd {} (held by process {})",
+                log_hex(operation), fd, other_owner.first);
+            return RET_ERROR(SCE_KERNEL_ERROR_IO_WOULD_BLOCK);
+        }
+    }
+    owners[owner] = operation;
+    LOG_TRACE("sceIoFlockForSystem operation {} acquired for fd {} in process {}",
+        log_hex(operation), fd, identity->pid);
+    return 0;
 }
 
 EXPORT(int, sceIoGetPriority) {
@@ -267,17 +395,23 @@ EXPORT(int, sceIoGetstatByFdAsync) {
 
 EXPORT(int, sceIoLseek32, const SceUID fd, const int32_t offset, const SceIoSeekMode whence) {
     TRACY_FUNC(sceIoLseek32, fd, offset, whence);
-    return static_cast<int>(seek_file(fd, offset, whence, emuenv.io, export_name));
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return static_cast<int>(seek_file(fd, offset, whence, *context->io, export_name));
 }
 
-EXPORT(int, sceIoRead, const SceUID fd, void *data, const SceSize size) {
+EXPORT(int, sceIoRead, const SceUID fd, Ptr<uint8_t> data, const SceSize size) {
     TRACY_FUNC(sceIoRead, fd, data, size);
-    return read_file(data, emuenv.io, fd, size, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return read_file_guest(*context->io, context->thread->cpu->mem, fd, data, size, export_name);
 }
 
-EXPORT(int, sceIoReadAsync) {
-    TRACY_FUNC(sceIoReadAsync);
-    return UNIMPLEMENTED();
+EXPORT(int, sceIoReadAsync, SceUID fd, Ptr<uint8_t> data, SceSize size, Ptr<uint8_t> result) {
+    TRACY_FUNC(sceIoReadAsync, fd, data.address(), size, result.address());
+    return read_file_async(emuenv.io, emuenv.kernel, emuenv.mem, thread_id, fd, data, size, result, export_name);
 }
 
 EXPORT(int, sceIoSetPriority) {
@@ -302,12 +436,21 @@ EXPORT(int, sceIoSetThreadDefaultPriority) {
 
 EXPORT(int, sceIoSetThreadDefaultPriorityForSystem) {
     TRACY_FUNC(sceIoSetThreadDefaultPriorityForSystem);
-    return UNIMPLEMENTED();
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (emuenv.kernel.is_primary_address_space(caller->cpu->mem))
+        return UNIMPLEMENTED();
+    STUBBED("System I/O thread priorities are not emulated");
+    return SCE_KERNEL_OK;
 }
 
-EXPORT(int, sceIoSyncByFd) {
-    TRACY_FUNC(sceIoSyncByFd);
-    return UNIMPLEMENTED();
+EXPORT(int, sceIoSyncByFd, const SceUID fd, const int flag) {
+    TRACY_FUNC(sceIoSyncByFd, fd, flag);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return sync_file(*context->io, fd, flag, export_name);
 }
 
 EXPORT(int, sceIoSyncByFdAsync) {
@@ -315,9 +458,12 @@ EXPORT(int, sceIoSyncByFdAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceIoWrite, const SceUID fd, const void *data, const SceSize size) {
+EXPORT(int, sceIoWrite, const SceUID fd, Ptr<const uint8_t> data, const SceSize size) {
     TRACY_FUNC(sceIoWrite, fd, data, size);
-    return write_file(fd, data, size, emuenv.io, export_name);
+    const auto context = get_process_io_context(emuenv, thread_id, export_name);
+    if (!context)
+        return RET_ERROR(context.error());
+    return write_file_guest(*context->io, context->thread->cpu->mem, fd, data, size, export_name);
 }
 
 EXPORT(int, sceIoWriteAsync) {

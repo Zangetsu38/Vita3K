@@ -17,6 +17,7 @@
 
 #include "../SceLibKernel/SceLibKernel.h"
 #include "SceThreadmgr.h"
+#include "lightweight.h"
 #include <module/module.h>
 #include <util/tracy.h>
 
@@ -24,6 +25,9 @@ TRACY_MODULE_NAME(SceThreadmgrForDriver);
 
 #include <kernel/state.h>
 #include <kernel/sync_primitives.h>
+
+#include <memory>
+#include <string>
 
 EXPORT(int, ksceKernelCancelCallback) {
     return UNIMPLEMENTED();
@@ -77,15 +81,39 @@ EXPORT(int, ksceKernelCreateMsgPipe) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, ksceKernelCreateMutex, const char *name, SceUInt attr, int init_count, SceKernelMutexOptParam *opt_param) {
-    TRACY_FUNC(ksceKernelCreateMutex, name, attr, init_count, opt_param);
+EXPORT(int, ksceKernelCreateMutex, Ptr<const char> name_ptr, SceUInt attr, int init_count, Ptr<const SceKernelMutexOptParam> opt_param) {
+    TRACY_FUNC(ksceKernelCreateMutex, name_ptr, attr, init_count, opt_param);
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
+    const bool secondary = !emuenv.kernel.is_primary_address_space(mem);
+    std::string copied_name;
+    const char *name = nullptr;
+    SceKernelMutexOptParam copied_options{};
+    const SceKernelMutexOptParam *options = nullptr;
+    if (secondary) {
+        if (!threadmgr::copy_lw_mutex_name(mem, name_ptr, copied_name))
+            return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+        name = copied_name.c_str();
+        if (opt_param) {
+            if (!threadmgr::copy_sync_guest_bytes(mem, opt_param.address(), &copied_options, sizeof(copied_options), false))
+                return RET_ERROR(SCE_KERNEL_ERROR_INVALID_MEMORY_ACCESS);
+            options = &copied_options;
+        }
+    } else {
+        name = name_ptr.get(mem);
+        options = opt_param.get(mem);
+    }
     // Kernel modules use attributes games can't, like 0x8000 for SceSysmodule's mutex
-    if (const SceInt32 error = Mutex::check_create(name, attr, init_count, opt_param, true))
+    if (const SceInt32 error = Mutex::check_create(name, attr, init_count, options, true))
         return RET_ERROR(error);
 
     // The ceilings of kernel mutexes aren't applied
-    const auto mutex = std::make_shared<HeavyMutex>(attr, name, init_count, emuenv.kernel.get_thread(thread_id), SCE_KERNEL_LOWEST_PRIORITY_KERNEL);
-    return emuenv.kernel.objects.add(mutex, emuenv.kernel.get_next_uid());
+    const auto mutex = std::make_shared<HeavyMutex>(attr, name, init_count, caller, SCE_KERNEL_LOWEST_PRIORITY_KERNEL, secondary ? &mem : nullptr);
+    const SceUID uid = emuenv.kernel.objects.add(mutex, emuenv.kernel.get_next_uid());
+    LOG_DEBUG("Created driver mutex '{}' with UID {} for thread {}", name, log_hex(uid), thread_id);
+    return uid;
 }
 
 EXPORT(int, ksceKernelCreateSema) {
@@ -97,7 +125,10 @@ EXPORT(int, ksceKernelCreateSimpleEvent) {
 }
 
 EXPORT(SceUID, ksceKernelCreateThread, const char *name, SceKernelThreadEntry entry, int initPriority, SceSize stackSize, SceUInt attr, int cpuAffinityMask, void *pOptParam) {
-    const ThreadStatePtr thread = emuenv.kernel.create_thread(emuenv.mem, name, entry.cast<void>(), initPriority, cpuAffinityMask, stackSize, 0);
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    const ThreadStatePtr thread = emuenv.kernel.create_thread_from_caller(caller, name, entry.cast<void>(), initPriority, cpuAffinityMask, stackSize, 0);
     if (!thread)
         return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
     return thread->id;
@@ -135,8 +166,39 @@ EXPORT(int, ksceKernelDeleteThread) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, ksceKernelEnqueueWorkQueue) {
-    return UNIMPLEMENTED();
+EXPORT(SceUID, ksceKernelEnqueueWorkQueue, SceUID work_queue_id, Ptr<const char> name_ptr, Ptr<void> entry, Ptr<void> arg) {
+    TRACY_FUNC(ksceKernelEnqueueWorkQueue, work_queue_id, name_ptr, entry, arg);
+    constexpr SceUID global_work_queue_id = 0x10023;
+    if (work_queue_id != global_work_queue_id)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_WORK_QUEUE_ID);
+
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    const char *name = name_ptr.get(caller->cpu->mem);
+    if (!name || !entry || !entry.get(caller->cpu->mem))
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+
+    const std::string copied_name(name);
+    const ThreadStatePtr task_thread = emuenv.kernel.create_thread_from_caller(caller, copied_name.c_str(), entry.cast<void>(), 0xBF,
+        SCE_KERNEL_CPU_MASK_SYSTEM, 0x2000, 0);
+    if (!task_thread)
+        return RET_ERROR(SCE_KERNEL_ERROR_ERROR);
+
+    const std::weak_ptr<ThreadState> weak_task_thread = task_thread;
+    task_thread->set_startup_callback([weak_task_thread, entry, arg] {
+        const ThreadStatePtr task_thread = weak_task_thread.lock();
+        if (!task_thread)
+            return;
+        const uint32_t result = task_thread->call_guest(entry.address(), { arg.address() });
+        task_thread->exit_delete(static_cast<SceInt32>(result));
+    });
+    const SceInt32 start_result = task_thread->start(0, Ptr<void>{}, true);
+    if (start_result != SCE_KERNEL_OK) {
+        task_thread->remove();
+        return RET_ERROR(start_result);
+    }
+    return task_thread->id;
 }
 
 EXPORT(int, ksceKernelGetCallbackCount) {
@@ -383,7 +445,7 @@ EXPORT(int, ksceKernelWaitSema) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, ksceKernelWaitThreadEnd, SceUID thid, int *stat, SceUInt *timeout) {
+EXPORT(int, ksceKernelWaitThreadEnd, SceUID thid, Ptr<SceInt32> stat, Ptr<SceUInt32> timeout) {
     return CALL_EXPORT(_sceKernelWaitThreadEnd, thid, stat, timeout);
 }
 

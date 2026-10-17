@@ -63,7 +63,11 @@ bool CtrlKeyboardFilter::eventFilter(QObject *watched, QEvent *event) {
             return key != input::PhysicalKeyCode::Unbound && (key == primary || key == alternate);
         };
 
-        if (pressed && matches(cfg.keyboard_button_psbutton, cfg.keyboard_button_psbutton_alt))
+        const bool ps_alt_reserved_for_shell = key == cfg.keyboard_button_psbutton_alt
+            && cfg.keyboard_button_psbutton_alt != input::PhysicalKeyCode::Unbound
+            && cfg.keyboard_button_psbutton_alt != cfg.keyboard_button_psbutton
+            && m_emuenv.ctrl.shell_session_active.load(std::memory_order_acquire);
+        if (pressed && matches(cfg.keyboard_button_psbutton, cfg.keyboard_button_psbutton_alt) && !ps_alt_reserved_for_shell)
             emit ps_button_pressed();
 
         if (pressed && matches(cfg.keyboard_gui_fullscreen, cfg.keyboard_gui_fullscreen_alt))

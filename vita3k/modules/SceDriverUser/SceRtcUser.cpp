@@ -16,6 +16,8 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "../SceRtc/SceRtc.h"
+#include "rtc_guest.h"
+#include <module/guest_string.h>
 #include <module/module.h>
 
 #include <rtc/rtc.h>
@@ -23,7 +25,12 @@
 #include <util/safe_time.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdio>
+#include <limits>
+#include <new>
+#include <string_view>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceRtcUser);
@@ -76,7 +83,7 @@ EXPORT(int, sceRtcCheckValid, const SceDateTime *pTime) {
     if (pTime->second > 59) {
         return RET_ERROR(SCE_RTC_ERROR_INVALID_SECOND);
     }
-    if (pTime->microsecond > 99999) {
+    if (pTime->microsecond > 999999) {
         return RET_ERROR(SCE_RTC_ERROR_INVALID_MICROSECOND);
     }
     return 0;
@@ -169,9 +176,71 @@ EXPORT(int, sceRtcFormatRFC2822LocalTime, char *pszDateTime, const SceRtcTick *u
     return 0;
 }
 
-EXPORT(int, sceRtcFormatRFC3339) {
-    TRACY_FUNC(sceRtcFormatRFC3339);
-    return UNIMPLEMENTED();
+EXPORT(int, sceRtcFormatRFC3339, Ptr<char> pszDateTime, Ptr<const SceRtcTick> pUtc, int offset) {
+    TRACY_FUNC(sceRtcFormatRFC3339, pszDateTime.address(), pUtc.address(), offset);
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+    if (!pszDateTime)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+    if (offset < -1439 || offset > 1439)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_VALUE);
+
+    MemState &mem = thread->cpu->mem;
+    try {
+        const GuestMemoryRange output_range{ pszDateTime.address(), offset == 0 ? 24u : 29u };
+        uint64_t pin = 0;
+        if (pUtc) {
+            const std::array ranges{ output_range, GuestMemoryRange{ pUtc.address(), sizeof(SceRtcTick) } };
+            pin = pin_guest_memory(mem, ranges);
+        } else {
+            const std::array ranges{ output_range };
+            pin = pin_guest_memory(mem, ranges);
+        }
+        if (!pin)
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+        struct PinGuard {
+            MemState &mem;
+            uint64_t pin;
+            ~PinGuard() { unpin_guest_memory(mem, pin); }
+        } guard{ mem, pin };
+
+        uint64_t ticks = rtc_get_ticks(emuenv.kernel.base_tick.tick);
+        if (pUtc) {
+            SceRtcTick utc{};
+            if (!threadmgr::copy_sync_guest_bytes(mem, pUtc.address(), &utc, sizeof(utc), false))
+                return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+            ticks = utc.tick;
+        }
+        const uint64_t input_ticks = ticks;
+        if (ticks > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_VALUE);
+
+        const int64_t offset_ticks = static_cast<int64_t>(offset) * 60 * VITA_CLOCKS_PER_SEC;
+        const uint64_t max_tick = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+        if ((offset_ticks < 0 && ticks < static_cast<uint64_t>(-offset_ticks)) || (offset_ticks > 0 && ticks > max_tick - static_cast<uint64_t>(offset_ticks)))
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_VALUE);
+        ticks = static_cast<uint64_t>(static_cast<int64_t>(ticks) + offset_ticks);
+
+        SceDateTime date{};
+        __RtcTicksToPspTime(&date, ticks);
+        char formatted[29]{};
+        const int offset_magnitude = offset < 0 ? -offset : offset;
+        const int length = offset == 0
+            ? std::snprintf(formatted, sizeof(formatted), "%04d-%02d-%02dT%02d:%02d:%02d.%02dZ",
+                  date.year, date.month, date.day, date.hour, date.minute, date.second, date.microsecond / 10000)
+            : std::snprintf(formatted, sizeof(formatted), "%04d-%02d-%02dT%02d:%02d:%02d.%02d%c%02d:%02d",
+                  date.year, date.month, date.day, date.hour, date.minute, date.second, date.microsecond / 10000,
+                  offset < 0 ? '-' : '+', offset_magnitude / 60, offset_magnitude % 60);
+        if (length < 0 || static_cast<size_t>(length) >= sizeof(formatted))
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_VALUE);
+        if (!threadmgr::copy_sync_guest_bytes(mem, pszDateTime.address(), formatted, static_cast<size_t>(length) + 1, true))
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+        return 0;
+    } catch (const std::bad_alloc &) {
+        LOG_ERROR("Cannot pin guest arguments for sceRtcFormatRFC3339");
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+    }
 }
 
 EXPORT(int, sceRtcFormatRFC3339LocalTime) {
@@ -189,9 +258,9 @@ EXPORT(int, sceRtcGetCurrentClockLocalTime, SceDateTime *datePtr) {
     return CALL_EXPORT(_sceRtcGetCurrentClockLocalTime, datePtr);
 }
 
-EXPORT(int, sceRtcGetCurrentAdNetworkTick) {
-    TRACY_FUNC(sceRtcGetCurrentAdNetworkTick);
-    return UNIMPLEMENTED();
+EXPORT(int, sceRtcGetCurrentAdNetworkTick, SceRtcTick *tick) {
+    TRACY_FUNC(sceRtcGetCurrentAdNetworkTick, tick);
+    return CALL_EXPORT(_sceRtcGetCurrentAdNetworkTick, tick);
 }
 
 EXPORT(int, sceRtcGetCurrentNetworkTick, SceRtcTick *tick) {
@@ -199,9 +268,9 @@ EXPORT(int, sceRtcGetCurrentNetworkTick, SceRtcTick *tick) {
     return CALL_EXPORT(_sceRtcGetCurrentNetworkTick, tick);
 }
 
-EXPORT(int, sceRtcGetCurrentDebugNetworkTick) {
-    TRACY_FUNC(sceRtcGetCurrentDebugNetworkTick);
-    return UNIMPLEMENTED();
+EXPORT(int, sceRtcGetCurrentDebugNetworkTick, SceRtcTick *tick) {
+    TRACY_FUNC(sceRtcGetCurrentDebugNetworkTick, tick);
+    return CALL_EXPORT(_sceRtcGetCurrentDebugNetworkTick, tick);
 }
 
 EXPORT(int, sceRtcGetCurrentTick, SceRtcTick *tick) {
@@ -214,9 +283,9 @@ EXPORT(int, sceRtcGetCurrentGpsTick) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceRtcGetCurrentRetainedNetworkTick) {
-    TRACY_FUNC(sceRtcGetCurrentRetainedNetworkTick);
-    return UNIMPLEMENTED();
+EXPORT(int, sceRtcGetCurrentRetainedNetworkTick, SceRtcTick *tick) {
+    TRACY_FUNC(sceRtcGetCurrentRetainedNetworkTick, tick);
+    return CALL_EXPORT(_sceRtcGetCurrentRetainedNetworkTick, tick);
 }
 
 EXPORT(int, sceRtcGetDayOfWeek, int year, int month, int day) {
@@ -345,24 +414,24 @@ EXPORT(unsigned int, sceRtcGetTickResolution) {
     return VITA_CLOCKS_PER_SEC;
 }
 
-EXPORT(int, sceRtcGetTime_t, SceDateTime *datePtr, uint32_t *timePtr) {
+EXPORT(int, sceRtcGetTime_t, Ptr<const SceDateTime> datePtr, Ptr<uint32_t> timePtr) {
     TRACY_FUNC(sceRtcGetTime_t, datePtr, timePtr);
-    if (datePtr == nullptr || timePtr == nullptr) {
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
     }
-
-    *timePtr = static_cast<std::uint32_t>((__RtcPspTimeToTicks(datePtr) - RTC_OFFSET) / VITA_CLOCKS_PER_SEC);
-    return 0;
+    return rtc_guest::get_time(thread->cpu->mem, datePtr, timePtr);
 }
 
-EXPORT(int, sceRtcGetTime64_t, SceDateTime *datePtr, uint64_t *timePtr) {
+EXPORT(int, sceRtcGetTime64_t, Ptr<const SceDateTime> datePtr, Ptr<uint64_t> timePtr) {
     TRACY_FUNC(sceRtcGetTime64_t, datePtr, timePtr);
-    if (datePtr == nullptr || timePtr == nullptr) {
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
         return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
     }
-
-    *timePtr = (__RtcPspTimeToTicks(datePtr) - RTC_OFFSET) / VITA_CLOCKS_PER_SEC;
-    return 0;
+    return rtc_guest::get_time(thread->cpu->mem, datePtr, timePtr);
 }
 
 // This is the # of microseconds between January 1, 0001 and January 1, 1601 (for Win32 FILETIME.)
@@ -400,9 +469,112 @@ EXPORT(int, sceRtcParseDateTime) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceRtcParseRFC3339) {
-    TRACY_FUNC(sceRtcParseRFC3339);
-    return UNIMPLEMENTED();
+EXPORT(int, sceRtcParseRFC3339, Ptr<SceRtcTick> tick, Ptr<const char> str) {
+    TRACY_FUNC(sceRtcParseRFC3339, tick.address(), str.address());
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+    if (!tick || !str)
+        return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+
+    MemState &mem = thread->cpu->mem;
+    constexpr size_t max_input_size = 128;
+    std::array<char, max_input_size> input_buffer{};
+    uint32_t input_length = 0;
+    try {
+        if (module::bounded_guest_string_length(mem, str.address(), input_buffer.size(), input_length)
+            != module::GuestStringError::none)
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+        if (input_length >= input_buffer.size())
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+
+        const std::array ranges{ GuestMemoryRange{ tick.address(), sizeof(SceRtcTick) },
+            GuestMemoryRange{ str.address(), input_length + 1 } };
+        const uint64_t pin = pin_guest_memory(mem, ranges);
+        if (!pin)
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+        struct PinGuard {
+            MemState &mem;
+            uint64_t pin;
+            ~PinGuard() { unpin_guest_memory(mem, pin); }
+        } guard{ mem, pin };
+
+        if (!threadmgr::copy_sync_guest_bytes(mem, str.address(), input_buffer.data(), input_length + 1, false))
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+
+        const std::string_view input(input_buffer.data(), input_length);
+        const auto is_digit = [](char value) { return value >= '0' && value <= '9'; };
+        const auto uppercase = [](char value) { return value >= 'a' && value <= 'z' ? value - ('a' - 'A') : value; };
+        const auto parse_two_digits = [&](size_t position, int &value) {
+            if (position + 1 >= input.size() || !is_digit(input[position]) || !is_digit(input[position + 1]))
+                return false;
+            value = (input[position] - '0') * 10 + input[position + 1] - '0';
+            return true;
+        };
+        if (input.size() < 20 || !is_digit(input[0]) || !is_digit(input[1]) || !is_digit(input[2]) || !is_digit(input[3]))
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+
+        SceDateTime time{};
+        time.year = (input[0] - '0') * 1000 + (input[1] - '0') * 100 + (input[2] - '0') * 10 + input[3] - '0';
+        int value = 0;
+        if (input[4] != '-' || !parse_two_digits(5, value))
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+        time.month = value;
+        if (input[7] != '-' || !parse_two_digits(8, value))
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+        time.day = value;
+        if (uppercase(input[10]) != 'T' || !parse_two_digits(11, value))
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+        time.hour = value;
+        if (input[13] != ':' || !parse_two_digits(14, value))
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+        time.minute = value;
+        if (input[16] != ':' || !parse_two_digits(17, value))
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+        time.second = value;
+
+        size_t position = 19;
+        time.microsecond = 0;
+        if (position < input.size() && input[position] == '.') {
+            unsigned int scale = 100000;
+            ++position;
+            while (position < input.size() && is_digit(input[position])) {
+                if (scale) {
+                    time.microsecond += (input[position] - '0') * scale;
+                    scale /= 10;
+                }
+                ++position;
+            }
+        }
+
+        int offset = 0;
+        if (position >= input.size())
+            return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+        if (uppercase(input[position]) != 'Z') {
+            if ((input[position] != '-' && input[position] != '+') || position + 5 >= input.size())
+                return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+            int hours = 0;
+            int minutes = 0;
+            if (!parse_two_digits(position + 1, hours) || input[position + 3] != ':' || !parse_two_digits(position + 4, minutes))
+                return RET_ERROR(SCE_RTC_ERROR_BAD_PARSE);
+            offset = hours * 60 + minutes;
+            if (input[position] == '-')
+                offset = -offset;
+        }
+
+        const int valid = CALL_EXPORT(sceRtcCheckValid, &time);
+        if (valid != 0 && (valid != SCE_RTC_ERROR_INVALID_SECOND || time.second != 60))
+            return valid;
+
+        const int64_t utc_offset = -static_cast<int64_t>(offset) * 60 * VITA_CLOCKS_PER_SEC;
+        SceRtcTick result{ __RtcPspTimeToTicks(&time) + static_cast<uint64_t>(utc_offset) };
+        if (!threadmgr::copy_sync_guest_bytes(mem, tick.address(), &result, sizeof(result), true))
+            return RET_ERROR(SCE_RTC_ERROR_INVALID_POINTER);
+        return 0;
+    } catch (const std::bad_alloc &) {
+        LOG_ERROR("Cannot pin guest arguments for sceRtcParseRFC3339");
+        return SCE_KERNEL_ERROR_NO_MEMORY;
+    }
 }
 
 EXPORT(int, sceRtcSetDosTime) {

@@ -17,11 +17,17 @@
 
 #include <module/module.h>
 
+#include <cpu/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <module/load_module.h>
 #include <modules/module_parent.h>
 #include <util/tracy.h>
 #include <util/vector_utils.h>
+
+#include <string>
+
+#include "../SceAppMgr/SceAppMgr.h"
 
 TRACY_MODULE_NAME(SceSysmodule);
 
@@ -176,7 +182,10 @@ EXPORT(int, sceSysmoduleIsLoaded, SceSysmoduleModuleId module_id) {
     if (module_id > SYSMODULE_COUNT)
         return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
 
-    if (is_module_loaded(emuenv.kernel, module_id))
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (is_module_loaded(emuenv.kernel, caller->cpu->mem, module_id))
         return SCE_SYSMODULE_LOADED;
     else
         return RET_ERROR(SCE_SYSMODULE_ERROR_UNLOADED);
@@ -190,8 +199,12 @@ EXPORT(int, sceSysmoduleIsLoadedInternal, SceSysmoduleInternalModuleId module_id
     if (((module_id & 0xFFFF) == 0) || ((module_id & 0xFFFF) > 0x29))
         return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
 
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
     std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
-    if (std::ranges::contains(emuenv.kernel.loaded_internal_sysmodules, module_id))
+    const auto process = emuenv.kernel.loaded_internal_sysmodules.find(&caller->cpu->mem);
+    if (process != emuenv.kernel.loaded_internal_sysmodules.end() && std::ranges::contains(process->second, module_id))
         return SCE_SYSMODULE_LOADED;
     else
         return RET_ERROR(SCE_SYSMODULE_ERROR_UNLOADED);
@@ -199,54 +212,117 @@ EXPORT(int, sceSysmoduleIsLoadedInternal, SceSysmoduleInternalModuleId module_id
 
 EXPORT(int, sceSysmoduleLoadModule, SceSysmoduleModuleId module_id) {
     TRACY_FUNC(sceSysmoduleLoadModule, module_id);
-    if (module_id > SYSMODULE_COUNT)
+    if (module_id >= SYSMODULE_COUNT)
         return RET_ERROR(SCE_SYSMODULE_ERROR_INVALID_VALUE);
 
-    LOG_INFO("Loading module ID: {}", to_debug_str(emuenv.mem, module_id));
-    if (is_module_loaded(emuenv.kernel, module_id))
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
+    LOG_INFO("Loading module ID: {}", to_debug_str(mem, module_id));
+    if (is_module_loaded(emuenv.kernel, mem, module_id))
         return SCE_SYSMODULE_LOADED;
     if (is_module_enabled(emuenv, module_id)) {
-        if (load_sys_module(emuenv, module_id))
+        IOState *io = &emuenv.io;
+        struct LoadReservation {
+            EmuEnvState &emuenv;
+            MemState &mem;
+            SceSysmoduleModuleId module_id;
+            bool active{ false };
+            ~LoadReservation() {
+                if (active)
+                    end_secondary_sysmodule_load(emuenv, mem, module_id);
+            }
+        } reservation{ emuenv, mem, module_id };
+        if (!emuenv.kernel.is_primary_address_space(mem)) {
+            io = begin_secondary_sysmodule_load(emuenv, mem, module_id);
+            if (!io)
+                return RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
+            reservation.active = true;
+        }
+        const bool loaded = load_sys_module(emuenv, mem, *io, module_id);
+        if (loaded)
             return SCE_SYSMODULE_LOADED;
         else
             return RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
     } else {
         std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
-        emuenv.kernel.loaded_sysmodules[module_id] = {};
+        emuenv.kernel.loaded_sysmodules[&mem][module_id] = {};
         return SCE_SYSMODULE_LOADED;
     }
 }
 
+static bool load_internal_sysmodule(EmuEnvState &emuenv, MemState &mem, SceSysmoduleInternalModuleId module_id, SceSize args, Ptr<void> argp, int *retcode) {
+    IOState *io = &emuenv.io;
+    struct LoadReservation {
+        EmuEnvState &emuenv;
+        MemState &mem;
+        SceSysmoduleInternalModuleId module_id;
+        bool active{ false };
+        ~LoadReservation() {
+            if (active)
+                end_secondary_sysmodule_load(emuenv, mem, module_id);
+        }
+    } reservation{ emuenv, mem, module_id };
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        io = begin_secondary_sysmodule_load(emuenv, mem, module_id);
+        if (!io)
+            return false;
+        reservation.active = true;
+    }
+    return load_sys_module_internal_with_arg(emuenv, mem, *io, module_id, args, argp, retcode);
+}
+
 EXPORT(int, sceSysmoduleLoadModuleInternal, SceSysmoduleInternalModuleId module_id) {
     TRACY_FUNC(sceSysmoduleLoadModuleInternal, module_id);
-    LOG_TRACE("sceSysmoduleLoadModuleInternal(module_id:{})", to_debug_str(emuenv.mem, module_id));
 
     if (static_cast<int>(module_id) >= 0) {
         // apparently you can load non-internal modules with this function
         return CALL_EXPORT(sceSysmoduleLoadModule, static_cast<SceSysmoduleModuleId>(module_id));
     }
 
-    const bool loaded = load_sys_module_internal_with_arg(emuenv, module_id, 0, Ptr<void>(), nullptr);
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
+    LOG_TRACE("sceSysmoduleLoadModuleInternal(module_id:{})", to_debug_str(mem, module_id));
+    const bool loaded = load_internal_sysmodule(emuenv, mem, module_id, 0, Ptr<void>(), nullptr);
     return loaded ? SCE_SYSMODULE_LOADED : RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
 }
 
-EXPORT(int, sceSysmoduleLoadModuleInternalWithArg, SceSysmoduleInternalModuleId module_id, SceSize args, Ptr<void> argp, const SceSysmoduleOpt *option) {
+EXPORT(int, sceSysmoduleLoadModuleInternalWithArg, SceSysmoduleInternalModuleId module_id, SceSize args, Ptr<void> argp, Ptr<const SceSysmoduleOpt> option) {
     TRACY_FUNC(sceSysmoduleLoadModuleInternalWithArg, module_id, args, argp, option);
-    LOG_TRACE("sceSysmoduleLoadModuleInternalWithArg(module_id:{}, args:{}, argp:{},option:{})", to_debug_str(emuenv.mem, module_id),
-        to_debug_str(emuenv.mem, args), to_debug_str(emuenv.mem, argp), to_debug_str(emuenv.mem, option));
-
-    const bool loaded = load_sys_module_internal_with_arg(emuenv, module_id, args, argp, option ? option->result.get(emuenv.mem) : nullptr);
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
+    LOG_TRACE("sceSysmoduleLoadModuleInternalWithArg(module_id:{}, args:{}, argp:{},option:{})", to_debug_str(mem, module_id),
+        to_debug_str(mem, args), to_debug_str(mem, argp), to_debug_str(mem, option));
+    if (option && !is_valid_addr_len(mem, option.address(), sizeof(SceSysmoduleOpt)))
+        return RET_ERROR(SCE_KERNEL_ERROR_ILLEGAL_ADDR);
+    const auto *opt = option ? option.get(mem) : nullptr;
+    const bool loaded = load_internal_sysmodule(emuenv, mem, module_id, args, argp, opt ? opt->result.get(mem) : nullptr);
     return loaded ? SCE_SYSMODULE_LOADED : RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
 }
 
 EXPORT(int, sceSysmoduleUnloadModule, SceSysmoduleModuleId module_id) {
     TRACY_FUNC(sceSysmoduleUnloadModule, module_id);
 
+    const ThreadStatePtr caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    MemState &mem = caller->cpu->mem;
     if (is_module_enabled(emuenv, module_id)) {
+        if (&mem != &emuenv.mem) {
+            LOG_ERROR("Unloading an LLE system module in a secondary address space is not implemented");
+            return RET_ERROR(SCE_KERNEL_ERROR_NOT_IMPLEMENTED);
+        }
         return unload_sys_module(emuenv, module_id);
     } else {
         std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
-        emuenv.kernel.loaded_sysmodules.erase(module_id);
+        const auto process = emuenv.kernel.loaded_sysmodules.find(&mem);
+        if (process != emuenv.kernel.loaded_sysmodules.end())
+            process->second.erase(module_id);
 
         return 0;
     }

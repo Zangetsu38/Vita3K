@@ -23,6 +23,11 @@
 #pragma once
 
 #include <util/log.h>
+#include <util/self_auth_info.h>
+
+#include <array>
+#include <optional>
+#include <vector>
 
 // Credits to TeamMolecule for their original work on this https://github.com/TeamMolecule/sceutils
 
@@ -245,6 +250,8 @@ public:
         memcpy(&controlinfo_offset, &data[72], 8);
         memcpy(&controlinfo_length, &data[80], 8);
     }
+
+    uint64_t get_controlinfo_length() const { return controlinfo_length; }
 };
 
 struct AppInfoHeader {
@@ -387,7 +394,6 @@ class MetadataHeader {
 private:
     uint64_t signature_input_length;
     uint32_t signature_type;
-    uint32_t opt_header_size;
     uint32_t field_18;
     uint32_t field_1C;
 
@@ -395,6 +401,7 @@ public:
     static const int Size = 32;
     uint32_t section_count;
     uint32_t key_count;
+    uint32_t opt_header_size;
 
     explicit MetadataHeader(const char *data) {
         memcpy(&signature_input_length, &data[0], 8);
@@ -653,6 +660,11 @@ void register_keys(KeyStore &SCE_KEYS, int type);
 void extract_fat(const fs::path &partition_path, const std::string &partition, const fs::path &vita_fs_path);
 std::string decompress_segments(const std::vector<uint8_t> &decrypted_data, const uint64_t &size);
 std::tuple<uint64_t, SelfType> get_key_type(std::ifstream &file, const SceHeader &sce_hdr);
-std::vector<SceSegment> get_segments(const uint8_t *input, const SceHeader &sce_hdr, KeyStore &SCE_KEYS, uint64_t sysver = -1, SelfType self_type = static_cast<SelfType>(0), int keytype = 0, const uint8_t *klic = 0);
-std::vector<uint8_t> decrypt_fself(const std::vector<uint8_t> &fself, const uint8_t *klic);
+std::vector<SceSegment> get_segments(const uint8_t *input, const SceHeader &sce_hdr, KeyStore &SCE_KEYS, uint64_t sysver = -1,
+    SelfType self_type = static_cast<SelfType>(0), int keytype = 0, const uint8_t *klic = 0,
+    std::optional<SceSelfAuthInfo> *auth_info = nullptr);
+std::optional<SceSelfAuthInfo> get_self_auth_info(const std::vector<uint8_t> &fself, const uint8_t *klic);
+std::vector<uint8_t> decrypt_fself(const std::vector<uint8_t> &fself, const uint8_t *klic,
+    std::optional<SceSelfAuthInfo> *auth_info = nullptr);
 void decrypt_selfs(const fs::path &input_path, const fs::path &cache_path, const uint8_t *klic);
+std::string resolve_ver_xml_url(const std::string &title_id);

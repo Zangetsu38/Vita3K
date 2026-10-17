@@ -99,7 +99,9 @@ void State::update_overlays() {
     // Pause overlay
     const bool is_paused = paused.load(std::memory_order_relaxed);
     overlay_manager->set_paused(is_paused);
-    if (is_paused) {
+    const bool show_pause = app_session_controller.has_value()
+        && app_session_controller->get().should_show_pause_overlay();
+    if (show_pause) {
         bool just_created = false;
         auto pause_overlay = overlay_manager->get<overlay::pause_overlay>();
         if (!pause_overlay) {
@@ -255,24 +257,24 @@ void draw(State &state, Context *ctx, SceGxmPrimitiveType prim_type, SceGxmIndex
     renderer::add_command(ctx, renderer::CommandOpcode::Draw, nullptr, prim_type, index_type, index_data, index_count, instance_count);
 }
 
-void transfer_copy(State &state, uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode, const SceGxmTransferImage *images, SceGxmTransferType srcType, SceGxmTransferType destType) {
-    renderer::send_single_command(state, nullptr, renderer::CommandOpcode::TransferCopy, false, colorKeyValue, colorKeyMask, colorKeyMode, images, srcType, destType);
+void transfer_copy(State &state, MemState &mem, uint32_t colorKeyValue, uint32_t colorKeyMask, SceGxmTransferColorKeyMode colorKeyMode, const SceGxmTransferImage *images, SceGxmTransferType srcType, SceGxmTransferType destType) {
+    renderer::send_single_command(state, mem, nullptr, renderer::CommandOpcode::TransferCopy, false, colorKeyValue, colorKeyMask, colorKeyMode, images, srcType, destType);
 }
 
-void transfer_downscale(State &state, const SceGxmTransferImage *src, const SceGxmTransferImage *dest) {
-    renderer::send_single_command(state, nullptr, renderer::CommandOpcode::TransferDownscale, false, src, dest);
+void transfer_downscale(State &state, MemState &mem, const SceGxmTransferImage *src, const SceGxmTransferImage *dest) {
+    renderer::send_single_command(state, mem, nullptr, renderer::CommandOpcode::TransferDownscale, false, src, dest);
 }
 
-void transfer_fill(State &state, uint32_t fillColor, const SceGxmTransferImage *dest) {
-    renderer::send_single_command(state, nullptr, renderer::CommandOpcode::TransferFill, false, fillColor, dest);
+void transfer_fill(State &state, MemState &mem, uint32_t fillColor, const SceGxmTransferImage *dest) {
+    renderer::send_single_command(state, mem, nullptr, renderer::CommandOpcode::TransferFill, false, fillColor, dest);
 }
 
 void sync_surface_data(State &state, Context *ctx, const SceGxmNotification vertex_notification, const SceGxmNotification fragment_notification) {
     renderer::add_command(ctx, renderer::CommandOpcode::SyncSurfaceData, nullptr, vertex_notification, fragment_notification);
 }
 
-bool create_context(State &state, std::unique_ptr<Context> &context) {
-    return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::CreateContext, true, &context) > CommandErrorCodeNone;
+bool create_context(State &state, std::unique_ptr<Context> &context, MemState &mem, bool select_context) {
+    return renderer::send_single_command(state, nullptr, renderer::CommandOpcode::CreateContext, true, &context, &mem, select_context) > CommandErrorCodeNone;
 }
 
 void destroy_context(State &state, std::unique_ptr<Context> &context) {

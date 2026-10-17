@@ -103,7 +103,8 @@ void sync_depth_bias(VKContext &context) {
     if (!context.is_recording)
         return;
 
-    context.render_cmd.setDepthBias(static_cast<float>(context.record.depth_bias_unit), 0.0, static_cast<float>(context.record.depth_bias_slope));
+    // The slope factor applies per raster pixel
+    context.render_cmd.setDepthBias(static_cast<float>(context.record.depth_bias_unit), 0.0, static_cast<float>(context.record.depth_bias_slope) * context.state.res_multiplier);
 }
 
 void sync_depth_data(VKContext &context) {
@@ -214,7 +215,7 @@ void sync_visibility_buffer(VKContext &context, Ptr<uint32_t> buffer, uint32_t s
         context.visibility_buffers[buffer.address()] = { buffer.address(), nullptr, 0, static_cast<uint32_t>(stride / sizeof(uint32_t)) };
         ite = context.visibility_buffers.find(buffer.address());
 
-        std::tie(ite->second.gpu_buffer, ite->second.buffer_offset) = context.state.get_matching_mapping(buffer.cast<void>());
+        std::tie(ite->second.gpu_buffer, ite->second.buffer_offset) = context.state.get_matching_mapping(context.mem, buffer.cast<void>());
     }
 
     context.current_visibility_buffer = &ite->second;

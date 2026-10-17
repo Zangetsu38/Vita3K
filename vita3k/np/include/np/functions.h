@@ -46,14 +46,14 @@ bool deinit(NpTrophyState &state);
  *
  * Only one context per 1 communication ID.
  *
- * \param np           NP state.
+ * \param state        Trophy state of the calling process.
  * \param io           IO state.
- * \param custom_comm  Custom communication ID. If this is null, the one passed in NP initialization will be used.
+ * \param comm_id      Communication ID of the trophy set.
  *
  * \returns uint32_t(-1) on failure, else the handle to the context.
  */
-np::trophy::ContextHandle create_trophy_context(NpState &np, IOState *io, const fs::path &vita_fs_path,
-    const np::CommunicationID *custom_comm, const std::uint32_t lang, np::NpTrophyError *error);
+np::trophy::ContextHandle create_trophy_context(NpTrophyState &state, IOState *io, const fs::path &vita_fs_path,
+    const np::CommunicationID &comm_id, const std::uint32_t lang, np::NpTrophyError *error);
 
 np::trophy::Context *get_trophy_context(NpTrophyState &state, const np::trophy::ContextHandle handle);
 bool destroy_trophy_context(NpTrophyState &state, const np::trophy::ContextHandle handle);

@@ -19,7 +19,10 @@
 
 #include <audio/state.h>
 #include <codec/state.h>
+#include <cpu/state.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
 #include <util/lock_and_find.h>
 #include <util/tracy.h>
 
@@ -53,6 +56,7 @@ struct AudiodecState {
     std::mutex mutex;
     DecoderStates decoders;
     CodecDecodersMap codecs;
+    std::set<SceUID> logged_decodes;
 };
 
 struct SceAudiodecInfoAt9 {
@@ -93,6 +97,9 @@ struct SceAudiodecInfo {
     };
 };
 
+static_assert(offsetof(SceAudiodecInfo, at9) == offsetof(SceAudiodecInfo, aac));
+static_assert(offsetof(SceAudiodecInfo, at9) == offsetof(SceAudiodecInfo, mp3));
+
 struct SceAudiodecCtrl {
     uint32_t size;
     SceUID handle;
@@ -132,9 +139,17 @@ EXPORT(int, sceAudiodecClearContext, SceAudiodecCtrl *ctrl) {
     if (ctrl->size != sizeof(SceAudiodecCtrl))
         return SCE_AUDIODEC_ERROR_INVALID_SIZE;
 
-    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();
-    if (state->codecs.empty()) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+    auto *store = emuenv.kernel.get_process_object_store(caller->cpu->mem);
+    if (!store)
         return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    const auto state = store->get_or_create<AudiodecState>();
+    {
+        const std::lock_guard lock(state->mutex);
+        if (state->codecs.empty())
+            return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
     }
     if (!ctrl->handle) {
         return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
@@ -151,45 +166,55 @@ EXPORT(int, sceAudiodecClearContext, SceAudiodecCtrl *ctrl) {
     return 0;
 }
 
-static int create_decoder(EmuEnvState &emuenv, SceAudiodecCtrl *ctrl, SceAudiodecCodec codec) {
+static int create_decoder(EmuEnvState &emuenv, SceUID thread_id, SceAudiodecCtrl *ctrl, SceAudiodecCodec codec) {
     if (!ctrl)
         return SCE_AUDIODEC_ERROR_INVALID_PTR;
 
     if (ctrl->size != sizeof(SceAudiodecCtrl))
         return SCE_AUDIODEC_ERROR_INVALID_SIZE;
 
-    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+    MemState &mem = caller->cpu->mem;
+    auto *store = emuenv.kernel.get_process_object_store(mem);
+    if (!store)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    const auto state = store->get_or_create<AudiodecState>();
     std::lock_guard<std::mutex> lock(state->mutex);
-
-    SceUID handle = emuenv.kernel.get_next_uid();
-    ctrl->handle = handle;
-    state->codecs[codec].insert(handle);
+    const uint64_t info_address = uint64_t(ctrl->info.address()) + offsetof(SceAudiodecInfo, at9);
+    if (!ctrl->info || info_address > UINT32_MAX)
+        return SCE_AUDIODEC_ERROR_INVALID_PTR;
+    DecoderPtr decoder;
 
     switch (codec) {
     case SCE_AUDIODEC_TYPE_AT9: {
-        SceAudiodecInfoAt9 &info = ctrl->info.get(emuenv.mem)->at9;
-        DecoderPtr decoder = std::make_shared<Atrac9DecoderState>(info.config_data);
+        SceAudiodecInfoAt9 info{};
+        if (!read_guest_memory(mem, static_cast<Address>(info_address), &info, sizeof(info)))
+            return SCE_AUDIODEC_ERROR_INVALID_PTR;
+        decoder = std::make_shared<Atrac9DecoderState>(info.config_data);
         // libatrac9 leaves the codec info empty for a config it can't parse, which would divide by zero below
         if (decoder->get(DecoderQuery::AT9_SAMPLE_PER_SUPERFRAME) == 0) {
-            state->codecs[codec].erase(handle);
             return SCE_AUDIODEC_AT9_ERROR_INVALID_CONFIG;
         }
-        state->decoders[handle] = decoder;
 
         info.channels = decoder->get(DecoderQuery::CHANNELS);
         info.bit_rate = decoder->get(DecoderQuery::BIT_RATE);
         info.sample_rate = decoder->get(DecoderQuery::SAMPLE_RATE);
         info.super_frame_size = decoder->get(DecoderQuery::AT9_SUPERFRAME_SIZE);
         info.frames_in_super_frame = decoder->get(DecoderQuery::AT9_FRAMES_IN_SUPERFRAME);
+        if (!write_guest_memory(mem, static_cast<Address>(info_address), &info, sizeof(info)))
+            return SCE_AUDIODEC_ERROR_INVALID_PTR;
         ctrl->es_size_max = std::min(info.super_frame_size, SCE_AUDIODEC_AT9_MAX_ES_SIZE);
         ctrl->pcm_size_max = decoder->get(DecoderQuery::AT9_SAMPLE_PER_FRAME)
             * decoder->get(DecoderQuery::CHANNELS) * sizeof(int16_t);
-        return 0;
+        break;
     }
     case SCE_AUDIODEC_TYPE_AAC: {
-        SceAudiodecInfoAac &info = ctrl->info.get(emuenv.mem)->aac;
-        DecoderPtr decoder = std::make_shared<AacDecoderState>(info.sample_rate, info.channels);
-        state->decoders[handle] = decoder;
+        SceAudiodecInfoAac info{};
+        if (!read_guest_memory(mem, static_cast<Address>(info_address), &info, sizeof(info)))
+            return SCE_AUDIODEC_ERROR_INVALID_PTR;
+        decoder = std::make_shared<AacDecoderState>(info.sample_rate, info.channels);
 
         ctrl->es_size_max = SCE_AUDIODEC_AAC_MAX_ES_SIZE;
         if (info.is_adts)
@@ -200,38 +225,45 @@ static int create_decoder(EmuEnvState &emuenv, SceAudiodecCtrl *ctrl, SceAudiode
 
         LOG_WARN_IF(info.is_adts || info.is_sbr, "report it to dev, is_adts: {}, is_sbr: {}", info.is_adts, info.is_sbr);
 
-        return 0;
+        break;
     }
     case SCE_AUDIODEC_TYPE_MP3: {
-        SceAudiodecInfoMp3 &info = ctrl->info.get(emuenv.mem)->mp3;
-        DecoderPtr decoder = std::make_shared<Mp3DecoderState>(info.channels);
-        state->decoders[handle] = decoder;
+        SceAudiodecInfoMp3 info{};
+        if (!read_guest_memory(mem, static_cast<Address>(info_address), &info, sizeof(info)))
+            return SCE_AUDIODEC_ERROR_INVALID_PTR;
 
         ctrl->es_size_max = SCE_AUDIODEC_MP3_MAX_ES_SIZE;
 
         switch (info.version) {
         case SCE_AUDIODEC_MP3_MPEG_VERSION_1:
             ctrl->pcm_size_max = info.channels * SCE_AUDIODEC_MP3_V1_MAX_PCM_SIZE;
-            return 0;
+            break;
         case SCE_AUDIODEC_MP3_MPEG_VERSION_2:
         case SCE_AUDIODEC_MP3_MPEG_VERSION_2_5:
             ctrl->pcm_size_max = info.channels * SCE_AUDIODEC_MP3_V2_MAX_PCM_SIZE;
-            return 0;
+            break;
         default:
             LOG_ERROR("Invalid MPEG version {}.", info.version);
             return SCE_AUDIODEC_MP3_ERROR_INVALID_MPEG_VERSION;
         }
+        decoder = std::make_shared<Mp3DecoderState>(info.channels);
+        break;
     }
     default: {
         LOG_ERROR("Unimplemented audio decoder {}.", codec);
         return -1;
     }
     }
+    const SceUID handle = emuenv.kernel.get_next_uid();
+    ctrl->handle = handle;
+    state->codecs[codec].insert(handle);
+    state->decoders[handle] = std::move(decoder);
+    return 0;
 }
 
 EXPORT(int, sceAudiodecCreateDecoder, SceAudiodecCtrl *ctrl, SceAudiodecCodec codec) {
     TRACY_FUNC(sceAudiodecCreateDecoder, ctrl, codec);
-    return create_decoder(emuenv, ctrl, codec);
+    return create_decoder(emuenv, thread_id, ctrl, codec);
 }
 
 EXPORT(int, sceAudiodecCreateDecoderExternal, SceAudiodecCtrl *ctrl, SceAudiodecCodec codec, void *context, uint32_t size) {
@@ -239,7 +271,7 @@ EXPORT(int, sceAudiodecCreateDecoderExternal, SceAudiodecCtrl *ctrl, SceAudiodec
     // I think context is supposed to be just extra memory where I can allocate my context.
     // I'm just going to allocate like regular sceAudiodecCreateDecoder and see how it goes.
     // Almost sure zang has already tried this so :/ - desgroup
-    return create_decoder(emuenv, ctrl, codec);
+    return create_decoder(emuenv, thread_id, ctrl, codec);
 }
 
 EXPORT(int, sceAudiodecCreateDecoderResident) {
@@ -247,18 +279,30 @@ EXPORT(int, sceAudiodecCreateDecoderResident) {
     return UNIMPLEMENTED();
 }
 
-static int decode_audio_frames(EmuEnvState &emuenv, const char *export_name, SceAudiodecCtrl *ctrl, SceUInt32 nb_frames) {
+static int decode_audio_frames(EmuEnvState &emuenv, SceUID thread_id, const char *export_name, SceAudiodecCtrl *ctrl, SceUInt32 nb_frames) {
     if (!ctrl)
         return SCE_AUDIODEC_ERROR_INVALID_PTR;
 
     if (ctrl->size != sizeof(SceAudiodecCtrl))
         return SCE_AUDIODEC_ERROR_INVALID_SIZE;
 
-    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+    MemState &mem = caller->cpu->mem;
+    auto *store = emuenv.kernel.get_process_object_store(mem);
+    if (!store)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    const auto state = store->get_or_create<AudiodecState>();
     const DecoderPtr &decoder = lock_and_find(ctrl->handle, state->decoders, state->mutex);
+    if (!decoder)
+        return SCE_AUDIODEC_ERROR_NOT_HANDLE_IN_USE;
 
-    uint8_t *es_data = ctrl->es_data.get(emuenv.mem);
-    uint8_t *pcm_data = ctrl->pcm_data.get(emuenv.mem);
+    uint8_t *es_data = ctrl->es_data.get(mem);
+    uint8_t *pcm_data = ctrl->pcm_data.get(mem);
+    if (!es_data || !pcm_data)
+        return SCE_AUDIODEC_ERROR_INVALID_PTR;
+    const std::lock_guard decoder_lock(decoder->codec_mutex);
 
     ctrl->es_size_used = 0;
     ctrl->pcm_size_given = 0;
@@ -281,17 +325,28 @@ static int decode_audio_frames(EmuEnvState &emuenv, const char *export_name, Sce
         pcm_data += pcm_size_given;
     }
 
+    bool first_decode = false;
+    {
+        const std::lock_guard lock(state->mutex);
+        first_decode = state->logged_decodes.insert(ctrl->handle).second;
+    }
+    if (first_decode) {
+        LOG_INFO("First decoded audio PCM for decoder {}: frames={}, bytes={}, channels={}, sample_rate={}",
+            ctrl->handle, nb_frames, ctrl->pcm_size_given,
+            decoder->get(DecoderQuery::CHANNELS), decoder->get(DecoderQuery::SAMPLE_RATE));
+    }
+
     return 0;
 }
 
 EXPORT(int, sceAudiodecDecode, SceAudiodecCtrl *ctrl) {
     TRACY_FUNC(sceAudiodecDecode, ctrl);
-    return decode_audio_frames(emuenv, export_name, ctrl, 1);
+    return decode_audio_frames(emuenv, thread_id, export_name, ctrl, 1);
 }
 
 EXPORT(int, sceAudiodecDecodeNFrames, SceAudiodecCtrl *ctrl, SceUInt32 nFrames) {
     TRACY_FUNC(sceAudiodecDecodeNFrames, ctrl, nFrames);
-    return decode_audio_frames(emuenv, export_name, ctrl, nFrames);
+    return decode_audio_frames(emuenv, thread_id, export_name, ctrl, nFrames);
 }
 
 EXPORT(int, sceAudiodecDecodeNStreams, SceAudiodecCtrl *ctrl, SceUInt32 nStreams) {
@@ -315,9 +370,17 @@ EXPORT(int, sceAudiodecDeleteDecoder, SceAudiodecCtrl *ctrl) {
     if (ctrl->size != sizeof(SceAudiodecCtrl))
         return SCE_AUDIODEC_ERROR_INVALID_SIZE;
 
-    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+    auto *store = emuenv.kernel.get_process_object_store(caller->cpu->mem);
+    if (!store)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    const auto state = store->get_or_create<AudiodecState>();
     std::lock_guard<std::mutex> lock(state->mutex);
-    state->decoders.erase(ctrl->handle);
+    if (!state->decoders.erase(ctrl->handle))
+        return SCE_AUDIODEC_ERROR_NOT_HANDLE_IN_USE;
+    state->logged_decodes.erase(ctrl->handle);
 
     // there are at most 4 different codecs, we can afford to look
     // at all of them (the handle is in one of them)
@@ -358,7 +421,14 @@ EXPORT(int, sceAudiodecGetContextSize, SceAudiodecCtrl *pCtrl, SceAudiodecCodec 
 
     switch (codecType) {
     case SCE_AUDIODEC_TYPE_AT9: {
-        const std::uint32_t at9Factor = getAt9Factor(reinterpret_cast<std::uint8_t *>(&pCtrl->info.get(emuenv.mem)->at9.config_data));
+        const auto caller = emuenv.kernel.get_thread(thread_id);
+        if (!caller)
+            return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+        const uint64_t address = uint64_t(pCtrl->info.address()) + offsetof(SceAudiodecInfo, at9);
+        uint32_t config_data = 0;
+        if (!pCtrl->info || address > UINT32_MAX || !read_guest_memory(caller->cpu->mem, static_cast<Address>(address), &config_data, sizeof(config_data)))
+            return SCE_AUDIODEC_ERROR_INVALID_PTR;
+        const std::uint32_t at9Factor = getAt9Factor(reinterpret_cast<const std::uint8_t *>(&config_data));
         if (at9Factor == 1 || at9Factor == 2) {
             return 0x400 * at9Factor + 0x400;
         }
@@ -387,7 +457,13 @@ EXPORT(SceInt32, sceAudiodecInitLibrary, SceAudiodecCodec codecType, SceAudiodec
     if (!pInitParam)
         return SCE_AUDIODEC_ERROR_INVALID_PTR;
 
-    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+    auto *store = emuenv.kernel.get_process_object_store(caller->cpu->mem);
+    if (!store)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    const auto state = store->get_or_create<AudiodecState>();
     std::lock_guard<std::mutex> lock(state->mutex);
 
     state->codecs[codecType] = CodecDecoders();
@@ -404,15 +480,32 @@ EXPORT(int, sceAudiodecPartlyDecode, SceAudiodecCtrl *ctrl, SceUInt32 samples_of
         return SCE_AUDIODEC_ERROR_INVALID_SIZE;
 
     // this function is only called by libatrac
-    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();
-    if (!state->codecs[SCE_AUDIODEC_TYPE_AT9].contains(ctrl->handle)) {
-        STUBBED("Call to sceAudiodecPartlyDecode with a codec other than Atrac9, report it to the devs");
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+    MemState &mem = caller->cpu->mem;
+    auto *store = emuenv.kernel.get_process_object_store(mem);
+    if (!store)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    const auto state = store->get_or_create<AudiodecState>();
+    {
+        const std::lock_guard lock(state->mutex);
+        const auto it = state->codecs.find(SCE_AUDIODEC_TYPE_AT9);
+        if (it == state->codecs.end() || !it->second.contains(ctrl->handle)) {
+            LOG_ERROR("sceAudiodecPartlyDecode requires an Atrac9 decoder in the calling process");
+            return SCE_AUDIODEC_ERROR_NOT_HANDLE_IN_USE;
+        }
     }
 
     const std::shared_ptr<DecoderState> &decoder = lock_and_find(ctrl->handle, state->decoders, state->mutex);
+    if (!decoder)
+        return SCE_AUDIODEC_ERROR_NOT_HANDLE_IN_USE;
 
-    uint8_t *es_data = ctrl->es_data.get(emuenv.mem);
-    uint8_t *pcm_data = ctrl->pcm_data.get(emuenv.mem);
+    uint8_t *es_data = ctrl->es_data.get(mem);
+    uint8_t *pcm_data = ctrl->pcm_data.get(mem);
+    if (!es_data || !pcm_data)
+        return SCE_AUDIODEC_ERROR_INVALID_PTR;
+    const std::lock_guard decoder_lock(decoder->codec_mutex);
 
     // TODO: if the offset is too big, do not decode the first superframes (doesn't seem to happen with libatrac)
     const uint32_t bytes_per_sample = decoder->get(DecoderQuery::CHANNELS) * sizeof(int16_t);
@@ -446,7 +539,13 @@ EXPORT(int, sceAudiodecPartlyDecode, SceAudiodecCtrl *ctrl, SceUInt32 samples_of
 
 EXPORT(SceInt32, sceAudiodecTermLibrary, SceAudiodecCodec codecType) {
     TRACY_FUNC(sceAudiodecTermLibrary, codecType);
-    const auto state = emuenv.kernel.obj_store.get<AudiodecState>();
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return SCE_AUDIODEC_ERROR_INVALID_HANDLE;
+    auto *store = emuenv.kernel.get_process_object_store(caller->cpu->mem);
+    if (!store)
+        return SCE_AUDIODEC_ERROR_NOT_INITIALIZED;
+    const auto state = store->get_or_create<AudiodecState>();
     std::lock_guard<std::mutex> lock(state->mutex);
 
     // remove decoders associated with codecType

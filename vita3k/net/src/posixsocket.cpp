@@ -15,8 +15,27 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <iomanip>
 #include <net/socket.h>
+#include <sstream>
+#include <util/log.h>
+
+static const bool log_enabled = true;
+
+static int convert_socket_domain(int domain) {
+    if (domain == SCE_NET_AF_INET6)
+        return AF_INET6;
+    return domain;
+}
+
+PosixSocket::PosixSocket(int domain, int type, int protocol)
+    : Socket(domain, type, protocol)
+    , sock(::socket(convert_socket_domain(domain), type, protocol)) {
+    LOG_INFO("PosixSocket created domain={} type={} protocol={} fd={}", domain, type, protocol, sock);
+}
 
 // NOTE: This should be SCE_NET_##errname but it causes vitaQuake to softlock in online games
 #ifdef _WIN32
@@ -143,6 +162,24 @@ static void convertPosixSockaddrToSce(sockaddr *src, SceNetSockaddr *dst) {
     memcpy(&dst_in->sin_addr, &src_in->sin_addr, sizeof(dst_in->sin_addr));
 }
 
+static uint32_t get_ipv4_address_value(const in_addr &address) {
+    uint32_t value = 0;
+    memcpy(&value, &address, sizeof(value));
+    return value;
+}
+
+static std::string format_ipv4_endpoint(uint32_t address, uint16_t port) {
+    const uint32_t host_address = ntohl(address);
+    return std::to_string((host_address >> 24) & 0xFF) + "." + std::to_string((host_address >> 16) & 0xFF) + "." + std::to_string((host_address >> 8) & 0xFF) + "." + std::to_string(host_address & 0xFF) + ":" + std::to_string(ntohs(port));
+}
+
+static std::string format_sce_endpoint(const SceNetSockaddr *address, unsigned int address_length) {
+    if (!address || address_length < sizeof(SceNetSockaddrIn))
+        return "<unavailable>";
+    const auto *ipv4 = reinterpret_cast<const SceNetSockaddrIn *>(address);
+    return format_ipv4_endpoint(ipv4->sin_addr.s_addr, ipv4->sin_port);
+}
+
 static bool abort_pending(bool &is_aborded) {
     if (is_aborded) {
         is_aborded = false; // Reset the flag for the next operation
@@ -157,27 +194,37 @@ static bool should_abort(int abort_flags, int flags) {
 }
 
 int PosixSocket::connect(const SceNetSockaddr *addr, unsigned int addrlen) {
-    if (should_abort(abort_flags, SCE_NET_SOCKET_ABORT_FLAG_SND_PRESERVATION))
+    if (should_abort(abort_flags, SCE_NET_SOCKET_ABORT_FLAG_SND_PRESERVATION)) {
+        LOG_INFO_IF(log_enabled, "connect fd={} peer={} result={}", sock, format_sce_endpoint(addr, addrlen), log_hex(SCE_NET_ERROR_EINTR));
         return SCE_NET_ERROR_EINTR;
+    }
 
     sockaddr addr2{};
     convertSceSockaddrToPosix(addr, &addr2);
     const auto res = ::connect(sock, &addr2, sizeof(sockaddr_in));
 
-    if (abort_pending(is_aborted))
+    if (abort_pending(is_aborted)) {
+        LOG_INFO_IF(log_enabled, "connect fd={} peer={} result={}", sock, format_sce_endpoint(addr, addrlen), log_hex(SCE_NET_ERROR_EINTR));
         return SCE_NET_ERROR_EINTR;
+    }
 
-    return translate_return_value(res);
+    const auto result = translate_return_value(res);
+    LOG_INFO_IF(log_enabled, "connect fd={} peer={} result={}", sock, format_sce_endpoint(addr, addrlen), log_hex(result));
+    return result;
 }
 
 int PosixSocket::bind(const SceNetSockaddr *addr, unsigned int addrlen) {
     sockaddr addr2;
     convertSceSockaddrToPosix(addr, &addr2);
-    return translate_return_value(::bind(sock, &addr2, sizeof(sockaddr_in)));
+    const auto result = translate_return_value(::bind(sock, &addr2, sizeof(sockaddr_in)));
+    LOG_INFO_IF(log_enabled, "bind fd={} local={} result={}", sock, format_sce_endpoint(addr, addrlen), log_hex(result));
+    return result;
 }
 
 int PosixSocket::listen(int backlog) {
-    return translate_return_value(::listen(sock, backlog));
+    const auto result = translate_return_value(::listen(sock, backlog));
+    LOG_INFO_IF(log_enabled, "listen fd={} backlog={} result={}", sock, backlog, log_hex(result));
+    return result;
 }
 
 int PosixSocket::get_peer_address(SceNetSockaddr *addr, unsigned int *addrlen) {
@@ -191,7 +238,11 @@ int PosixSocket::get_peer_address(SceNetSockaddr *addr, unsigned int *addrlen) {
         *addrlen = sizeof(SceNetSockaddrIn);
     }
 
-    return translate_return_value(res);
+    const auto result = translate_return_value(res);
+    const auto *peer = reinterpret_cast<const sockaddr_in *>(&addr2);
+    LOG_INFO_IF(log_enabled, "getpeername fd={} peer={} result={}", sock,
+        res >= 0 ? format_ipv4_endpoint(get_ipv4_address_value(peer->sin_addr), peer->sin_port) : "<unavailable>", log_hex(result));
+    return result;
 }
 
 int PosixSocket::get_socket_address(SceNetSockaddr *addr, unsigned int *addrlen) {
@@ -204,7 +255,11 @@ int PosixSocket::get_socket_address(SceNetSockaddr *addr, unsigned int *addrlen)
         convertPosixSockaddrToSce(&addr2, addr);
         *addrlen = sizeof(SceNetSockaddrIn);
     }
-    return translate_return_value(res);
+    const auto result = translate_return_value(res);
+    const auto *local = reinterpret_cast<const sockaddr_in *>(&addr2);
+    LOG_INFO_IF(log_enabled, "getsockname fd={} local={} result={}", sock,
+        res >= 0 ? format_ipv4_endpoint(get_ipv4_address_value(local->sin_addr), local->sin_port) : "<unavailable>", log_hex(result));
+    return result;
 }
 
 int PosixSocket::abort(int flags) {
@@ -233,22 +288,28 @@ int PosixSocket::close() {
 #else
     auto out = ::close(sock);
 #endif
-    return translate_return_value(out);
+    const auto result = translate_return_value(out);
+    LOG_INFO_IF(log_enabled, "close fd={} result={}", sock, log_hex(result));
+    return result;
 }
 
 int PosixSocket::shutdown_socket(int how) {
-    return translate_return_value(shutdown(sock, how));
+    const auto result = translate_return_value(shutdown(sock, how));
+    LOG_INFO_IF(log_enabled, "shutdown fd={} how={} result={}", sock, how, log_hex(result));
+    return result;
 }
 
 SocketPtr PosixSocket::accept(SceNetSockaddr *addr, unsigned int *addrlen, int &err) {
     if (should_abort(abort_flags, SCE_NET_SOCKET_ABORT_FLAG_RCV_PRESERVATION)) {
         err = SCE_NET_ERROR_EINTR;
+        LOG_INFO_IF(log_enabled, "accept fd={} result={}", sock, log_hex(err));
         return nullptr;
     }
     sockaddr addr2{};
     const abs_socket new_socket = ::accept(sock, &addr2, (socklen_t *)addrlen);
     if (abort_pending(is_aborted)) {
         err = SCE_NET_ERROR_EINTR;
+        LOG_INFO_IF(log_enabled, "accept fd={} result={}", sock, log_hex(err));
         return nullptr;
     }
 #ifdef _WIN32
@@ -258,9 +319,13 @@ SocketPtr PosixSocket::accept(SceNetSockaddr *addr, unsigned int *addrlen, int &
 #endif
         convertPosixSockaddrToSce(&addr2, addr);
         *addrlen = sizeof(SceNetSockaddrIn);
+        const auto *peer = reinterpret_cast<const sockaddr_in *>(&addr2);
+        LOG_INFO_IF(log_enabled, "accept fd={} peer={} accepted_fd={}", sock,
+            format_ipv4_endpoint(get_ipv4_address_value(peer->sin_addr), peer->sin_port), new_socket);
         return std::make_shared<PosixSocket>(new_socket, sce_type);
     }
     err = translate_return_value(new_socket);
+    LOG_INFO_IF(log_enabled, "accept fd={} result={}", sock, log_hex(err));
     return nullptr;
 }
 
@@ -304,6 +369,18 @@ int PosixSocket::set_socket_options(int level, int optname, const void *optval, 
             CASE_SETSOCKOPT_VALUE(SCE_NET_SO_USECRYPTO, &sockopt_so_usecrypto);
             CASE_SETSOCKOPT_VALUE(SCE_NET_SO_USESIGNATURE, &sockopt_so_usesignature);
             CASE_SETSOCKOPT_VALUE(SCE_NET_SO_TPPOLICY, &sockopt_so_tppolicy);
+        case SCE_NET_SO_OPTION_10000:
+        case SCE_NET_SO_OPTION_20000: {
+            if (!optval || optlen < sizeof(int))
+                return SCE_NET_ERROR_EFAULT;
+            int value = 0;
+            memcpy(&value, optval, sizeof(value));
+            if (value)
+                sce_options.fetch_or(static_cast<uint32_t>(optname));
+            else
+                sce_options.fetch_and(~static_cast<uint32_t>(optname));
+            return 0;
+        }
         case SCE_NET_SO_ONESBCAST:
             if (optlen != sizeof(sockopt_so_onesbcast))
                 return SCE_NET_ERROR_EFAULT;
@@ -403,7 +480,26 @@ int PosixSocket::get_socket_options(int level, int optname, void *optval, unsign
             CASE_GETSOCKOPT(SO_RCVLOWAT);
             CASE_GETSOCKOPT(SO_SNDTIMEO);
             CASE_GETSOCKOPT(SO_RCVTIMEO);
-            CASE_GETSOCKOPT(SO_ERROR);
+        case SCE_NET_SO_ERROR: {
+            if (!optlen || !optval)
+                return SCE_NET_ERROR_EFAULT;
+            const int icm_error = sce_icm_error.load();
+            if (icm_error) {
+                if (*optlen < sizeof(icm_error)) {
+                    *optlen = sizeof(icm_error);
+                    return SCE_NET_ERROR_EFAULT;
+                }
+                const int error = sce_icm_error.exchange(0);
+                memcpy(optval, &error, sizeof(error));
+                *optlen = sizeof(error);
+                return 0;
+            }
+            socklen_t optlen_temp = *optlen;
+            const auto retval = translate_return_value(getsockopt(sock, level, SO_ERROR,
+                reinterpret_cast<char *>(optval), &optlen_temp));
+            *optlen = optlen_temp;
+            return retval;
+        }
             CASE_GETSOCKOPT(SO_TYPE);
             CASE_GETSOCKOPT_VALUE(SCE_NET_SO_NBIO, sockopt_so_nbio);
             CASE_GETSOCKOPT_VALUE(SCE_NET_SO_REUSEPORT, sockopt_so_reuseport);
@@ -411,6 +507,19 @@ int PosixSocket::get_socket_options(int level, int optname, void *optval, unsign
             CASE_GETSOCKOPT_VALUE(SCE_NET_SO_USECRYPTO, sockopt_so_usecrypto);
             CASE_GETSOCKOPT_VALUE(SCE_NET_SO_USESIGNATURE, sockopt_so_usesignature);
             CASE_GETSOCKOPT_VALUE(SCE_NET_SO_TPPOLICY, sockopt_so_tppolicy);
+        case SCE_NET_SO_OPTION_10000:
+        case SCE_NET_SO_OPTION_20000: {
+            if (!optlen || !optval)
+                return SCE_NET_ERROR_EFAULT;
+            if (*optlen < sizeof(int)) {
+                *optlen = sizeof(int);
+                return SCE_NET_ERROR_EFAULT;
+            }
+            const int value = (sce_options.load() & static_cast<uint32_t>(optname)) != 0;
+            memcpy(optval, &value, sizeof(value));
+            *optlen = sizeof(value);
+            return 0;
+        }
             CASE_GETSOCKOPT_VALUE(SCE_NET_SO_NAME, (char)0); // writes an empty string to the output buffer
         }
     } else if (level == IPPROTO_IP) {
@@ -434,6 +543,29 @@ int PosixSocket::get_socket_options(int level, int optname, void *optval, unsign
         }
     }
     return SCE_NET_ERROR_EINVAL;
+}
+
+static std::string log_ascii_hex(const uint8_t *data, size_t len) {
+    std::stringstream stream;
+    stream << std::endl;
+    for (size_t offset = 0; offset < len; offset += 16) {
+        stream << std::setw(8) << std::setfill('0') << std::hex << offset << "  ";
+        const auto row_length = std::min<size_t>(16, len - offset);
+        for (size_t index = 0; index < row_length; ++index)
+            stream << std::setw(2) << std::setfill('0') << std::hex << static_cast<unsigned int>(data[offset + index]) << " ";
+        for (size_t index = row_length; index < 16; ++index)
+            stream << "   ";
+
+        stream << " |";
+        for (size_t index = 0; index < row_length; ++index) {
+            const auto value = data[offset + index];
+            stream << (value >= 32 && value <= 126 ? static_cast<char>(value) : '.');
+        }
+        for (size_t index = row_length; index < 16; ++index)
+            stream << ' ';
+        stream << "|\n";
+    }
+    return stream.str();
 }
 
 static int convertSceFlagsToPosix(int sock_type, int sce_flags) {
@@ -460,53 +592,81 @@ static int socket_is_ready(int sock, bool is_read = true) {
     FD_SET(sock, &fds);
     timeval timeout{ 0, 0 };
     int res = select(sock + 1, is_read ? &fds : nullptr, is_read ? nullptr : &fds, nullptr, &timeout);
-    if (res == 0)
+    if (res == 0) {
+        LOG_INFO_IF(log_enabled, "socket_is_ready fd={} direction={} result={}", sock, is_read ? "recv" : "send", log_hex(SCE_NET_ERROR_EWOULDBLOCK));
         return SCE_NET_ERROR_EWOULDBLOCK;
-    else if (res < 0)
-        return PosixSocket::translate_return_value(res);
+    } else if (res < 0) {
+        const auto result = PosixSocket::translate_return_value(res);
+        LOG_ERROR_IF(log_enabled, "socket_is_ready fd={} direction={} result={}", sock, is_read ? "recv" : "send", log_hex(result));
+        return result;
+    }
 
     return res;
 }
 
 int PosixSocket::recv_packet(void *buf, unsigned int len, int flags, SceNetSockaddr *from, unsigned int *fromlen) {
-    if (should_abort(abort_flags, SCE_NET_SOCKET_ABORT_FLAG_RCV_PRESERVATION))
+    if (should_abort(abort_flags, SCE_NET_SOCKET_ABORT_FLAG_RCV_PRESERVATION)) {
+        LOG_INFO_IF(log_enabled, "recv_packet fd={} flags={} requested={} result={}", sock, log_hex(flags), len, log_hex(SCE_NET_ERROR_EINTR));
         return SCE_NET_ERROR_EINTR;
+    }
 
     int res = 0;
 #ifdef _WIN32
     if (flags & SCE_NET_MSG_DONTWAIT) {
         res = socket_is_ready(sock);
-        if (res <= 0)
+        if (res <= 0) {
+            LOG_INFO_IF(log_enabled, "recv_packet fd={} flags={} requested={} result={}", sock, log_hex(flags), len, log_hex(res));
             return res;
+        }
     }
 #endif
     const auto posix_flags = convertSceFlagsToPosix(sce_type, flags);
+    std::string source_endpoint = from ? "<unavailable>" : "<connected>";
+    sockaddr addr{};
     if (from == nullptr) {
         res = recv(sock, reinterpret_cast<char *>(buf), len, posix_flags);
     } else {
-        sockaddr addr{};
         socklen_t addrlen = sizeof(addr);
         res = recvfrom(sock, reinterpret_cast<char *>(buf), len, posix_flags, &addr, (fromlen && *fromlen <= sizeof(addr) ? reinterpret_cast<socklen_t *>(fromlen) : &addrlen));
-        if (res > 0)
+        if (res > 0) {
+            const auto *source = reinterpret_cast<const sockaddr_in *>(&addr);
+            source_endpoint = format_ipv4_endpoint(get_ipv4_address_value(source->sin_addr), source->sin_port);
             convertPosixSockaddrToSce(&addr, from);
+        }
     }
 
-    if (abort_pending(is_aborted))
-        return SCE_NET_ERROR_EINTR;
+    const auto result = translate_return_value(res);
+    const auto payload = res > 0
+        ? log_ascii_hex(static_cast<const uint8_t *>(buf), static_cast<size_t>(res))
+        : std::string("<none>");
+    LOG_INFO_IF(log_enabled, "recv_packet fd={} from={} flags={} requested={} received={} result={} payload:{}",
+        sock, source_endpoint, log_hex(flags), len, res, log_hex(result), payload);
 
-    return translate_return_value(res);
+    if (abort_pending(is_aborted)) {
+        LOG_INFO_IF(log_enabled, "recv_packet fd={} interrupted after receive", sock);
+        return SCE_NET_ERROR_EINTR;
+    }
+
+    return result;
 }
 
 int PosixSocket::send_packet(const void *msg, unsigned int len, int flags, const SceNetSockaddr *to, unsigned int tolen) {
-    if (should_abort(abort_flags, SCE_NET_SOCKET_ABORT_FLAG_SND_PRESERVATION))
+    const auto destination_endpoint = to ? format_sce_endpoint(to, tolen) : std::string("<connected>");
+    if (should_abort(abort_flags, SCE_NET_SOCKET_ABORT_FLAG_SND_PRESERVATION)) {
+        LOG_INFO_IF(log_enabled, "send_packet fd={} to={} flags={} requested={} result={}", sock,
+            destination_endpoint, log_hex(flags), len, log_hex(SCE_NET_ERROR_EINTR));
         return SCE_NET_ERROR_EINTR;
+    }
 
     int res = 0;
 #ifdef _WIN32
     if (flags & SCE_NET_MSG_DONTWAIT) {
         res = socket_is_ready(sock, false);
-        if (res <= 0)
+        if (res <= 0) {
+            LOG_INFO_IF(log_enabled, "send_packet fd={} to={} flags={} requested={} result={}", sock,
+                destination_endpoint, log_hex(flags), len, log_hex(res));
             return res;
+        }
     }
 #endif
     const auto posix_flags = convertSceFlagsToPosix(sce_type, flags);
@@ -518,8 +678,17 @@ int PosixSocket::send_packet(const void *msg, unsigned int len, int flags, const
         res = sendto(sock, reinterpret_cast<const char *>(msg), len, posix_flags, &addr, tolen);
     }
 
-    if (abort_pending(is_aborted))
-        return SCE_NET_ERROR_EINTR;
+    const auto result = translate_return_value(res);
+    const auto payload = res > 0
+        ? log_ascii_hex(static_cast<const uint8_t *>(msg), static_cast<size_t>(res))
+        : std::string("<none>");
+    LOG_INFO_IF(log_enabled, "send_packet fd={} to={} flags={} requested={} sent={} result={} payload:{}",
+        sock, destination_endpoint, log_hex(flags), len, res, log_hex(result), payload);
 
-    return translate_return_value(res);
+    if (abort_pending(is_aborted)) {
+        LOG_INFO_IF(log_enabled, "send_packet fd={} interrupted after send", sock);
+        return SCE_NET_ERROR_EINTR;
+    }
+
+    return result;
 }

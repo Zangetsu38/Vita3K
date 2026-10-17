@@ -150,31 +150,33 @@ int wait_for_status(State &state, int *status, int signal, bool wake_on_equal) {
 }
 
 SyncWaitResult wishlist(SceGxmSyncObject *sync_object, const uint32_t timestamp, const int32_t timeout_micros) {
-    std::unique_lock<std::mutex> lock(sync_object->lock);
-    if (sync_object->timestamp_current < timestamp) {
+    auto &sync_state = sync_object->state();
+    std::unique_lock<std::mutex> lock(sync_state.lock);
+    if (sync_state.timestamp_current < timestamp) {
         const auto &pred = [&]() {
-            return sync_object->being_deleted || sync_object->timestamp_current >= timestamp;
+            return sync_state.being_deleted || sync_state.timestamp_current >= timestamp;
         };
 
         if (timeout_micros == -1) {
-            sync_object->cond.wait(lock, pred);
-        } else if (!sync_object->cond.wait_for(lock, std::chrono::microseconds(timeout_micros), pred)) {
+            sync_state.cond.wait(lock, pred);
+        } else if (!sync_state.cond.wait_for(lock, std::chrono::microseconds(timeout_micros), pred)) {
             return SyncWaitResult::TimedOut;
         }
     }
-    if (sync_object->being_deleted)
+    if (sync_state.being_deleted)
         return SyncWaitResult::Shutdown;
     return SyncWaitResult::Ready;
 }
 
 void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp) {
-    assert(sync_object->timestamp_ahead >= timestamp);
+    auto &sync_state = sync_object->state();
+    assert(sync_state.timestamp_ahead >= timestamp);
     {
-        std::unique_lock<std::mutex> lock(sync_object->lock);
-        sync_object->timestamp_current = std::max(sync_object->timestamp_current.load(), timestamp);
+        std::unique_lock<std::mutex> lock(sync_state.lock);
+        sync_state.timestamp_current = std::max(sync_state.timestamp_current.load(), timestamp);
     }
     // maybe notify_one is enough
-    sync_object->cond.notify_all();
+    sync_state.cond.notify_all();
 }
 
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list) {

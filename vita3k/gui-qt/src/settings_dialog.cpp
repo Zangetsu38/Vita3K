@@ -32,9 +32,11 @@
 #include <gui-qt/theme_manager.h>
 #include <io/state.h>
 #include <kernel/state.h>
+#include <packages/sfo.h>
 #include <renderer/functions.h>
 #include <renderer/state.h>
 #include <util/log.h>
+#include <util/net_utils.h>
 #include <util/system.h>
 
 #include <QApplication>
@@ -64,6 +66,8 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -129,7 +133,6 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     m_ui->tracy_modules_list->setSelectionMode(QAbstractItemView::NoSelection);
     m_ui->tracy_modules_list->setFocusPolicy(Qt::NoFocus);
     m_ui->tracy_modules_list->setAlternatingRowColors(true);
-
     for (int i = 0; i < m_ui->tab_widget_settings->count(); ++i) {
         auto *item = new QListWidgetItem(m_ui->tab_widget_settings->tabText(i), m_ui->settingsCategory);
         item->setSizeHint(QSize(0, 34));
@@ -141,7 +144,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     if (!m_app_path.empty()) {
         QString title_name = QString::fromStdString(m_app_path);
         for (const auto &app : emuenv.app.apps_list.apps) {
-            if (app.title_id == m_app_path) {
+            if (app.path == m_app_path || app.title_id == m_app_path) {
                 title_name = QString::fromStdString(app.title);
                 break;
             }
@@ -190,6 +193,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
         m_ui->gb_screenshot->setVisible(false);
 
         m_ui->gb_network_http_section->setVisible(false);
+        m_ui->gb_network_interfaces_section->setVisible(false);
         m_ui->gb_adhoc->setVisible(false);
     }
 
@@ -535,6 +539,7 @@ void SettingsDialog::load_config() {
     m_ui->http_read_end_attempts->setValue(emuenv.cfg.http_read_end_attempts);
     m_ui->http_read_end_sleep->setValue(emuenv.cfg.http_read_end_sleep_ms);
     update_http_retry_labels();
+    populate_network_interface_lists();
     populate_adhoc_list();
 
     m_ui->show_welcome->setChecked(emuenv.cfg.show_welcome);
@@ -702,6 +707,10 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     desired.http_timeout_sleep_ms = m_ui->http_timeout_sleep->value();
     desired.http_read_end_attempts = m_ui->http_read_end_attempts->value();
     desired.http_read_end_sleep_ms = m_ui->http_read_end_sleep->value();
+    if (m_ui->ethernet_interfaces_combo->isEnabled() && m_ui->ethernet_interfaces_combo->currentIndex() >= 0)
+        desired.ethernet_addr = m_ui->ethernet_interfaces_combo->currentIndex();
+    if (m_ui->wifi_interfaces_combo->isEnabled() && m_ui->wifi_interfaces_combo->currentIndex() >= 0)
+        desired.wifi_addr = m_ui->wifi_interfaces_combo->currentIndex();
     desired.adhoc_addr = m_ui->adhoc_address_box->currentIndex();
     desired.show_welcome = m_ui->show_welcome->isChecked();
     desired.warn_missing_firmware = m_ui->warn_missing_firmware->isChecked();
@@ -928,6 +937,60 @@ void SettingsDialog::populate_adhoc_list() {
     }
 }
 
+void SettingsDialog::populate_network_interface_lists() {
+    using InterfaceList = std::vector<std::pair<std::string, QStringList>>;
+    InterfaceList ethernet_interfaces;
+    InterfaceList wifi_interfaces;
+    const auto add_address = [](InterfaceList &interfaces, const net_utils::AssignedAddr &address) {
+        auto it = std::find_if(interfaces.begin(), interfaces.end(), [&address](const auto &entry) {
+            return entry.first == address.name;
+        });
+        if (it == interfaces.end()) {
+            interfaces.emplace_back(address.name, QStringList{});
+            it = interfaces.end() - 1;
+        }
+        const auto ip_address = QString::fromStdString(address.addr);
+        if (!it->second.contains(ip_address))
+            it->second.push_back(ip_address);
+    };
+
+    for (const auto &address : net_utils::get_all_assigned_addrs()) {
+        if (address.type == net_utils::InterfaceType::Ethernet)
+            add_address(ethernet_interfaces, address);
+        else if (address.type == net_utils::InterfaceType::Wifi)
+            add_address(wifi_interfaces, address);
+    }
+
+    const auto populate = [](QComboBox *combo, const InterfaceList &interfaces, const QString &empty_text, int selected_index, const char *type_name) {
+        combo->clear();
+
+        for (const auto &[name, addresses] : interfaces) {
+            const QString interface_name = QString::fromStdString(name);
+            const QString label = addresses.isEmpty()
+                ? interface_name
+                : QStringLiteral("%1 (%2)").arg(addresses.front(), interface_name);
+            const int index = combo->count();
+            combo->addItem(label);
+            combo->setItemData(index, addresses.join(QStringLiteral(", ")), Qt::ToolTipRole);
+        }
+
+        if (combo->count() == 0) {
+            combo->addItem(empty_text);
+            combo->setEnabled(false);
+        } else {
+            combo->setEnabled(true);
+            if (selected_index < 0 || selected_index >= combo->count()) {
+                LOG_WARN("Invalid {} interface index {}, selecting the first available interface", type_name, selected_index);
+                selected_index = 0;
+            }
+            combo->setCurrentIndex(selected_index);
+        }
+    };
+
+    populate(m_ui->ethernet_interfaces_combo, ethernet_interfaces, tr("No Ethernet interfaces detected"), emuenv.cfg.ethernet_addr, "Ethernet");
+    populate(m_ui->wifi_interfaces_combo, wifi_interfaces, tr("No Wi-Fi interfaces detected"), emuenv.cfg.wifi_addr, "Wi-Fi");
+}
+
 void SettingsDialog::update_camera_widgets() {
     const int front_idx = m_ui->front_camera_box->currentIndex();
     m_ui->label_front_camera_color->setVisible(front_idx == 0);
@@ -1137,6 +1200,73 @@ void SettingsDialog::setup_connections() {
     connect(m_ui->reset_emu_path, &QPushButton::clicked, this, [this] {
         if (emuenv.default_path != m_pending_vita_fs_path)
             set_pending_vita_fs_path(emuenv.default_path);
+    });
+
+    connect(m_ui->import_savedata_identity, &QPushButton::clicked, this, [this] {
+        if (!emuenv.io.app_path.empty()) {
+            QMessageBox::warning(this, tr("Import Savedata Identity"), tr("Close the running application before importing an identity."));
+            return;
+        }
+        const QString file = QFileDialog::getOpenFileName(this, tr("Select a savedata param.sfo"), {}, tr("SFO files (*.sfo);;All files (*)"));
+        if (file.isEmpty())
+            return;
+        if (QMessageBox::question(this, tr("Import Savedata Identity"),
+                tr("Import the OpenPSID and account ID from this save?\nThe current identity will be backed up. Existing saves will not be changed and may no longer be accessible. ux0:id.dat will be deleted and recreated by the shell."))
+            != QMessageBox::Yes)
+            return;
+        if (!emuenv.io.app_path.empty()) {
+            QMessageBox::warning(this, tr("Import Savedata Identity"), tr("Close the running application before changing the identity."));
+            return;
+        }
+        try {
+            std::string identity_error;
+            const auto identity = sfo::read_savedata_identity(gui::utils::to_fs_path(file), identity_error);
+            if (!identity) {
+                QMessageBox::critical(this, tr("Import Savedata Identity"), QString::fromStdString(identity_error));
+                return;
+            }
+            if (!app::import_savedata_identity(emuenv.regmgr, emuenv.vita_fs_path, *identity, identity_error)) {
+                QMessageBox::critical(this, tr("Import Savedata Identity"), QString::fromStdString(identity_error));
+                return;
+            }
+            QMessageBox::information(this, tr("Import Savedata Identity"), tr("Identity imported. New saves will use these identifiers."));
+        } catch (const std::runtime_error &error) {
+            LOG_ERROR("Cannot import savedata identity: {}", error.what());
+            QMessageBox::critical(this, tr("Import Savedata Identity"), QString::fromUtf8(error.what()));
+        } catch (const std::bad_alloc &) {
+            LOG_ERROR("Cannot import savedata identity: out of memory");
+            QMessageBox::critical(this, tr("Import Savedata Identity"), tr("Out of memory."));
+        }
+    });
+
+    connect(m_ui->reset_savedata_identity, &QPushButton::clicked, this, [this] {
+        const auto title = tr("Reset Savedata Identity");
+        if (!emuenv.io.app_path.empty()) {
+            QMessageBox::warning(this, title, tr("Close the running application before changing the identity."));
+            return;
+        }
+        if (QMessageBox::question(this, title,
+                tr("Generate a new OpenPSID and clear the account ID?\nThe current identity will be backed up. Existing saves will not be changed and may no longer be accessible. ux0:id.dat will be deleted and recreated by the shell."))
+            != QMessageBox::Yes)
+            return;
+        if (!emuenv.io.app_path.empty()) {
+            QMessageBox::warning(this, title, tr("Close the running application before changing the identity."));
+            return;
+        }
+        try {
+            std::string error;
+            if (!app::reset_savedata_identity(emuenv.regmgr, emuenv.vita_fs_path, error)) {
+                QMessageBox::critical(this, title, QString::fromStdString(error));
+                return;
+            }
+            QMessageBox::information(this, title, tr("Identity reset. New saves will use the new identity."));
+        } catch (const std::runtime_error &error) {
+            LOG_ERROR("Cannot reset savedata identity: {}", error.what());
+            QMessageBox::critical(this, title, QString::fromUtf8(error.what()));
+        } catch (const std::bad_alloc &) {
+            LOG_ERROR("Cannot reset savedata identity: out of memory");
+            QMessageBox::critical(this, title, tr("Out of memory."));
+        }
     });
 
     connect(m_ui->clear_custom_config, &QPushButton::clicked, this, [this] {

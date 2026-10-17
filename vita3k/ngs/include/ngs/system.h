@@ -40,6 +40,9 @@ namespace ngs {
 // random number of bytes to make sure nothing bad happens
 constexpr uint32_t default_passthrough_parameter_size = 140;
 constexpr uint32_t default_normal_parameter_size = 100;
+constexpr uint32_t system_flag_no_module_param_checking = 0;
+constexpr uint32_t system_flag_module_param_checking = 1u << 0;
+constexpr uint32_t default_system_flags = system_flag_module_param_checking;
 
 struct State;
 struct Voice;
@@ -212,8 +215,9 @@ struct ModuleData {
     void invoke_callback(KernelState &kern, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
         const uint32_t reason2, Address reason_ptr);
 
-    SceNgsBufferInfo *lock_params(const MemState &mem);
-    bool unlock_params(const MemState &mem);
+    SceNgsBufferInfo *lock_params(MemState &mem);
+    void cancel_params_lock();
+    bool unlock_params(MemState &mem, bool validate_memory = false);
 
     void ensure_scratch_size(const size_t size) {
         if (scratch_data.size() < size) {
@@ -228,6 +232,7 @@ public:
 
     virtual void set_default_preset(const MemState &mem, ModuleData &data) {}
     virtual bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) = 0;
+    virtual bool finished_triggers_callback(const ModuleData &data) const { return true; }
     virtual uint32_t module_id() const { return 0; }
     virtual uint32_t get_buffer_parameter_size() const = 0;
     virtual uint32_t get_guest_state_size() const { return 0; }
@@ -320,6 +325,7 @@ struct System;
 struct Rack : public MempoolObject {
     System *system;
     VoiceDefinition *vdef;
+    uint32_t storage_size;
 
     int32_t channels_per_voice;
     int32_t max_patches_per_input;
@@ -335,9 +341,11 @@ struct Rack : public MempoolObject {
 
 struct System : public MempoolObject {
     std::vector<Rack *> racks;
+    uint32_t storage_size;
     int32_t max_voices;
     int32_t granularity;
     int32_t sample_rate;
+    uint32_t flags;
 
     VoiceScheduler voice_scheduler;
 
@@ -352,9 +360,21 @@ bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parame
 void release_system(State &ngs, const MemState &mem, System *system);
 bool init_rack(State &ngs, const MemState &mem, System *system, SceNgsBufferInfo *init_info, const SceNgsRackDescription *description);
 void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack);
+bool get_process_rack_required_size(State &ngs, const MemState &mem, const SceNgsRackDescription &description, uint32_t &size);
+bool is_process_storage_available(const State &ngs, Address address, uint32_t size);
+Voice *find_process_voice(State &ngs, const MemState &mem, Ptr<Voice> voice);
+Patch *find_process_patch(State &ngs, const MemState &mem, Ptr<Patch> patch);
+bool get_process_voice_info(State &ngs, const MemState &mem, Ptr<Voice> voice, SceNgsVoiceInfo &info);
+bool set_process_patch_volumes(State &ngs, const MemState &mem, Ptr<Patch> patch, uint32_t offset, const float *volumes, uint32_t count);
+bool set_process_patch_matrix(State &ngs, MemState &mem, Ptr<Patch> patch, Ptr<const SceNgsVolumeMatrix> matrix);
+bool play_process_voice(State &ngs, const MemState &mem, Ptr<Voice> voice);
+bool get_process_voice_state(State &ngs, const MemState &mem, Ptr<Voice> voice, uint32_t module, uint32_t max_size, std::vector<uint8_t> &data);
+Ptr<Patch> create_process_voice_patch(State &ngs, const MemState &mem, SceNgsPatchSetupInfo &info);
+bool remove_process_voice_patch(State &ngs, const MemState &mem, Ptr<Patch> patch);
 
-void voice_definition_init(State &ngs, MemState &mem);
+bool voice_definition_init(State &ngs, MemState &mem);
 Ptr<VoiceDefinition> get_voice_definition(State &ngs, MemState &mem, ngs::BussType type);
+Ptr<VoiceDefinition> get_process_voice_definition(State &ngs, MemState &primary_mem, MemState &process_mem, ngs::BussType type);
 void apply_voice_definition(VoiceDefinition *definition, std::vector<std::unique_ptr<ngs::Module>> &mods);
 uint32_t get_voice_definition_size(VoiceDefinition *definition);
 } // namespace ngs

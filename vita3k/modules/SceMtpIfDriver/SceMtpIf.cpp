@@ -17,6 +17,17 @@
 
 #include <module/module.h>
 
+#include "../SceSblACMgr/SceSblACMgrForDriver.h"
+
+#include <util/tracy.h>
+
+TRACY_MODULE_NAME(SceMtpIfDriver);
+
+namespace {
+// The firmware pointer is opaque to callers; use a stable guest-side handle.
+constexpr Address usb_port_handle = 0x80000000;
+} // namespace
+
 EXPORT(int, sceMtpIfCancelTransfer) {
     return UNIMPLEMENTED();
 }
@@ -25,8 +36,11 @@ EXPORT(int, sceMtpIfChangePhase) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceMtpIfGetPort) {
-    return UNIMPLEMENTED();
+EXPORT(Ptr<const void>, sceMtpIfGetPort, int port) {
+    TRACY_FUNC(sceMtpIfGetPort, port);
+    if (port != 1 || CALL_EXPORT(SceSblACMgrForDriver_IsSystemProgram, 0) != 1)
+        return {};
+    return Ptr<const void>(usb_port_handle);
 }
 
 EXPORT(int, sceMtpIfIsConnected) {

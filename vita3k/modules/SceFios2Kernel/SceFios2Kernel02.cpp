@@ -20,18 +20,8 @@
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceFios2Kernel);
 
-struct sceFiosKernelOverlayResolveWithRangeSync02_opt {
-    Ptr<char> pOutPath;
-    SceSize maxPath;
-    char loOrderFilter;
-    char hiOrderFilter;
-    char reserved1;
-    char reserved2;
-    int reserved3;
-    int reserved4;
-    int reserved5;
-    int reserved6;
-};
+DECL_EXPORT(int, _sceFiosKernelOverlayGetList, SceUID pid, SceUInt8 min_order, SceUInt8 max_order, Ptr<const void> args);
+DECL_EXPORT(int, _sceFiosKernelOverlayResolveWithRangeSync, SceUID pid, int resolveFlag, Ptr<const char> pInPath, Ptr<const void> opt);
 
 EXPORT(int, sceFiosKernelOverlayAddForProcess02) {
     return UNIMPLEMENTED();
@@ -41,8 +31,9 @@ EXPORT(int, sceFiosKernelOverlayGetInfoForProcess02) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceFiosKernelOverlayGetList02) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceFiosKernelOverlayGetList02, SceUID pid, SceUInt8 min_order, SceUInt8 max_order, Ptr<const void> args) {
+    TRACY_FUNC(sceFiosKernelOverlayGetList02, pid, min_order, max_order, args);
+    return CALL_EXPORT(_sceFiosKernelOverlayGetList, pid, min_order, max_order, args);
 }
 
 EXPORT(int, sceFiosKernelOverlayGetRecommendedScheduler02) {
@@ -61,12 +52,9 @@ EXPORT(int, sceFiosKernelOverlayResolveSync02) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceFiosKernelOverlayResolveWithRangeSync02, SceUID pid, int resolveFlag, const char *pInPath, sceFiosKernelOverlayResolveWithRangeSync02_opt *opt) {
+EXPORT(int, sceFiosKernelOverlayResolveWithRangeSync02, SceUID pid, int resolveFlag, Ptr<const char> pInPath, Ptr<const void> opt) {
     TRACY_FUNC(sceFiosKernelOverlayResolveWithRangeSync02, pid, resolveFlag, pInPath, opt);
-    STUBBED("Using strncpy");
-    strncpy(opt->pOutPath.get(emuenv.mem), pInPath, opt->maxPath);
-
-    return 0;
+    return CALL_EXPORT(_sceFiosKernelOverlayResolveWithRangeSync, pid, resolveFlag, pInPath, opt);
 }
 
 EXPORT(int, sceFiosKernelOverlayThreadIsDisabled02) {

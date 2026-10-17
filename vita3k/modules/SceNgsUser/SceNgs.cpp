@@ -19,30 +19,25 @@
 
 #include "../SceProcessmgr/SceProcessmgr.h"
 
+#include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
+#include <mem/state.h>
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/log.h>
 #include <util/tracy.h>
 
-TRACY_MODULE_NAME(SceNgs);
+#include <algorithm>
+#include <array>
+#include <span>
 
-struct SceNgsVolumeMatrix {
-    SceFloat32 matrix[SCE_NGS_MAX_SYSTEM_CHANNELS][SCE_NGS_MAX_SYSTEM_CHANNELS];
-};
+TRACY_MODULE_NAME(SceNgs);
 
 struct SceNgsPatchAudioPropInfo {
     SceInt32 out_channels;
     SceInt32 in_channels;
     SceNgsVolumeMatrix volume_matrix;
-};
-
-struct SceNgsVoiceInfo {
-    SceUInt32 voice_state;
-    SceUInt32 num_modules;
-    SceUInt32 num_inputs;
-    SceUInt32 num_outputs;
-    SceUInt32 num_patches_per_output;
-    SceUInt32 update_passed;
 };
 
 static_assert(sizeof(SceNgsPatchAudioPropInfo) == 24);
@@ -57,37 +52,6 @@ struct SceNgsPatchDeliveryInfo {
 
 static_assert(sizeof(SceNgsPatchDeliveryInfo) == 20);
 
-static ngs::Voice *find_patch_source_voice(ngs::State &ngs, const MemState &mem, const Ptr<ngs::Patch> patch) {
-    for (ngs::System *system : ngs.systems) {
-        if (!system) {
-            continue;
-        }
-
-        for (ngs::Rack *rack : system->racks) {
-            if (!rack) {
-                continue;
-            }
-
-            for (const Ptr<ngs::Voice> voice_handle : rack->voices) {
-                ngs::Voice *voice = voice_handle.get(mem);
-                if (!voice) {
-                    continue;
-                }
-
-                for (const auto &patches : voice->patches) {
-                    for (const Ptr<ngs::Patch> owned_patch : patches) {
-                        if (owned_patch == patch) {
-                            return voice;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    return nullptr;
-}
-
 enum SceNgsErrorCode : uint32_t {
     SCE_NGS_OK = 0,
     SCE_NGS_ERROR = 0x804A0001,
@@ -97,16 +61,6 @@ enum SceNgsErrorCode : uint32_t {
     SCE_NGS_ERROR_INVALID_HANDLE = 0x804A000C,
     SCE_NGS_ERROR_PATCH_NOT_AVAIL = 0x804A000E,
     SCE_NGS_SIZE_MISMATCH = 0x804A000D
-};
-
-enum SceNgsVoiceState : uint32_t {
-    SCE_NGS_VOICE_STATE_AVAILABLE = 0,
-    SCE_NGS_VOICE_STATE_ACTIVE = 1 << 0,
-    SCE_NGS_VOICE_STATE_FINALIZE = 1 << 2,
-    SCE_NGS_VOICE_STATE_UNLOADING = 1 << 3,
-    SCE_NGS_VOICE_STATE_PENDING = 1 << 4,
-    SCE_NGS_VOICE_STATE_PAUSED = 1 << 5,
-    SCE_NGS_VOICE_STATE_KEY_OFF = 1 << 6
 };
 
 static constexpr SceUInt32 SCE_NGS_MODULE_FLAG_NOT_BYPASSED = 0;
@@ -214,7 +168,7 @@ EXPORT(int, sceNgsModuleGetPreset, ngs::System *system, const SceUInt32 module, 
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNgsPatchCreateRouting, SceNgsPatchSetupInfo *patch_info, Ptr<ngs::Patch> *handle) {
+EXPORT(int, sceNgsPatchCreateRouting, Ptr<SceNgsPatchSetupInfo> patch_info, Ptr<Ptr<ngs::Patch>> handle) {
     TRACY_FUNC(sceNgsPatchCreateRouting, patch_info, handle);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
@@ -223,52 +177,101 @@ EXPORT(int, sceNgsPatchCreateRouting, SceNgsPatchSetupInfo *patch_info, Ptr<ngs:
     if (!patch_info || !handle)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
-    if (!patch_info->source || !patch_info->dest)
-        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
-
-    // Make the scheduler order this right based on dependencies request
-    ngs::Voice *source = patch_info->source.get(emuenv.mem);
-
-    if (!source)
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state)
         return RET_ERROR(SCE_NGS_ERROR);
-
-    *handle = source->rack->system->voice_scheduler.patch(emuenv.mem, patch_info);
-
-    if (!*handle) {
-        return RET_ERROR(SCE_NGS_ERROR);
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        const std::array ranges{ GuestMemoryRange{ patch_info.address(), sizeof(SceNgsPatchSetupInfo) },
+            GuestMemoryRange{ handle.address(), sizeof(Address) } };
+        const uint64_t pin = pin_guest_memory(mem, ranges);
+        if (!pin)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        bool valid = true;
+        Ptr<ngs::Patch> result;
+        {
+            const std::lock_guard lock(mem.protect_mutex);
+            for (size_t i = 0; i < ranges.size(); ++i) {
+                const uint64_t end = uint64_t(ranges[i].address) + ranges[i].size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    const bool denied = segment.perm == MemPerm::None || (i == 0 && segment.perm == MemPerm::WriteOnly) || (i == 1 && segment.perm == MemPerm::ReadOnly);
+                    if (denied && uint64_t(start) < end && uint64_t(start) + segment.size > ranges[i].address)
+                        valid = false;
+                }
+            }
+            SceNgsPatchSetupInfo info{};
+            auto *bytes = reinterpret_cast<uint8_t *>(&info);
+            for (size_t i = 0; valid && i < sizeof(info); ++i)
+                bytes[i] = *Ptr<const uint8_t>(patch_info.address() + static_cast<Address>(i)).get(mem);
+            if (valid) {
+                result = ngs::create_process_voice_patch(*state, mem, info);
+                if (result) {
+                    const Address value = result.address();
+                    for (size_t i = 0; i < sizeof(value); ++i)
+                        *Ptr<uint8_t>(handle.address() + static_cast<Address>(i)).get(mem) = static_cast<uint8_t>(value >> (i * 8));
+                }
+            }
+        }
+        unpin_guest_memory(mem, pin);
+        if (!valid)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        if (!result)
+            return RET_ERROR(SCE_NGS_ERROR);
+        return SCE_NGS_OK;
     }
-
+    const Ptr<ngs::Patch> result = ngs::create_process_voice_patch(*state, mem, *patch_info.get(mem));
+    if (!result)
+        return RET_ERROR(SCE_NGS_ERROR);
+    *handle.get(mem) = result;
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsPatchGetInfo, ngs::Patch *patch, SceNgsPatchAudioPropInfo *prop_info, SceNgsPatchDeliveryInfo *deli_info) {
-    TRACY_FUNC(sceNgsPatchGetInfo, patch, prop_info, deli_info);
+EXPORT(SceInt32, sceNgsPatchGetInfo, Ptr<ngs::Patch> patch_handle, Ptr<SceNgsPatchAudioPropInfo> prop_info, Ptr<SceNgsPatchDeliveryInfo> deli_info) {
+    TRACY_FUNC(sceNgsPatchGetInfo, patch_handle, prop_info, deli_info);
     if (!emuenv.cfg.current_config.ngs_enable)
         return SCE_NGS_OK;
 
-    if (!patch) {
+    if (!patch_handle) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    ngs::Voice *source = patch->source.get(emuenv.mem);
-    ngs::Voice *dest = patch->dest.get(emuenv.mem);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Patch *patch = state ? ngs::find_process_patch(*state, mem, patch_handle) : nullptr;
+    if (!patch)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    ngs::Voice *source = ngs::find_process_voice(*state, mem, patch->source);
+    ngs::Voice *dest = ngs::find_process_voice(*state, mem, patch->dest);
     if (!source || !dest) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 
+    SceNgsPatchAudioPropInfo prop{};
+    SceNgsPatchDeliveryInfo delivery{};
     if (prop_info) {
-        memcpy(prop_info->volume_matrix.matrix, patch->volume_matrix, sizeof(patch->volume_matrix));
-        prop_info->in_channels = dest->rack->channels_per_voice;
-        prop_info->out_channels = source->rack->channels_per_voice;
+        memcpy(prop.volume_matrix.matrix, patch->volume_matrix, sizeof(patch->volume_matrix));
+        prop.in_channels = dest->rack->channels_per_voice;
+        prop.out_channels = source->rack->channels_per_voice;
     }
 
     if (deli_info) {
-        deli_info->input_index = patch->dest_index;
-        deli_info->output_index = patch->output_index;
-        deli_info->output_subindex = patch->output_sub_index;
-        deli_info->source_voice_handle = patch->source;
-        deli_info->dest_voice_handle = patch->dest;
+        delivery.input_index = patch->dest_index;
+        delivery.output_index = patch->output_index;
+        delivery.output_subindex = patch->output_sub_index;
+        delivery.source_voice_handle = patch->source;
+        delivery.dest_voice_handle = patch->dest;
     }
+
+    if (prop_info && !write_guest_memory(mem, prop_info.address(), &prop, sizeof(prop)))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    if (deli_info && !write_guest_memory(mem, deli_info.address(), &delivery, sizeof(delivery)))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
     return SCE_NGS_OK;
 }
@@ -283,8 +286,12 @@ EXPORT(int, sceNgsPatchRemoveRouting, Ptr<ngs::Patch> patch) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    ngs::Voice *source = find_patch_source_voice(emuenv.ngs, emuenv.mem, patch);
-    if (!source || !source->remove_patch(emuenv.mem, patch)) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state || !ngs::remove_process_voice_patch(*state, mem, patch)) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 
@@ -293,7 +300,36 @@ EXPORT(int, sceNgsPatchRemoveRouting, Ptr<ngs::Patch> patch) {
 
 EXPORT(int, sceNgsRackGetRequiredMemorySize, ngs::System *system, SceNgsRackDescription *description, uint32_t *size) {
     TRACY_FUNC(sceNgsRackGetRequiredMemorySize, system, description, size);
+    if (!size)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
     if (!emuenv.cfg.current_config.ngs_enable) {
+        if (!emuenv.kernel.is_primary_address_space(mem)) {
+            const GuestMemoryRange output{ caller->cpu->get_reg(2), sizeof(uint32_t) };
+            const uint64_t pin = pin_guest_memory(mem, std::span(&output, 1));
+            if (!pin)
+                return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+            bool valid = true;
+            {
+                const std::lock_guard lock(mem.protect_mutex);
+                const uint64_t end = uint64_t(output.address) + output.size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    if ((segment.perm == MemPerm::None || segment.perm == MemPerm::ReadOnly) && uint64_t(start) < end && uint64_t(start) + segment.size > output.address)
+                        valid = false;
+                }
+                if (valid) {
+                    for (size_t i = 0; i < sizeof(uint32_t); ++i)
+                        *Ptr<uint8_t>(output.address + static_cast<Address>(i)).get(mem) = i == 0 ? 1 : 0;
+                }
+            }
+            unpin_guest_memory(mem, pin);
+            if (!valid)
+                return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+            return 0;
+        }
         *size = 1;
         return 0;
     }
@@ -301,17 +337,56 @@ EXPORT(int, sceNgsRackGetRequiredMemorySize, ngs::System *system, SceNgsRackDesc
     if (!system) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
     }
-    if (!description || !description->definition || !size)
+    if (!description)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
-    auto definition = description->definition.get(emuenv.mem);
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state || !std::ranges::contains(state->systems, system))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        const std::array ranges{ GuestMemoryRange{ caller->cpu->get_reg(1), sizeof(SceNgsRackDescription) },
+            GuestMemoryRange{ caller->cpu->get_reg(2), sizeof(uint32_t) } };
+        const uint64_t pin = pin_guest_memory(mem, ranges);
+        if (!pin)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        bool valid = true;
+        {
+            const std::lock_guard lock(mem.protect_mutex);
+            for (size_t i = 0; i < ranges.size(); ++i) {
+                const uint64_t end = uint64_t(ranges[i].address) + ranges[i].size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    const bool denied = segment.perm == MemPerm::None || (i == 0 && segment.perm == MemPerm::WriteOnly) || (i == 1 && segment.perm == MemPerm::ReadOnly);
+                    if (denied && uint64_t(start) < end && uint64_t(start) + segment.size > ranges[i].address)
+                        valid = false;
+                }
+            }
+            SceNgsRackDescription copied{};
+            auto *bytes = reinterpret_cast<uint8_t *>(&copied);
+            for (size_t i = 0; valid && i < sizeof(copied); ++i)
+                bytes[i] = *Ptr<const uint8_t>(ranges[0].address + static_cast<Address>(i)).get(mem);
+            uint32_t required = 0;
+            if (valid)
+                valid = ngs::get_process_rack_required_size(*state, mem, copied, required);
+            if (valid) {
+                for (size_t i = 0; i < sizeof(required); ++i)
+                    *Ptr<uint8_t>(ranges[1].address + static_cast<Address>(i)).get(mem) = static_cast<uint8_t>(required >> (i * 8));
+            }
+        }
+        unpin_guest_memory(mem, pin);
+        if (!valid)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return 0;
+    }
+    if (!description->definition)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    auto definition = description->definition.get(mem);
     if (definition->output_count == 0 || definition->type >= ngs::BussType::BUSS_MAX)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     if (description->voice_count <= 0 || description->channels_per_voice < 0 || description->channels_per_voice > 2
         || description->max_patches_per_input < 0 || description->patches_per_output < 0) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
-    *size = ngs::Rack::get_required_memspace_size(emuenv.mem, description);
+    *size = ngs::Rack::get_required_memspace_size(mem, description);
     return 0;
 }
 
@@ -323,6 +398,39 @@ EXPORT(SceUInt32, sceNgsRackGetVoiceHandle, ngs::Rack *rack, const uint32_t inde
 
     if (!rack || !voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    }
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+        if (!state || !std::ranges::any_of(state->systems, [rack](const ngs::System *system) { return std::ranges::contains(system->racks, rack); }))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        if (index >= rack->voices.size())
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        const GuestMemoryRange output{ caller->cpu->get_reg(2), sizeof(Address) };
+        const uint64_t pin = pin_guest_memory(mem, std::span(&output, 1));
+        if (!pin)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        bool valid = true;
+        {
+            const std::lock_guard lock(mem.protect_mutex);
+            const uint64_t end = uint64_t(output.address) + output.size;
+            for (const auto &[start, segment] : mem.protect_tree) {
+                if ((segment.perm == MemPerm::None || segment.perm == MemPerm::ReadOnly) && uint64_t(start) < end && uint64_t(start) + segment.size > output.address)
+                    valid = false;
+            }
+            if (valid) {
+                const Address value = rack->voices[index].address();
+                for (size_t i = 0; i < sizeof(value); ++i)
+                    *Ptr<uint8_t>(output.address + static_cast<Address>(i)).get(mem) = static_cast<uint8_t>(value >> (i * 8));
+            }
+        }
+        unpin_guest_memory(mem, pin);
+        if (!valid)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return SCE_NGS_OK;
     }
 
     if (index >= rack->voices.size()) {
@@ -338,11 +446,126 @@ EXPORT(SceUInt32, sceNgsRackInit, ngs::System *system, SceNgsBufferInfo *info, c
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
     }
-    if (!info || !system || !description || !description->definition || !rack) {
+    if (!info || !system || !description || !rack) {
+        LOG_ERROR("sceNgsRackInit received null arguments: system={}, info={}, description={}, rack={}",
+            system == nullptr, info == nullptr, description == nullptr, rack == nullptr);
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    if (!ngs::init_rack(emuenv.ngs, emuenv.mem, system, info, description)) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state || !std::ranges::contains(state->systems, system))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        const char *failure_reason = nullptr;
+        const std::array args{ GuestMemoryRange{ caller->cpu->get_reg(1), sizeof(SceNgsBufferInfo) },
+            GuestMemoryRange{ caller->cpu->get_reg(2), sizeof(SceNgsRackDescription) },
+            GuestMemoryRange{ caller->cpu->get_reg(3), sizeof(Address) } };
+        const uint64_t args_pin = pin_guest_memory(mem, args);
+        if (!args_pin) {
+            LOG_ERROR("sceNgsRackInit could not pin arguments: system={:#x}, info={:#x}, description={:#x}, rack={:#x}",
+                caller->cpu->get_reg(0), args[0].address, args[1].address, args[2].address);
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        }
+        SceNgsBufferInfo copied_info{};
+        SceNgsRackDescription copied_description{};
+        bool valid = true;
+        {
+            const std::lock_guard lock(mem.protect_mutex);
+            for (size_t i = 0; i < args.size(); ++i) {
+                const uint64_t end = uint64_t(args[i].address) + args[i].size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    const bool denied = segment.perm == MemPerm::None || (i < 2 && segment.perm == MemPerm::WriteOnly) || (i == 2 && segment.perm == MemPerm::ReadOnly);
+                    if (denied && uint64_t(start) < end && uint64_t(start) + segment.size > args[i].address) {
+                        valid = false;
+                        failure_reason = "argument permissions";
+                    }
+                }
+            }
+            auto *info_bytes = reinterpret_cast<uint8_t *>(&copied_info);
+            auto *desc_bytes = reinterpret_cast<uint8_t *>(&copied_description);
+            for (size_t i = 0; valid && i < sizeof(copied_info); ++i)
+                info_bytes[i] = *Ptr<const uint8_t>(args[0].address + static_cast<Address>(i)).get(mem);
+            for (size_t i = 0; valid && i < sizeof(copied_description); ++i)
+                desc_bytes[i] = *Ptr<const uint8_t>(args[1].address + static_cast<Address>(i)).get(mem);
+        }
+        uint32_t required = 0;
+        if (valid && !copied_info.data) {
+            valid = false;
+            failure_reason = "null rack storage";
+        } else if (valid && !ngs::get_process_rack_required_size(*state, mem, copied_description, required)) {
+            valid = false;
+            failure_reason = "invalid rack description or voice definition";
+        } else if (valid && required > copied_info.size) {
+            valid = false;
+            failure_reason = "rack storage is smaller than required";
+        }
+        const GuestMemoryRange storage{ copied_info.data.address(), copied_info.size };
+        const uint64_t storage_pin = valid ? pin_guest_memory(mem, std::span(&storage, 1)) : 0;
+        if (valid && !storage_pin) {
+            valid = false;
+            failure_reason = "rack storage could not be pinned";
+        }
+        bool initialized = false;
+        if (storage_pin) {
+            {
+                const std::lock_guard lock(mem.protect_mutex);
+                const uint64_t end = uint64_t(storage.address) + storage.size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    if (segment.perm != MemPerm::ReadWrite && uint64_t(start) < end && uint64_t(start) + segment.size > storage.address) {
+                        valid = false;
+                        failure_reason = "rack storage permissions";
+                    }
+                }
+                uint8_t *base = copied_info.data.cast<uint8_t>().get(mem);
+                if (reinterpret_cast<uintptr_t>(base) % alignof(Address) != 0) {
+                    valid = false;
+                    failure_reason = "rack storage alignment";
+                }
+                for (uint32_t offset = 0; valid && offset < storage.size;) {
+                    if (Ptr<uint8_t>(storage.address + offset).get(mem) != base + offset) {
+                        valid = false;
+                        failure_reason = "rack storage is not contiguous";
+                    }
+                    offset += std::min(storage.size - offset, uint32_t(4096 - ((storage.address + offset) & 4095)));
+                }
+                if (uint64_t(args[2].address) < end && uint64_t(args[2].address) + sizeof(Address) > storage.address) {
+                    valid = false;
+                    failure_reason = "rack output overlaps rack storage";
+                }
+                if (!ngs::is_process_storage_available(*state, storage.address, storage.size) || !ngs::is_process_storage_available(*state, args[2].address, args[2].size)) {
+                    valid = false;
+                    failure_reason = "rack storage or output overlaps existing NGS storage";
+                }
+                if (valid) {
+                    initialized = ngs::init_rack(*state, mem, system, &copied_info, &copied_description);
+                    if (initialized) {
+                        const Address value = storage.address;
+                        for (size_t i = 0; i < sizeof(value); ++i)
+                            *Ptr<uint8_t>(args[2].address + static_cast<Address>(i)).get(mem) = static_cast<uint8_t>(value >> (i * 8));
+                    }
+                }
+            }
+            unpin_guest_memory(mem, storage_pin);
+        } else {
+            valid = false;
+        }
+        unpin_guest_memory(mem, args_pin);
+        if (!valid) {
+            LOG_ERROR("sceNgsRackInit rejected secondary arguments ({}): info={:#x}, description={:#x}, storage={:#x}+{:#x}, required={:#x}",
+                failure_reason ? failure_reason : "unknown validation failure", args[0].address, args[1].address, storage.address, storage.size, required);
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        }
+        if (!initialized)
+            return RET_ERROR(SCE_NGS_ERROR);
+        return SCE_NGS_OK;
+    }
+    if (!description->definition)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    if (!ngs::init_rack(*state, mem, system, info, description)) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 
@@ -358,26 +581,50 @@ EXPORT(SceInt32, sceNgsRackRelease, ngs::Rack *rack, Ptr<void> callback) {
     if (!rack)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
-    std::unique_lock<std::recursive_mutex> lock(rack->system->voice_scheduler.mutex);
-    if (!rack->system->voice_scheduler.is_updating) {
-        ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
-    } else if (!callback) {
-        // wait for the update to finish
-        // if this is called in an interrupt handler it will softlock ngs
-        // but I don't think this is allowed (and if it is I don't know how to prevent this)
-        LOG_WARN_ONCE("sceNgsRackRelease called in a synchronous way during a ngs update, contact devs if your game softlocks now.");
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state || !std::ranges::any_of(state->systems, [rack](const ngs::System *system) { return std::ranges::contains(system->racks, rack); }))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    ngs::System *system = rack->system;
+    auto &scheduler = system->voice_scheduler;
+    std::unique_lock<std::recursive_mutex> lock(scheduler.mutex);
+    if (scheduler.pending_rack_releases.contains(rack))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
 
-        rack->system->voice_scheduler.condvar.wait(lock);
-        ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
-    } else {
-        // destroy rack asynchronously
+    if (callback) {
         ngs::OperationPending op;
         op.type = ngs::PendingType::ReleaseRack;
-        op.system = rack->system;
-        op.release_data.state = &emuenv.ngs;
+        op.system = system;
+        op.release_data.state = state;
         op.release_data.rack = rack;
         op.release_data.callback = callback.address();
-        rack->system->voice_scheduler.operations_pending.push(op);
+        scheduler.pending_rack_releases.insert(rack);
+        scheduler.operations_pending.push(op);
+    } else if (!scheduler.is_updating) {
+        ngs::release_rack(*state, mem, system, rack);
+    } else {
+        if (scheduler.updating_thread_id == thread_id) {
+            ngs::release_rack(*state, mem, system, rack);
+            return SCE_NGS_OK;
+        }
+
+        while (scheduler.is_updating) {
+            lock.unlock();
+            {
+                ThreadHostWait host_wait(emuenv.kernel.get_thread(thread_id));
+                lock.lock();
+                if (scheduler.is_updating)
+                    scheduler.condvar.wait(lock);
+                lock.unlock();
+            }
+            lock.lock();
+        }
+        if (!std::ranges::contains(system->racks, rack))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        ngs::release_rack(*state, mem, system, rack);
     }
 
     return SCE_NGS_OK;
@@ -392,6 +639,42 @@ EXPORT(int, sceNgsSystemGetRequiredMemorySize, SceNgsSystemInitParams *params, u
     TRACY_FUNC(sceNgsSystemGetRequiredMemorySize, params, size);
     if (!params || !size)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        const std::array ranges{ GuestMemoryRange{ caller->cpu->get_reg(0), sizeof(SceNgsSystemInitParams) },
+            GuestMemoryRange{ caller->cpu->get_reg(1), sizeof(uint32_t) } };
+        const uint64_t pin = pin_guest_memory(mem, ranges);
+        if (!pin)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        bool valid = true;
+        {
+            const std::lock_guard lock(mem.protect_mutex);
+            for (size_t i = 0; i < ranges.size(); ++i) {
+                const uint64_t end = uint64_t(ranges[i].address) + ranges[i].size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    const bool denied = segment.perm == MemPerm::None || (i == 0 && segment.perm == MemPerm::WriteOnly) || (i == 1 && segment.perm == MemPerm::ReadOnly);
+                    if (denied && uint64_t(start) < end && uint64_t(start) + segment.size > ranges[i].address)
+                        valid = false;
+                }
+            }
+            if (valid) {
+                SceNgsSystemInitParams copied_params{};
+                auto *bytes = reinterpret_cast<uint8_t *>(&copied_params);
+                for (size_t i = 0; i < sizeof(copied_params); ++i)
+                    bytes[i] = *Ptr<const uint8_t>(ranges[0].address + static_cast<Address>(i)).get(mem);
+                const uint32_t value = emuenv.cfg.current_config.ngs_enable ? ngs::System::get_required_memspace_size(&copied_params) : 1;
+                for (size_t i = 0; i < sizeof(value); ++i)
+                    *Ptr<uint8_t>(ranges[1].address + static_cast<Address>(i)).get(mem) = static_cast<uint8_t>(value >> (i * 8));
+            }
+        }
+        unpin_guest_memory(mem, pin);
+        if (!valid)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return 0;
+    }
     if (!emuenv.cfg.current_config.ngs_enable) {
         *size = 1;
         return 0;
@@ -407,7 +690,71 @@ EXPORT(SceUInt32, sceNgsSystemInit, Ptr<void> memspace, const uint32_t memspace_
         return 0;
     }
 
-    if (!ngs::init_system(emuenv.ngs, emuenv.mem, params, memspace, memspace_size)) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller || !params || !system || !memspace)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state)
+        return RET_ERROR(SCE_NGS_ERROR);
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        const Address params_addr = caller->cpu->get_reg(2);
+        const Address output_addr = caller->cpu->get_reg(3);
+        if (memspace_size < sizeof(ngs::System))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        const std::array ranges{ GuestMemoryRange{ memspace.address(), memspace_size },
+            GuestMemoryRange{ params_addr, sizeof(SceNgsSystemInitParams) }, GuestMemoryRange{ output_addr, sizeof(Address) } };
+        const uint64_t pin = pin_guest_memory(mem, ranges);
+        if (!pin)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        bool valid = true;
+        bool initialized = false;
+        {
+            const std::lock_guard lock(mem.protect_mutex);
+            for (size_t i = 0; i < ranges.size(); ++i) {
+                const uint64_t end = uint64_t(ranges[i].address) + ranges[i].size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    const bool denied = segment.perm == MemPerm::None || (i == 1 && segment.perm == MemPerm::WriteOnly) || (i == 0 && segment.perm != MemPerm::ReadWrite) || (i == 2 && segment.perm == MemPerm::ReadOnly);
+                    if (denied && uint64_t(start) < end && uint64_t(start) + segment.size > ranges[i].address)
+                        valid = false;
+                }
+            }
+            uint8_t *base = memspace.cast<uint8_t>().get(mem);
+            if (reinterpret_cast<uintptr_t>(base) % alignof(ngs::System) != 0)
+                valid = false;
+            for (uint32_t offset = 0; valid && offset < memspace_size;) {
+                if (Ptr<uint8_t>(memspace.address() + offset).get(mem) != base + offset)
+                    valid = false;
+                const uint32_t chunk = std::min(memspace_size - offset, uint32_t(4096 - ((memspace.address() + offset) & 4095)));
+                offset += chunk;
+            }
+            if (uint64_t(output_addr) < uint64_t(memspace.address()) + memspace_size && uint64_t(output_addr) + sizeof(Address) > memspace.address())
+                valid = false;
+            if (!ngs::is_process_storage_available(*state, memspace.address(), memspace_size) || !ngs::is_process_storage_available(*state, output_addr, sizeof(Address)))
+                valid = false;
+            SceNgsSystemInitParams copied_params{};
+            auto *param_bytes = reinterpret_cast<uint8_t *>(&copied_params);
+            for (size_t i = 0; valid && i < sizeof(copied_params); ++i)
+                param_bytes[i] = *Ptr<const uint8_t>(params_addr + static_cast<Address>(i)).get(mem);
+            if (valid && copied_params.max_racks >= 0 && copied_params.max_voices >= 0) {
+                initialized = ngs::init_system(*state, mem, &copied_params, memspace, memspace_size);
+                if (initialized) {
+                    const Address value = memspace.address();
+                    for (size_t i = 0; i < sizeof(value); ++i)
+                        *Ptr<uint8_t>(output_addr + static_cast<Address>(i)).get(mem) = static_cast<uint8_t>(value >> (i * 8));
+                }
+            } else {
+                valid = false;
+            }
+        }
+        unpin_guest_memory(mem, pin);
+        if (!valid)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        if (!initialized)
+            return RET_ERROR(SCE_NGS_ERROR);
+        return SCE_NGS_OK;
+    }
+    if (!ngs::init_system(*state, mem, params, memspace, memspace_size)) {
         return RET_ERROR(SCE_NGS_ERROR); // TODO: Better error code
     }
 
@@ -428,23 +775,57 @@ EXPORT(SceInt32, sceNgsSystemRelease, ngs::System *system) {
     if (!system)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state || !std::ranges::contains(state->systems, system))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+
     {
         std::unique_lock<std::recursive_mutex> lock(system->voice_scheduler.mutex);
         if (system->voice_scheduler.is_updating) {
             LOG_WARN_ONCE("sceNgsSystemRelease called during a ngs update, contact devs if your game softlocks now.");
 
-            system->voice_scheduler.condvar.wait(lock);
+            while (system->voice_scheduler.is_updating) {
+                lock.unlock();
+                {
+                    ThreadHostWait host_wait(emuenv.kernel.get_thread(thread_id));
+                    lock.lock();
+                    if (system->voice_scheduler.is_updating)
+                        system->voice_scheduler.condvar.wait(lock);
+                    lock.unlock();
+                }
+                lock.lock();
+            }
         }
     }
 
-    ngs::release_system(emuenv.ngs, emuenv.mem, system);
+    ngs::release_system(*state, mem, system);
 
     return SCE_NGS_OK;
 }
 
-EXPORT(int, sceNgsSystemSetFlags) {
-    TRACY_FUNC(sceNgsSystemSetFlags);
-    return UNIMPLEMENTED();
+EXPORT(int, sceNgsSystemSetFlags, ngs::System *system, const SceUInt32 system_flags) {
+    TRACY_FUNC(sceNgsSystemSetFlags, system, system_flags);
+    if (!emuenv.cfg.current_config.ngs_enable)
+        return 0;
+
+    if (!system)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, caller->cpu->mem);
+    if (!state || !std::ranges::contains(state->systems, system))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+
+    system->flags = system_flags;
+    LOG_DEBUG("sceNgsSystemSetFlags: flags={:#X}", system_flags);
+
+    return SCE_NGS_OK;
 }
 
 EXPORT(int, sceNgsSystemSetParamErrorCallback) {
@@ -463,20 +844,36 @@ EXPORT(SceUInt32, sceNgsSystemUpdate, ngs::System *system) {
         return 0;
     }
 
-    system->voice_scheduler.update(emuenv.kernel, emuenv.mem, thread_id);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state || !std::ranges::contains(state->systems, system))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    if (!system->voice_scheduler.update(emuenv.kernel, mem, thread_id))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
 
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsVoiceBypassModule, ngs::Voice *voice, const SceUInt32 module, const SceUInt32 bypass_flag) {
-    TRACY_FUNC(sceNgsVoiceBypassModule, voice, module, bypass_flag);
+EXPORT(SceInt32, sceNgsVoiceBypassModule, Ptr<ngs::Voice> voice_handle, const SceUInt32 module, const SceUInt32 bypass_flag) {
+    TRACY_FUNC(sceNgsVoiceBypassModule, voice_handle, module, bypass_flag);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
     }
 
-    if (!voice)
+    if (!voice_handle)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Voice *voice = state ? ngs::find_process_voice(*state, mem, voice_handle) : nullptr;
+    if (!voice)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
     ngs::ModuleData *storage = voice->module_storage(module);
 
     if (!storage)
@@ -494,7 +891,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetAtrac9Voice) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_ATRAC9);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_ATRAC9);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetCompressorBuss) {
@@ -503,7 +905,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetCompressorBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_COMPRESSOR);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_COMPRESSOR);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetCompressorSideChainBuss) {
@@ -512,7 +919,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetCompressorSideChainBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_SIDE_CHAIN_COMPRESSOR);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_SIDE_CHAIN_COMPRESSOR);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetDelayBuss) {
@@ -521,7 +933,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetDelayBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_DELAY);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_DELAY);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetDistortionBuss) {
@@ -530,7 +947,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetDistortionBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_DISTORTION);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_DISTORTION);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetEnvelopeBuss) {
@@ -539,7 +961,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetEnvelopeBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_ENVELOPE);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_ENVELOPE);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetEqBuss) {
@@ -548,7 +975,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetEqBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_EQUALIZATION);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_EQUALIZATION);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetMasterBuss) {
@@ -557,7 +989,18 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetMasterBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_MASTER);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("sceNgsVoiceDefGetMasterBuss: unknown thread {}", thread_id);
+        return {};
+    }
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state) {
+        LOG_ERROR("sceNgsVoiceDefGetMasterBuss: cannot initialize process NGS state");
+        return {};
+    }
+    return ngs::get_voice_definition(*state, mem, ngs::BussType::BUSS_MASTER);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetMixerBuss) {
@@ -566,7 +1009,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetMixerBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_MIXER);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_MIXER);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetPauserBuss) {
@@ -575,7 +1023,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetPauserBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_PAUSER);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_PAUSER);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetPitchShiftBuss) {
@@ -584,7 +1037,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetPitchShiftBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_PITCH_SHIFT);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_PITCH_SHIFT);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetReverbBuss) {
@@ -593,7 +1051,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetReverbBuss) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_REVERB);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_REVERB);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetSasEmuVoice) {
@@ -602,7 +1065,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetSasEmuVoice) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_SAS_EMULATION);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_SAS_EMULATION);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetScreamAtrac9Voice) {
@@ -611,7 +1079,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetScreamAtrac9Voice) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_SCREAM_ATRAC9);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_SCREAM_ATRAC9);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetScreamVoice) {
@@ -620,7 +1093,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetScreamVoice) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_SCREAM);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_SCREAM);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetSimpleAtrac9Voice) {
@@ -629,7 +1107,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetSimpleAtrac9Voice) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_SIMPLE_ATRAC9);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_SIMPLE_ATRAC9);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetSimpleVoice) {
@@ -638,7 +1121,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetSimpleVoice) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_SIMPLE);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_SIMPLE);
 }
 
 EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetTemplate1) {
@@ -647,7 +1135,12 @@ EXPORT(Ptr<ngs::VoiceDefinition>, sceNgsVoiceDefGetTemplate1) {
         return Ptr<ngs::VoiceDefinition>(0);
     }
 
-    return ngs::get_voice_definition(emuenv.ngs, emuenv.mem, ngs::BussType::BUSS_NORMAL_PLAYER);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller) {
+        LOG_ERROR("{}: unknown thread {}", export_name, thread_id);
+        return {};
+    }
+    return ngs::get_process_voice_definition(emuenv.ngs, emuenv.mem, caller->cpu->mem, ngs::BussType::BUSS_NORMAL_PLAYER);
 }
 
 static SceUInt32 ngsVoiceStateFromHLEState(const ngs::Voice *voice) {
@@ -686,15 +1179,35 @@ static SceUInt32 ngsVoiceStateFromHLEState(const ngs::Voice *voice) {
     return state;
 }
 
-EXPORT(SceInt32, sceNgsVoiceGetInfo, ngs::Voice *voice, SceNgsVoiceInfo *info) {
-    TRACY_FUNC(sceNgsVoiceGetInfo, voice, info);
+EXPORT(SceInt32, sceNgsVoiceGetInfo, Ptr<ngs::Voice> voice_handle, Ptr<SceNgsVoiceInfo> info_handle) {
+    TRACY_FUNC(sceNgsVoiceGetInfo, voice_handle, info_handle);
     if (!emuenv.cfg.current_config.ngs_enable)
         return SCE_NGS_OK;
 
-    if (!voice || !info) {
+    if (!voice_handle || !info_handle) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        std::unique_lock lock(emuenv.ngs.process_states_mutex, std::defer_lock);
+        {
+            ThreadHostWait host_wait(caller);
+            lock.lock();
+        }
+        const auto process = emuenv.ngs.process_states.find(&mem);
+        SceNgsVoiceInfo result{};
+        if (process == emuenv.ngs.process_states.end() || !ngs::get_process_voice_info(*process->second, mem, voice_handle, result))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        if (!write_guest_memory(mem, info_handle.address(), &result, sizeof(result)))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return SCE_NGS_OK;
+    }
+    ngs::Voice *voice = voice_handle.get(mem);
+    SceNgsVoiceInfo *info = info_handle.get(mem);
     const std::lock_guard<std::mutex> guard(*voice->voice_mutex);
 
     info->voice_state = ngsVoiceStateFromHLEState(voice);
@@ -784,8 +1297,8 @@ EXPORT(int, sceNgsVoiceGetParamsOutOfRange) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(SceInt32, sceNgsVoiceGetStateData, ngs::Voice *voice, const SceUInt32 module, void *mem, const SceUInt32 mem_size) {
-    TRACY_FUNC(sceNgsVoiceGetStateData, voice, module, mem, mem_size);
+EXPORT(SceInt32, sceNgsVoiceGetStateData, Ptr<ngs::Voice> voice, const SceUInt32 module, Ptr<void> output, const SceUInt32 mem_size) {
+    TRACY_FUNC(sceNgsVoiceGetStateData, voice, module, output, mem_size);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
     }
@@ -793,26 +1306,66 @@ EXPORT(SceInt32, sceNgsVoiceGetStateData, ngs::Voice *voice, const SceUInt32 mod
     if (!voice)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
-    ngs::ModuleData *storage = voice->module_storage(module);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+        std::vector<uint8_t> data;
+        if (!state || !ngs::get_process_voice_state(*state, mem, voice, module, output ? mem_size : 0, data))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        if (output && mem_size) {
+            const GuestMemoryRange range{ output.address(), mem_size };
+            const uint64_t pin = pin_guest_memory(mem, std::span(&range, 1));
+            if (!pin)
+                return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+            bool valid = true;
+            {
+                const std::lock_guard lock(mem.protect_mutex);
+                const uint64_t end = uint64_t(range.address) + range.size;
+                for (const auto &[start, segment] : mem.protect_tree) {
+                    if ((segment.perm == MemPerm::None || segment.perm == MemPerm::ReadOnly) && uint64_t(start) < end && uint64_t(start) + segment.size > range.address)
+                        valid = false;
+                }
+                for (uint32_t i = 0; valid && i < mem_size; ++i)
+                    *Ptr<uint8_t>(range.address + i).get(mem) = i < data.size() ? data[i] : 0;
+            }
+            unpin_guest_memory(mem, pin);
+            if (!valid)
+                return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        }
+        return SCE_NGS_OK;
+    }
+    ngs::ModuleData *storage = voice.get(mem)->module_storage(module);
     if (!storage)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
-    if (mem) {
-        memset(mem, 0, mem_size);
-        memcpy(mem, storage->guest_state_data.data(), std::min<std::size_t>(mem_size, storage->guest_state_data.size()));
+    if (output) {
+        memset(output.get(mem), 0, mem_size);
+        memcpy(output.get(mem), storage->guest_state_data.data(), std::min<std::size_t>(mem_size, storage->guest_state_data.size()));
     }
 
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *preset, const SceUInt32 init_flags) {
-    TRACY_FUNC(sceNgsVoiceInit, voice, preset, init_flags);
+EXPORT(SceInt32, sceNgsVoiceInit, Ptr<ngs::Voice> voice_handle, const SceNgsVoicePreset *preset, const SceUInt32 init_flags) {
+    TRACY_FUNC(sceNgsVoiceInit, voice_handle, preset, init_flags);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
     }
 
-    if (!voice)
+    if (!voice_handle)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Voice *voice = state ? ngs::find_process_voice(*state, mem, voice_handle) : nullptr;
+    if (!voice)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
 
     if (voice->state == ngs::VoiceState::VOICE_STATE_ACTIVE)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
@@ -828,7 +1381,7 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
         for (auto &patches : voice->patches) {
             for (auto &patch : patches) {
                 if (patch) {
-                    patch.get(emuenv.mem)->output_sub_index = -1;
+                    patch.get(mem)->output_sub_index = -1;
                 }
             }
         }
@@ -839,9 +1392,9 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
             STUBBED("Default preset not implemented");
             for (size_t i = 0; i < voice->rack->modules.size(); i++) {
                 if (voice->rack->modules[i])
-                    voice->rack->modules[i]->set_default_preset(emuenv.mem, voice->datas[i]);
+                    voice->rack->modules[i]->set_default_preset(mem, voice->datas[i]);
             }
-        } else if (!voice->set_preset(emuenv.mem, preset)) {
+        } else if (!voice->set_preset(mem, preset)) {
             return RET_ERROR(SCE_NGS_ERROR);
         }
     }
@@ -855,7 +1408,7 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsVoiceKeyOff, ngs::Voice *voice) {
+EXPORT(SceInt32, sceNgsVoiceKeyOff, Ptr<ngs::Voice> voice) {
     TRACY_FUNC(sceNgsVoiceKeyOff, voice);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return SCE_NGS_OK;
@@ -865,18 +1418,20 @@ EXPORT(SceInt32, sceNgsVoiceKeyOff, ngs::Voice *voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    voice->is_keyed_off = true;
-    voice->rack->system->voice_scheduler.off(emuenv.mem, voice);
-
-    // call the finish callback, I got no idea what the module id should be in this case
-    voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
-
-    voice->is_keyed_off = false;
-    voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Voice *owned = state ? ngs::find_process_voice(*state, mem, voice) : nullptr;
+    if (!owned)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    if (!owned->rack->system->voice_scheduler.off(mem, owned))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
     return SCE_NGS_OK;
 }
 
-EXPORT(int, sceNgsVoiceKill, ngs::Voice *voice) {
+EXPORT(int, sceNgsVoiceKill, Ptr<ngs::Voice> voice) {
     TRACY_FUNC(sceNgsVoiceKill, voice);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
@@ -886,82 +1441,221 @@ EXPORT(int, sceNgsVoiceKill, ngs::Voice *voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Voice *owned = state ? ngs::find_process_voice(*state, mem, voice) : nullptr;
+    if (!owned)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    owned->rack->system->voice_scheduler.stop(mem, owned);
 
     return 0;
 }
 
-EXPORT(SceUInt32, sceNgsVoiceLockParams, ngs::Voice *voice, SceUInt32 module, SceUInt32 param_interface_id, SceNgsBufferInfo *buf) {
-    TRACY_FUNC(sceNgsVoiceLockParams, voice, module, param_interface_id, buf);
+EXPORT(SceUInt32, sceNgsVoiceLockParams, Ptr<ngs::Voice> voice_handle, SceUInt32 module, SceUInt32 param_interface_id, Ptr<SceNgsBufferInfo> buf_handle) {
+    TRACY_FUNC(sceNgsVoiceLockParams, voice_handle, module, param_interface_id, buf_handle);
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!buf_handle)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     if (!emuenv.cfg.current_config.ngs_enable) {
-        *buf = {
-            Ptr<void>(alloc(emuenv.mem, 10, "SceNgs buffer stub")), 10
-        };
-
+        const SceNgsBufferInfo result{ Ptr<void>(alloc(mem, 10, "SceNgs buffer stub")), 10 };
+        if (!result.data)
+            return RET_ERROR(SCE_NGS_ERROR);
+        if (!write_guest_memory(mem, buf_handle.address(), &result, sizeof(result))) {
+            free(mem, result.data.address());
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        }
         return 0;
     }
 
-    if (!voice) {
+    if (!voice_handle) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        std::unique_lock lock(emuenv.ngs.process_states_mutex, std::defer_lock);
+        {
+            ThreadHostWait host_wait(caller);
+            lock.lock();
+        }
+        const auto process = emuenv.ngs.process_states.find(&mem);
+        ngs::Voice *voice = process != emuenv.ngs.process_states.end() ? ngs::find_process_voice(*process->second, mem, voice_handle) : nullptr;
+        if (!voice)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        ngs::ModuleData *data = voice->module_storage(module);
+        if (!data)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        SceNgsBufferInfo *info = data->lock_params(mem);
+        if (!info)
+            return RET_ERROR(SCE_NGS_ERROR);
+        const std::array ranges{ GuestMemoryRange{ buf_handle.address(), sizeof(SceNgsBufferInfo) },
+            GuestMemoryRange{ info->data.address(), sizeof(param_interface_id) } };
+        const uint64_t pin = info->size >= sizeof(param_interface_id) ? pin_guest_memory(mem, ranges) : 0;
+        bool valid = pin != 0;
+        if (pin) {
+            {
+                const std::lock_guard protect_lock(mem.protect_mutex);
+                for (const GuestMemoryRange &range : ranges) {
+                    const uint64_t end = uint64_t(range.address) + range.size;
+                    for (const auto &[start, segment] : mem.protect_tree) {
+                        if ((segment.perm == MemPerm::None || segment.perm == MemPerm::ReadOnly)
+                            && uint64_t(start) < end && uint64_t(start) + segment.size > range.address)
+                            valid = false;
+                    }
+                }
+                if (valid) {
+                    const auto *id_bytes = reinterpret_cast<const uint8_t *>(&param_interface_id);
+                    const auto *info_bytes = reinterpret_cast<const uint8_t *>(info);
+                    for (size_t i = 0; i < sizeof(param_interface_id); ++i)
+                        *Ptr<uint8_t>(ranges[1].address + static_cast<Address>(i)).get(mem) = id_bytes[i];
+                    for (size_t i = 0; i < sizeof(*info); ++i)
+                        *Ptr<uint8_t>(ranges[0].address + static_cast<Address>(i)).get(mem) = info_bytes[i];
+                }
+            }
+            unpin_guest_memory(mem, pin);
+        }
+        if (!valid) {
+            data->cancel_params_lock();
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        }
+        return SCE_NGS_OK;
+    }
+
+    ngs::Voice *voice = voice_handle.get(mem);
+    SceNgsBufferInfo *buf = buf_handle.get(mem);
     ngs::ModuleData *data = voice->module_storage(module);
     if (!data) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    SceNgsBufferInfo *info = data->lock_params(emuenv.mem);
+    SceNgsBufferInfo *info = data->lock_params(mem);
     if (!info) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 
-    info->data.cast<SceNgsParamsDescriptor>().get(emuenv.mem)->id = param_interface_id;
+    info->data.cast<SceNgsParamsDescriptor>().get(mem)->id = param_interface_id;
 
     *buf = *info;
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsVoicePatchSetVolume, ngs::Patch *patch, const SceInt32 output_channel, const SceInt32 input_channel, const SceFloat32 vol) {
-    TRACY_FUNC(sceNgsVoicePatchSetVolume, patch, output_channel, input_channel, vol);
+EXPORT(SceInt32, sceNgsVoicePatchSetVolume, Ptr<ngs::Patch> patch_handle, const SceInt32 output_channel, const SceInt32 input_channel, const SceFloat32 vol) {
+    TRACY_FUNC(sceNgsVoicePatchSetVolume, patch_handle, output_channel, input_channel, vol);
     if (!emuenv.cfg.current_config.ngs_enable)
         return SCE_NGS_OK;
 
-    if (!patch || patch->output_sub_index == -1)
+    if (!patch_handle)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        if (output_channel < 0 || output_channel >= SCE_NGS_MAX_SYSTEM_CHANNELS || input_channel < 0 || input_channel >= SCE_NGS_MAX_SYSTEM_CHANNELS)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        std::unique_lock lock(emuenv.ngs.process_states_mutex, std::defer_lock);
+        {
+            ThreadHostWait host_wait(caller);
+            lock.lock();
+        }
+        const auto process = emuenv.ngs.process_states.find(&mem);
+        if (process == emuenv.ngs.process_states.end())
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        const uint32_t offset = output_channel * SCE_NGS_MAX_SYSTEM_CHANNELS + input_channel;
+        if (!ngs::set_process_patch_volumes(*process->second, mem, patch_handle, offset, &vol, 1))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return SCE_NGS_OK;
+    }
+    ngs::Patch *patch = patch_handle.get(mem);
+    if (patch->output_sub_index == -1)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     patch->volume_matrix[output_channel][input_channel] = vol;
 
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsVoicePatchSetVolumes, ngs::Patch *patch, const SceInt32 output_channel, const SceFloat32 *volumes, const SceInt32 vols) {
-    TRACY_FUNC(sceNgsVoicePatchSetVolumes, patch, output_channel, volumes, vols);
+EXPORT(SceInt32, sceNgsVoicePatchSetVolumes, Ptr<ngs::Patch> patch_handle, const SceInt32 output_channel, Ptr<const SceFloat32> volumes_handle, const SceInt32 vols) {
+    TRACY_FUNC(sceNgsVoicePatchSetVolumes, patch_handle, output_channel, volumes_handle, vols);
     if (!emuenv.cfg.current_config.ngs_enable)
         return SCE_NGS_OK;
 
-    if (!patch || patch->output_sub_index == -1)
+    if (!patch_handle)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        if (output_channel < 0 || output_channel >= SCE_NGS_MAX_SYSTEM_CHANNELS || vols < 0)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        const uint32_t count = std::min(vols, SCE_NGS_MAX_SYSTEM_CHANNELS);
+        std::array<SceFloat32, SCE_NGS_MAX_SYSTEM_CHANNELS> copied{};
+        if (count && (!volumes_handle || !read_guest_memory(mem, volumes_handle.address(), copied.data(), count * sizeof(SceFloat32))))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        std::unique_lock lock(emuenv.ngs.process_states_mutex, std::defer_lock);
+        {
+            ThreadHostWait host_wait(caller);
+            lock.lock();
+        }
+        const auto process = emuenv.ngs.process_states.find(&mem);
+        if (process == emuenv.ngs.process_states.end())
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        if (!ngs::set_process_patch_volumes(*process->second, mem, patch_handle, output_channel * SCE_NGS_MAX_SYSTEM_CHANNELS, copied.data(), count))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return SCE_NGS_OK;
+    }
+    ngs::Patch *patch = patch_handle.get(mem);
+    const SceFloat32 *volumes = volumes_handle.get(mem);
+    if (patch->output_sub_index == -1)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     for (int i = 0; i < std::min(vols, 2); i++)
         patch->volume_matrix[output_channel][i] = volumes[i];
 
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsVoicePatchSetVolumesMatrix, ngs::Patch *patch, const SceNgsVolumeMatrix *matrix) {
-    TRACY_FUNC(sceNgsVoicePatchSetVolumesMatrix, patch, matrix);
+EXPORT(SceInt32, sceNgsVoicePatchSetVolumesMatrix, Ptr<ngs::Patch> patch_handle, Ptr<const SceNgsVolumeMatrix> matrix_handle) {
+    TRACY_FUNC(sceNgsVoicePatchSetVolumesMatrix, patch_handle, matrix_handle);
     if (!emuenv.cfg.current_config.ngs_enable)
         return 0;
 
-    if (!patch || patch->output_sub_index == -1)
+    if (!patch_handle || !matrix_handle)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    if (!emuenv.kernel.is_primary_address_space(mem)) {
+        std::unique_lock lock(emuenv.ngs.process_states_mutex, std::defer_lock);
+        {
+            ThreadHostWait host_wait(caller);
+            lock.lock();
+        }
+        const auto process = emuenv.ngs.process_states.find(&mem);
+        if (process == emuenv.ngs.process_states.end())
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        if (!ngs::set_process_patch_matrix(*process->second, mem, patch_handle, matrix_handle))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+        return SCE_NGS_OK;
+    }
+    ngs::Patch *patch = patch_handle.get(mem);
+    const SceNgsVolumeMatrix *matrix = matrix_handle.get(mem);
+    if (patch->output_sub_index == -1)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     memcpy(patch->volume_matrix, matrix->matrix, sizeof(matrix->matrix));
 
     return SCE_NGS_OK;
 }
 
-EXPORT(int, sceNgsVoicePause, ngs::Voice *voice) {
+EXPORT(int, sceNgsVoicePause, Ptr<ngs::Voice> voice) {
     TRACY_FUNC(sceNgsVoicePause, voice);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
@@ -971,17 +1665,25 @@ EXPORT(int, sceNgsVoicePause, ngs::Voice *voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    if (voice->is_paused)
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Voice *owned = state ? ngs::find_process_voice(*state, mem, voice) : nullptr;
+    if (!owned)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    if (owned->is_paused)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
 
-    if (!voice->rack->system->voice_scheduler.pause(emuenv.mem, voice)) {
+    if (!owned->rack->system->voice_scheduler.pause(mem, owned)) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 
     return SCE_NGS_OK;
 }
 
-EXPORT(SceUInt32, sceNgsVoicePlay, ngs::Voice *voice) {
+EXPORT(SceUInt32, sceNgsVoicePlay, Ptr<ngs::Voice> voice) {
     TRACY_FUNC(sceNgsVoicePlay, voice);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
@@ -991,16 +1693,21 @@ EXPORT(SceUInt32, sceNgsVoicePlay, ngs::Voice *voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    voice->is_pending = true;
-    if (!voice->rack->system->voice_scheduler.play(emuenv.mem, voice)) {
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    if (!state || !ngs::find_process_voice(*state, mem, voice))
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    if (!ngs::play_process_voice(*state, mem, voice)) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
-    voice->is_pending = false;
 
     return SCE_NGS_OK;
 }
 
-EXPORT(int, sceNgsVoiceResume, ngs::Voice *voice) {
+EXPORT(int, sceNgsVoiceResume, Ptr<ngs::Voice> voice) {
     TRACY_FUNC(sceNgsVoiceResume, voice);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
@@ -1010,10 +1717,18 @@ EXPORT(int, sceNgsVoiceResume, ngs::Voice *voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    if (!voice->is_paused)
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Voice *owned = state ? ngs::find_process_voice(*state, mem, voice) : nullptr;
+    if (!owned)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    if (!owned->is_paused)
         return SCE_NGS_OK;
 
-    if (!voice->rack->system->voice_scheduler.resume(emuenv.mem, voice)) {
+    if (!owned->rack->system->voice_scheduler.resume(mem, owned)) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 
@@ -1028,6 +1743,10 @@ EXPORT(SceInt32, sceNgsVoiceSetFinishedCallback, ngs::Voice *voice, Ptr<void> ca
 
     if (!voice)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
 
     voice->finished_callback = callback;
     voice->finished_callback_user_data = user_data;
@@ -1044,6 +1763,10 @@ EXPORT(SceInt32, sceNgsVoiceSetModuleCallback, ngs::Voice *voice, const SceUInt3
     if (!voice)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
+    if (!voice->voice_mutex)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+
+    const std::lock_guard<std::mutex> guard(*voice->voice_mutex);
     ngs::ModuleData *storage = voice->module_storage(module);
     if (!storage) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
@@ -1055,21 +1778,32 @@ EXPORT(SceInt32, sceNgsVoiceSetModuleCallback, ngs::Voice *voice, const SceUInt3
     return 0;
 }
 
-EXPORT(SceInt32, sceNgsVoiceSetParamsBlock, ngs::Voice *voice, const SceNgsModuleParamHeader *header,
-    const SceUInt32 size, SceInt32 *pNumErrors) {
-    TRACY_FUNC(sceNgsVoiceSetParamsBlock, voice, header, size, pNumErrors);
+EXPORT(SceInt32, sceNgsVoiceSetParamsBlock, Ptr<ngs::Voice> voice_handle, Ptr<const SceNgsModuleParamHeader> header,
+    const SceUInt32 size, Ptr<SceInt32> pNumErrors) {
+    TRACY_FUNC(sceNgsVoiceSetParamsBlock, voice_handle, header, size, pNumErrors);
     if (!emuenv.cfg.current_config.ngs_enable)
         return SCE_NGS_OK;
 
-    if (!voice)
+    if (!voice_handle || !header)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    ngs::State *state = ngs::get_process_state(emuenv.ngs, emuenv.mem, mem);
+    ngs::Voice *voice = state ? ngs::find_process_voice(*state, mem, voice_handle) : nullptr;
+    if (!voice)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
 
     const std::lock_guard<std::mutex> guard(*voice->voice_mutex);
 
-    const SceInt32 num_errors = voice->parse_params_block(emuenv.mem, header, size);
-    if (pNumErrors != nullptr) {
-        *pNumErrors = num_errors;
-    }
+    const SceInt32 num_errors = voice->parse_params_block(mem, header.get(mem), size);
+    if (pNumErrors)
+        *pNumErrors.get(mem) = num_errors;
+
+    if ((voice->rack->system->flags & ngs::system_flag_module_param_checking) == ngs::system_flag_no_module_param_checking)
+        return SCE_NGS_OK;
 
     if (num_errors == 0)
         return SCE_NGS_OK;
@@ -1092,14 +1826,33 @@ EXPORT(SceInt32, sceNgsVoiceSetPreset, ngs::Voice *voice, const SceNgsVoicePrese
     return SCE_NGS_OK;
 }
 
-EXPORT(SceInt32, sceNgsVoiceUnlockParams, ngs::Voice *voice, const SceUInt32 module_index) {
-    TRACY_FUNC(sceNgsVoiceUnlockParams, voice, module_index);
+EXPORT(SceInt32, sceNgsVoiceUnlockParams, Ptr<ngs::Voice> voice_handle, const SceUInt32 module_index) {
+    TRACY_FUNC(sceNgsVoiceUnlockParams, voice_handle, module_index);
     if (!emuenv.cfg.current_config.ngs_enable) {
         return 0;
     }
 
-    if (!voice)
+    if (!voice_handle)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
+
+    const auto caller = emuenv.kernel.get_thread(thread_id);
+    if (!caller)
+        return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    MemState &mem = caller->cpu->mem;
+    const bool secondary = !emuenv.kernel.is_primary_address_space(mem);
+    std::unique_lock lock(emuenv.ngs.process_states_mutex, std::defer_lock);
+    ngs::Voice *voice = nullptr;
+    if (secondary) {
+        {
+            ThreadHostWait host_wait(caller);
+            lock.lock();
+        }
+        const auto process = emuenv.ngs.process_states.find(&mem);
+        voice = process != emuenv.ngs.process_states.end() ? ngs::find_process_voice(*process->second, mem, voice_handle) : nullptr;
+        if (!voice)
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+    } else
+        voice = voice_handle.get(mem);
 
     ngs::ModuleData *data = voice->module_storage(module_index);
 
@@ -1107,7 +1860,13 @@ EXPORT(SceInt32, sceNgsVoiceUnlockParams, ngs::Voice *voice, const SceUInt32 mod
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
-    if (!data->unlock_params(emuenv.mem)) {
+    const bool params_valid = data->unlock_params(mem, secondary);
+    if (secondary && !params_valid)
+        return RET_ERROR(SCE_NGS_ERROR);
+    if ((voice->rack->system->flags & ngs::system_flag_module_param_checking) == ngs::system_flag_no_module_param_checking)
+        return SCE_NGS_OK;
+
+    if (!params_valid) {
         return RET_ERROR(SCE_NGS_ERROR);
     }
 

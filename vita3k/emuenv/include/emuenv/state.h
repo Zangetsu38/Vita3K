@@ -20,6 +20,9 @@
 #include <emuenv/window.h>
 #include <util/fs.h>
 
+#include <array>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -68,6 +71,7 @@ struct SfoFile;
 struct GDBState;
 struct HTTPState;
 struct CameraState;
+struct SceGxmContext;
 
 namespace overlay {
 class display_manager;
@@ -131,6 +135,13 @@ public:
     std::string license_content_id{};
     std::string license_title_id{};
     std::string current_app_title{};
+    std::array<uint8_t, 0x14> appmgr_date_time_conf{};
+    std::atomic<int32_t> appmgr_infobar_visibility{ -1 };
+    std::mutex appmgr_date_time_conf_mutex;
+    std::mutex rtc_config_mutex;
+    int32_t rtc_timezone_minutes = 0;
+    uint32_t rtc_daylight_saving_minutes = 0;
+    bool rtc_config_initialized = false;
     fs::path default_path{};
     fs::path config_path{}; // Path for config files
     fs::path log_path{}; // Path for log file
@@ -144,7 +155,7 @@ public:
     std::string self_path{};
     Config &cfg;
     SceUID main_thread_id{};
-    size_t frame_count = 0;
+    std::atomic<size_t> frame_count{ 0 };
     uint32_t fps = 0;
     uint32_t avg_fps = 0;
     uint32_t min_fps = 0;
@@ -241,4 +252,13 @@ public:
     // disable copy
     EmuEnvState(const EmuEnvState &) = delete;
     EmuEnvState &operator=(EmuEnvState const &) = delete;
+};
+
+class GxmContextAccess {
+    std::unique_lock<std::mutex> process_lock;
+    bool valid = false;
+
+public:
+    GxmContextAccess(EmuEnvState &emuenv, SceUID thread_id, SceGxmContext *context, const char *export_name);
+    explicit operator bool() const { return valid; }
 };

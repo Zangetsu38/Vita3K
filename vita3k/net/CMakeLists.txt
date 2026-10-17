@@ -9,6 +9,7 @@ add_library(
     src/net.cpp
     src/epoll.cpp
     src/posixsocket.cpp
+    src/route_socket.cpp
     src/p2psocket.cpp
 )
 

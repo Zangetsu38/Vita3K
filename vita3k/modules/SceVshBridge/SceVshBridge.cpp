@@ -17,9 +17,21 @@
 
 #include <module/module.h>
 
+#include <emuenv/state.h>
+#include <io/io.h>
+#include <io/state.h>
 #include <kernel/state.h>
+#include <kernel/types.h>
+#include <mem/ptr.h>
+#include <pfsmgr/functions.h>
+
+#include <array>
+#include <limits>
+#include <stdexcept>
 
 #include "../SceDisplay/SceDisplay.h"
+#include "../SceRtc/SceRtc.h"
+#include "../SceSblACMgr/SceSblACMgrForKernel.h"
 
 TRACY_MODULE_NAME(SceVshBridge);
 
@@ -95,8 +107,26 @@ EXPORT(int, _vshAppMgrSaveDataNotifyBackupFinished) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _vshAppMgrSystemParamDateTimeSetConf) {
-    return UNIMPLEMENTED();
+EXPORT(int, _vshAppMgrSystemParamDateTimeSetConf, Ptr<const uint8_t> conf) {
+    TRACY_FUNC(_vshAppMgrSystemParamDateTimeSetConf, conf);
+    if (!conf)
+        return RET_ERROR(SCE_KERNEL_ERROR_INVALID_MEMORY_ACCESS);
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+
+    std::array<uint8_t, 0x14> conf_copy{};
+    for (size_t i = 0; i < conf_copy.size(); ++i) {
+        const Address address = conf.address() + static_cast<Address>(i);
+        if (address < conf.address() || !is_valid_addr(thread->cpu->mem, address))
+            return RET_ERROR(SCE_KERNEL_ERROR_INVALID_MEMORY_ACCESS);
+        conf_copy[i] = *Ptr<const uint8_t>(address).get(thread->cpu->mem);
+    }
+    {
+        std::lock_guard lock(emuenv.appmgr_date_time_conf_mutex);
+        emuenv.appmgr_date_time_conf = conf_copy;
+    }
+    return 0;
 }
 
 EXPORT(int, _vshAppMgrUpdateRifInfo) {
@@ -224,20 +254,24 @@ EXPORT(int, _vshPowerSetBatteryFakeStatus) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _vshRtcGetAlarmTick) {
-    return UNIMPLEMENTED();
+EXPORT(int, _vshRtcGetAlarmTick, SceRtcTick *tick, int *arg) {
+    TRACY_FUNC(_vshRtcGetAlarmTick, tick, arg);
+    return CALL_EXPORT(ksceRtcGetAlarmTick, tick, arg);
 }
 
-EXPORT(int, _vshRtcGetCurrentSecureTick) {
-    return UNIMPLEMENTED();
+EXPORT(int, _vshRtcGetCurrentSecureTick, SceRtcTick *tick) {
+    TRACY_FUNC(_vshRtcGetCurrentSecureTick, tick);
+    return CALL_EXPORT(ksceRtcGetCurrentSecureTick, tick);
 }
 
-EXPORT(int, _vshRtcGetSecureAlarmTick) {
-    return UNIMPLEMENTED();
+EXPORT(int, _vshRtcGetSecureAlarmTick, SceRtcTick *tick) {
+    TRACY_FUNC(_vshRtcGetSecureAlarmTick, tick);
+    return CALL_EXPORT(ksceRtcGetSecureAlarmTick, tick);
 }
 
-EXPORT(int, _vshRtcSetAlarmTick) {
-    return UNIMPLEMENTED();
+EXPORT(int, _vshRtcSetAlarmTick, const SceRtcTick *tick, int arg) {
+    TRACY_FUNC(_vshRtcSetAlarmTick, tick, arg);
+    return CALL_EXPORT(ksceRtcSetAlarmTick, tick, arg);
 }
 
 EXPORT(int, _vshRtcSetCurrentDebugNetworkTick) {
@@ -304,8 +338,49 @@ EXPORT(int, _vshSblSsCreatePassPhrase) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _vshSblSsDecryptWithPortability) {
-    return UNIMPLEMENTED();
+EXPORT(int, _vshSblSsDecryptWithPortability, SceUInt32 mode, Ptr<const uint8_t> iv,
+    Ptr<const uint8_t> input, Ptr<uint8_t> output) {
+    constexpr int invalid_argument = static_cast<int>(0x800f1716u);
+    if (emuenv.io.app_path != "vs0:vsh/shell")
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    if (mode != 0 && mode != 7) {
+        LOG_WARN("Unsupported portability key type {}", mode);
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOSYS);
+    }
+    const auto valid_range = [&](Address start, size_t size) {
+        if (!start || size - 1 > std::numeric_limits<Address>::max() - start)
+            return false;
+        for (size_t i = 0; i < size; ++i) {
+            if (!Ptr<uint8_t>(start + static_cast<Address>(i)).valid(emuenv.mem))
+                return false;
+        }
+        return true;
+    };
+    if (!valid_range(iv.address(), 16) || !valid_range(input.address(), 36) || !valid_range(output.address(), 36))
+        return RET_ERROR(invalid_argument);
+
+    std::array<uint8_t, 36> src{};
+    pfsmgr::AesKey vector{};
+    for (size_t i = 0; i < src.size(); ++i)
+        src[i] = *Ptr<const uint8_t>(input.address() + static_cast<Address>(i)).get(emuenv.mem);
+    for (size_t i = 0; i < vector.size(); ++i)
+        vector[i] = *Ptr<const uint8_t>(iv.address() + static_cast<Address>(i)).get(emuenv.mem);
+    const uint32_t length = uint32_t(src[0]) | (uint32_t(src[1]) << 8) | (uint32_t(src[2]) << 16) | (uint32_t(src[3]) << 24);
+    if (length > 32 || length % 16 != 0)
+        return RET_ERROR(invalid_argument);
+    try {
+        const std::span<const uint8_t> ciphertext(src.data() + 4, length);
+        const auto plain = mode == 0 ? std::vector<uint8_t>(ciphertext.begin(), ciphertext.end())
+                                     : pfsmgr::getDecryptedPortabilityData(vector, ciphertext, false);
+        for (size_t i = 0; i < 4; ++i)
+            *Ptr<uint8_t>(output.address() + static_cast<Address>(i)).get(emuenv.mem) = src[i];
+        for (size_t i = 0; i < plain.size(); ++i)
+            *Ptr<uint8_t>(output.address() + 4 + static_cast<Address>(i)).get(emuenv.mem) = plain[i];
+        return 0;
+    } catch (const std::runtime_error &error) {
+        LOG_ERROR("Cannot decrypt portability data: {}", error.what());
+        return RET_ERROR(SCE_ERROR_ERRNO_EIO);
+    }
 }
 
 EXPORT(int, _vshSblSsEncryptWithPortability) {
@@ -553,7 +628,8 @@ EXPORT(int, vshIoUmount) {
 }
 
 EXPORT(int, vshKernelCheckModelCapability) {
-    return UNIMPLEMENTED();
+    STUBBED("Assuming model capability is available");
+    return 1;
 }
 
 EXPORT(int, vshKernelDisableAutoClockDown) {
@@ -625,39 +701,48 @@ EXPORT(int, vshRemovableMemoryGetCardInsertState) {
 }
 
 EXPORT(int, vshRtcIsAlarmed) {
-    return UNIMPLEMENTED();
+    TRACY_FUNC(vshRtcIsAlarmed);
+    return CALL_EXPORT(ksceRtcIsAlarmed);
 }
 
 EXPORT(int, vshRtcIsSecureAlarmed) {
-    return UNIMPLEMENTED();
+    TRACY_FUNC(vshRtcIsSecureAlarmed);
+    return CALL_EXPORT(ksceRtcIsSecureAlarmed);
 }
 
-EXPORT(int, vshRtcRegisterCallback) {
-    return UNIMPLEMENTED();
+EXPORT(int, vshRtcRegisterCallback, SceUID callback_id) {
+    TRACY_FUNC(vshRtcRegisterCallback, callback_id);
+    return CALL_EXPORT(ksceRtcRegisterCallback, callback_id);
 }
 
-EXPORT(int, vshRtcRegisterSecureAlarmCallback) {
-    return UNIMPLEMENTED();
+EXPORT(int, vshRtcRegisterSecureAlarmCallback, SceUID callback_id) {
+    TRACY_FUNC(vshRtcRegisterSecureAlarmCallback, callback_id);
+    return CALL_EXPORT(ksceRtcRegisterSecureAlarmCallback, callback_id);
 }
 
-EXPORT(int, vshRtcSetConf) {
-    return UNIMPLEMENTED();
+EXPORT(int, vshRtcSetConf, SceUInt32 date_format, SceUInt32 time_format, SceInt32 timezone, SceUInt32 daylight_saving) {
+    TRACY_FUNC(vshRtcSetConf, date_format, time_format, timezone, daylight_saving);
+    return CALL_EXPORT(ksceRtcSetConf, date_format, time_format, timezone, daylight_saving);
 }
 
-EXPORT(int, vshRtcUnregisterCallback) {
-    return UNIMPLEMENTED();
+EXPORT(int, vshRtcUnregisterCallback, SceUID callback_id) {
+    TRACY_FUNC(vshRtcUnregisterCallback, callback_id);
+    return CALL_EXPORT(ksceRtcUnregisterCallback, callback_id);
 }
 
-EXPORT(int, vshRtcUnregisterSecureAlarmCallback) {
-    return UNIMPLEMENTED();
+EXPORT(int, vshRtcUnregisterSecureAlarmCallback, SceUID callback_id) {
+    TRACY_FUNC(vshRtcUnregisterSecureAlarmCallback, callback_id);
+    return CALL_EXPORT(ksceRtcUnregisterSecureAlarmCallback, callback_id);
 }
 
-EXPORT(int, vshSblACMgrHasCapability) {
-    return UNIMPLEMENTED();
+EXPORT(int, vshSblACMgrHasCapability, SceUID pid, int capability) {
+    TRACY_FUNC(vshSblACMgrHasCapability, pid, capability);
+    return CALL_EXPORT(sceSblACMgrHasCapability, pid, capability) == 1 ? 0 : static_cast<int>(0x800F0902);
 }
 
 EXPORT(int, vshSblAimgrIsCEX) {
-    return UNIMPLEMENTED();
+    STUBBED("Returning true");
+    return 1;
 }
 
 EXPORT(int, vshSblAimgrIsDEX) {
@@ -665,7 +750,7 @@ EXPORT(int, vshSblAimgrIsDEX) {
 }
 
 EXPORT(int, vshSblAimgrIsDolce) {
-    return UNIMPLEMENTED();
+    return emuenv.cfg.current_config.pstv_mode ? 1 : 0;
 }
 
 EXPORT(int, vshSblAimgrIsGenuineDolce) {
@@ -761,7 +846,8 @@ EXPORT(int, vshSblSsIsDevelopmentMode) {
 }
 
 EXPORT(int, vshSblUtMgrHasComTestFlag) {
-    return UNIMPLEMENTED();
+    STUBBED("Returning true");
+    return 1;
 }
 
 EXPORT(int, vshSblUtMgrHasNpTestFlag) {

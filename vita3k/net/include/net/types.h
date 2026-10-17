@@ -24,6 +24,9 @@
 #define SCE_NET_ADHOC_PORT 3658
 
 #define SCE_NET_AF_INET 2
+#define SCE_NET_AF_ROUTE 17
+#define SCE_NET_AF_LINK 18
+#define SCE_NET_AF_INET6 28
 
 // Define our own htonll and ntohll because its not available in some systems/platforms
 #define HTONLL(x) ((((uint64_t)htonl((x) & 0xFFFFFFFFUL)) << 32) | htonl((uint32_t)((x) >> 32)))
@@ -88,6 +91,8 @@ enum SceNetSocketOption : uint32_t {
     SCE_NET_SO_ONESBCAST = 0x00000800,
     SCE_NET_SO_USECRYPTO = 0x00001000,
     SCE_NET_SO_USESIGNATURE = 0x00002000,
+    SCE_NET_SO_OPTION_10000 = 0x00010000,
+    SCE_NET_SO_OPTION_20000 = 0x00020000,
     SCE_NET_SO_SNDBUF = 0x1001,
     SCE_NET_SO_RCVBUF = 0x1002,
     SCE_NET_SO_SNDLOWAT = 0x1003,
@@ -329,7 +334,9 @@ enum SceNetEpollControlFlag : int32_t {
 enum SceNetEpollEventType {
     SCE_NET_EPOLLIN = 1,
     SCE_NET_EPOLLOUT = 2,
-    SCE_NET_EPOLLERR = 8
+    SCE_NET_EPOLLERR = 8,
+    SCE_NETPS_EPOLL_NOTICE = 0x20000,
+    SCE_NETPS_EPOLL_CONNECTED = 0x40000
 };
 
 struct SceNetEtherAddr {

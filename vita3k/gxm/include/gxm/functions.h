@@ -25,6 +25,9 @@
 
 struct EmuEnvState;
 struct GxmState;
+struct MemState;
+template <typename T>
+class Ptr;
 
 namespace gxm {
 // Color.
@@ -43,13 +46,20 @@ uint32_t get_stride_in_bytes(const SceGxmTexture &texture);
 uint32_t bits_per_pixel(SceGxmTextureBaseFormat base_format);
 // get the size of the first mip of the first face
 uint32_t texture_size_first_mip(const SceGxmTexture &texture);
+// Span of the uploaded mips and faces, including padding between them.
+uint64_t texture_size(const SceGxmTexture &texture);
 bool is_bcn_format(SceGxmTextureBaseFormat base_format);
 bool is_pvrt_format(SceGxmTextureBaseFormat base_format);
 bool is_block_compressed_format(SceGxmTextureBaseFormat base_format);
 bool is_paletted_format(SceGxmTextureBaseFormat base_format);
 bool is_yuv_format(SceGxmTextureBaseFormat base_format);
+bool copy_guest_texture(MemState &mem, uint32_t textures, uint32_t index, uint32_t source);
 uint32_t attribute_format_size(SceGxmAttributeFormat format);
 bool is_stream_instancing(SceGxmIndexSource source);
+enum class GuestVertexStreamResult { success,
+    invalid_index,
+    invalid_pointer };
+GuestVertexStreamResult set_guest_vertex_stream(MemState &mem, uint32_t stream_array, uint32_t stream_count, uint32_t stream_index, uint32_t stream_data);
 bool convert_color_format_to_texture_format(SceGxmColorFormat format, SceGxmTextureFormat &dest_format);
 
 // Transfer
@@ -57,11 +67,20 @@ uint32_t get_bits_per_pixel(SceGxmTransferFormat Format);
 
 void destroy_all_contexts(EmuEnvState &emuenv, bool force_backend_destroy);
 void destroy_all_render_targets(EmuEnvState &emuenv, bool force_backend_destroy);
+void destroy_process_mappings(EmuEnvState &emuenv);
 void shutdown(EmuEnvState &emuenv);
 void invalidate_sync_objects(GxmState &gxm);
 } // namespace gxm
 
 namespace gxp {
+enum class ParameterLookupResult { found,
+    out_of_range,
+    invalid };
+ParameterLookupResult get_guest_program_parameter(MemState &mem, Ptr<const SceGxmProgram> program, uint32_t index, Ptr<SceGxmProgramParameter> &result);
+ParameterLookupResult find_guest_parameter_by_semantic(MemState &mem, Ptr<const SceGxmProgram> program,
+    SceGxmParameterSemantic semantic, uint32_t index, Ptr<SceGxmProgramParameter> &result);
+bool get_guest_parameter_name(MemState &mem, Ptr<const SceGxmProgramParameter> parameter, Ptr<const char> &result);
+
 // Used to map GXM program parameters to GLSL data types
 enum class GenericParameterType {
     Scalar,
@@ -92,6 +111,8 @@ SceGxmFragmentProgramInputs get_fragment_inputs(const SceGxmProgram &program);
 
 int get_parameter_type_size(const SceGxmParameterType type);
 int get_num_32_bit_components(const SceGxmParameterType type, const uint16_t num_comp);
+bool has_attribute_symbols(const SceGxmProgram &program);
+bool is_attribute_used(const SceGxmProgram &program, const SceGxmProgramParameter &parameter);
 
 const SceGxmProgramParameterContainer *get_container_by_index(const SceGxmProgram &program, const std::uint16_t idx);
 const char *get_container_name(const std::uint16_t idx);

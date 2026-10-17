@@ -18,8 +18,10 @@
 #include <module/module.h>
 
 #include <codec/state.h>
+#include <cpu/state.h>
 #include <io/functions.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 
 #include <util/lock_and_find.h>
 #include <util/log.h>
@@ -98,6 +100,7 @@ struct PlayerInfoState {
     bool paused = false;
 
     uint64_t last_frame_time = 0;
+    const MemState *address_space = nullptr;
     SceAvPlayerMemoryAllocator memory_allocator;
     SceAvPlayerFileManager file_manager;
     SceAvPlayerEventManager event_manager;
@@ -209,15 +212,29 @@ static Ptr<uint8_t> get_buffer(const PlayerPtr &player, MediaType media_type,
     auto &buffers = media_type == MediaType::VIDEO ? player->video_buffer : player->audio_buffer;
 
     if (buffer_size < size) {
-        buffer_size = size;
         for (uint32_t a = 0; a < PlayerInfoState::RING_BUFFER_COUNT; a++) {
             if (buffers[a])
                 free(mem, buffers[a]);
+            buffers[a] = Ptr<uint8_t>(0);
+        }
+
+        for (uint32_t a = 0; a < PlayerInfoState::RING_BUFFER_COUNT; a++) {
             std::string alloc_name = fmt::format("AvPlayer {} Media Ring {}",
                 media_type == MediaType::VIDEO ? "Video" : "Audio", a);
 
             buffers[a] = alloc(mem, size, alloc_name.c_str());
+            if (!buffers[a]) {
+                for (auto &buffer : buffers) {
+                    if (buffer)
+                        free(mem, buffer);
+                    buffer = Ptr<uint8_t>(0);
+                }
+                LOG_ERROR("Failed to allocate {} bytes for AVPlayer {} buffers",
+                    size, media_type == MediaType::VIDEO ? "video" : "audio");
+                return {};
+            }
         }
+        buffer_size = size;
     }
 
     if (new_frame)
@@ -241,8 +258,13 @@ EXPORT(int32_t, sceAvPlayerAddSource, SceUID player_handle, Ptr<const char> path
     }
 
     const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (player_info->address_space != &thread->cpu->mem)
+        return RET_ERROR(SCE_AVPLAYER_ERROR_INVALID_ARGUMENT);
+    MemState &mem = thread->cpu->mem;
 
-    auto file_path = expand_path(emuenv.io, path.get(emuenv.mem), emuenv.vita_fs_path);
+    auto file_path = expand_path(emuenv.io, path.get(mem), emuenv.vita_fs_path);
     if (!fs::exists(file_path) && player_info->file_manager.open_file && player_info->file_manager.close_file && player_info->file_manager.read_file && player_info->file_manager.file_size) {
         fs::create_directories(emuenv.cache_path);
 
@@ -250,8 +272,10 @@ EXPORT(int32_t, sceAvPlayerAddSource, SceUID player_handle, Ptr<const char> path
         const auto temp_file_path = emuenv.cache_path / "temp_vita_media.mp4";
         std::ofstream temp_file(temp_file_path, std::ios::out | std::ios::binary);
 
-        const Address buf = alloc(emuenv.mem, KiB(512), "AvPlayer buffer");
-        const auto buf_ptr = Ptr<char>(buf).get(emuenv.mem);
+        const Address buf = alloc(mem, KiB(512), "AvPlayer buffer");
+        if (!buf)
+            return RET_ERROR(SCE_AVPLAYER_ERROR_NOT_ENOUGH_MEMORY);
+        const auto buf_ptr = Ptr<char>(buf).get(mem);
         thread->call_guest(player_info->file_manager.open_file.address(), { player_info->file_manager.user_data, path.address() });
         // TODO: support file_size > 4GB (callback function returns uint64_t, but I dont know how to get high dword of uint64_t)
         const uint32_t file_size = thread->call_guest(player_info->file_manager.file_size.address(), { player_info->file_manager.user_data });
@@ -265,7 +289,7 @@ EXPORT(int32_t, sceAvPlayerAddSource, SceUID player_handle, Ptr<const char> path
             offset += buf_size;
             remaining -= buf_size;
         }
-        free(emuenv.mem, buf);
+        free(mem, buf);
         temp_file.close();
         thread->call_guest(player_info->file_manager.close_file.address(), { player_info->file_manager.user_data });
         if (fs::file_size(temp_file_path) != file_size) {
@@ -275,6 +299,10 @@ EXPORT(int32_t, sceAvPlayerAddSource, SceUID player_handle, Ptr<const char> path
         file_path = temp_file_path;
     }
 
+    if (file_path.empty()) {
+        LOG_ERROR("Cannot play media without a readable host path or file callbacks");
+        return -1;
+    }
     player_info->player.queue(file_path.string());
     run_event_callback(emuenv, thread, player_info, SCE_AVPLAYER_STATE_BUFFERING, 0, Ptr<void>(0)); // may be important for sound
     run_event_callback(emuenv, thread, player_info, SCE_AVPLAYER_STATE_READY, 0, Ptr<void>(0));
@@ -285,7 +313,19 @@ EXPORT(int, sceAvPlayerClose, SceUID player_handle) {
     const auto state = emuenv.kernel.obj_store.get<AvPlayerState>();
     const PlayerPtr &player_info = lock_and_find(player_handle, state->players, state->mutex);
     const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread)
+        return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    if (player_info->address_space != &thread->cpu->mem)
+        return RET_ERROR(SCE_AVPLAYER_ERROR_INVALID_ARGUMENT);
     run_event_callback(emuenv, thread, player_info, SCE_AVPLAYER_STATE_STOP, 0, Ptr<void>(0));
+    for (auto &buffer : player_info->video_buffer) {
+        if (buffer)
+            free(thread->cpu->mem, buffer);
+    }
+    for (auto &buffer : player_info->audio_buffer) {
+        if (buffer)
+            free(thread->cpu->mem, buffer);
+    }
     std::lock_guard<std::mutex> lock(state->mutex);
     state->players.erase(player_handle);
     return 0;
@@ -323,6 +363,12 @@ EXPORT(bool, sceAvPlayerGetAudioData, SceUID player_handle, SceAvPlayerFrameInfo
     if (!player_info) {
         return false;
     }
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread || player_info->address_space != &thread->cpu->mem) {
+        LOG_ERROR("AVPlayer audio data requested from an invalid process context");
+        return false;
+    }
+    MemState &mem = thread->cpu->mem;
     Ptr<uint8_t> buffer;
 
     if (player_info->paused) {
@@ -330,7 +376,7 @@ EXPORT(bool, sceAvPlayerGetAudioData, SceUID player_handle, SceAvPlayerFrameInfo
             return false;
         } else {
             // This is probably incorrect and will make weird noises :P
-            buffer = get_buffer(player_info, MediaType::AUDIO, emuenv.mem,
+            buffer = get_buffer(player_info, MediaType::AUDIO, mem,
                 player_info->player.last_sample_count * sizeof(int16_t) * player_info->player.last_channels, true);
         }
     } else {
@@ -339,9 +385,13 @@ EXPORT(bool, sceAvPlayerGetAudioData, SceUID player_handle, SceAvPlayerFrameInfo
         if (data.empty())
             return false;
 
-        buffer = get_buffer(player_info, MediaType::AUDIO, emuenv.mem, static_cast<uint32_t>(data.size()) * sizeof(int16_t), false);
-        std::memcpy(buffer.get(emuenv.mem), data.data(), data.size() * sizeof(int16_t));
+        buffer = get_buffer(player_info, MediaType::AUDIO, mem, static_cast<uint32_t>(data.size()) * sizeof(int16_t), false);
+        if (!buffer)
+            return false;
+        std::memcpy(buffer.get(mem), data.data(), data.size() * sizeof(int16_t));
     }
+    if (!buffer)
+        return false;
 
     frame_info->timestamp = player_info->player.last_timestamp;
     frame_info->stream_details.audio.channels = player_info->player.last_channels;
@@ -389,6 +439,12 @@ EXPORT(bool, sceAvPlayerGetVideoData, SceUID player_handle, SceAvPlayerFrameInfo
     if (!player_info) {
         return false;
     }
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread || player_info->address_space != &thread->cpu->mem) {
+        LOG_ERROR("AVPlayer video data requested from an invalid process context");
+        return false;
+    }
+    MemState &mem = thread->cpu->mem;
 
     Ptr<uint8_t> buffer;
 
@@ -407,16 +463,20 @@ EXPORT(bool, sceAvPlayerGetVideoData, SceUID player_handle, SceAvPlayerFrameInfo
             if (REJECT_DATA_ON_PAUSE)
                 return false;
             else
-                buffer = get_buffer(player_info, MediaType::VIDEO, emuenv.mem, H264DecoderState::buffer_size(size), false);
+                buffer = get_buffer(player_info, MediaType::VIDEO, mem, H264DecoderState::buffer_size(size), false);
         } else {
-            buffer = get_buffer(player_info, MediaType::VIDEO, emuenv.mem, H264DecoderState::buffer_size(size), true);
+            buffer = get_buffer(player_info, MediaType::VIDEO, mem, H264DecoderState::buffer_size(size), true);
+            if (!buffer)
+                return false;
 
             std::vector<uint8_t> data = player_info->player.receive_video();
-            std::memcpy(buffer.get(emuenv.mem), data.data(), data.size());
+            std::memcpy(buffer.get(mem), data.data(), data.size());
         }
     } else {
-        buffer = get_buffer(player_info, MediaType::VIDEO, emuenv.mem, H264DecoderState::buffer_size(size), false);
+        buffer = get_buffer(player_info, MediaType::VIDEO, mem, H264DecoderState::buffer_size(size), false);
     }
+    if (!buffer)
+        return false;
     // TODO: catch eof error and call
     // uint32_t buf = SCE_AVPLAYER_ERROR_MAYBE_EOF;
     // run_event_callback(emuenv, thread_id, player_info, SCE_AVPLAYER_STATE_ERROR, 0, &buf);
@@ -436,6 +496,11 @@ EXPORT(bool, sceAvPlayerGetVideoDataEx, SceUID player_handle, SceAvPlayerFrameIn
 }
 
 EXPORT(SceUID, sceAvPlayerInit, SceAvPlayerInfo *info) {
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        LOG_ERROR("Cannot initialize AVPlayer: unknown thread {}", thread_id);
+        return 0;
+    }
     emuenv.kernel.obj_store.create<AvPlayerState>();
     const auto state = emuenv.kernel.obj_store.get<AvPlayerState>();
     SceUID player_handle = emuenv.kernel.get_next_uid();
@@ -443,6 +508,7 @@ EXPORT(SceUID, sceAvPlayerInit, SceAvPlayerInfo *info) {
     state->players[player_handle] = player;
 
     player->last_frame_time = current_time();
+    player->address_space = &thread->cpu->mem;
     player->memory_allocator = info->memory_allocator;
     player->file_manager = info->file_manager;
     player->event_manager = info->event_manager;

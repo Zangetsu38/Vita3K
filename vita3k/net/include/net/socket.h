@@ -19,6 +19,11 @@
 
 #include <net/types.h>
 
+#include <atomic>
+#include <vector>
+
+struct NetState;
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
@@ -45,8 +50,18 @@ struct Socket;
 
 using SocketPtr = std::shared_ptr<Socket>;
 
+enum SceNetPsSocketFlag : uint32_t {
+    SCE_NETPS_SOCKET_CONNECTED = 0x4000,
+    SCE_NETPS_SOCKET_CONNECTING = 0x8000,
+    SCE_NETPS_SOCKET_ERROR_NOTICE = 0x10000
+};
+
 struct Socket {
     int sockopt_so_onesbcast = 0;
+    std::atomic<uint32_t> sce_options{ 0 };
+    std::atomic<uint32_t> sce_icm_flags{ 0 };
+    std::atomic<int> sce_icm_error{ 0 };
+    std::atomic<int> sce_icm_driver_index{ -1 };
     int sce_type;
 
     explicit Socket(int domain, int type, int protocol)
@@ -85,9 +100,7 @@ struct PosixSocket : public Socket {
     int abort_flags = 0;
     bool is_aborted = false;
 
-    explicit PosixSocket(int domain, int type, int protocol)
-        : Socket(domain, type, protocol)
-        , sock(socket(domain, type, protocol)) {}
+    explicit PosixSocket(int domain, int type, int protocol);
 
     explicit PosixSocket(abs_socket sock, int type)
         : Socket(0, type, 0)
@@ -109,6 +122,28 @@ struct PosixSocket : public Socket {
     int get_peer_address(SceNetSockaddr *addr, unsigned int *addrlen) override;
     int get_socket_address(SceNetSockaddr *addr, unsigned int *addrlen) override;
 };
+
+struct RouteSocket final : Socket {
+    NetState &net;
+
+    explicit RouteSocket(NetState &net);
+
+    int abort(int flags) override;
+    int close() override;
+    int shutdown_socket(int how) override;
+    int bind(const SceNetSockaddr *addr, unsigned int addrlen) override;
+    int send_packet(const void *msg, unsigned int len, int flags, const SceNetSockaddr *to, unsigned int tolen) override;
+    int recv_packet(void *buf, unsigned int len, int flags, SceNetSockaddr *from, unsigned int *fromlen) override;
+    int set_socket_options(int level, int optname, const void *optval, unsigned int optlen) override;
+    int get_socket_options(int level, int optname, void *optval, unsigned int *optlen) override;
+    int connect(const SceNetSockaddr *addr, unsigned int addrlen) override;
+    SocketPtr accept(SceNetSockaddr *addr, unsigned int *addrlen, int &err) override;
+    int listen(int backlog) override;
+    int get_peer_address(SceNetSockaddr *addr, unsigned int *addrlen) override;
+    int get_socket_address(SceNetSockaddr *addr, unsigned int *addrlen) override;
+};
+
+bool build_route_table_dump(const NetState &net, int family, int interface_index, std::vector<uint8_t> &dump);
 
 struct P2PSocket : public PosixSocket {
     explicit P2PSocket(int domain, int type, int protocol);

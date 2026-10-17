@@ -89,13 +89,14 @@ struct Atrac9RuntimeState : public ModuleRuntimeState {
 
 class Atrac9Module : public Module {
 private:
-    static SwrContext *swr_mono_to_stereo;
-    static SwrContext *swr_stereo;
+    SwrContext *swr_mono_to_stereo = nullptr;
+    SwrContext *swr_stereo = nullptr;
 
     // return false if data could not be decoded (error or no more data available)
     bool decode_more_data(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, const SceNgsAT9Params *params, SceNgsAT9States *state, Atrac9LogicalState *logical, Atrac9RuntimeState *runtime, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock);
 
 public:
+    ~Atrac9Module() override;
     bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
     uint32_t module_id() const override { return 0x5CAA; }
     uint32_t get_guest_state_size() const override { return sizeof(SceNgsAT9States); }
@@ -104,7 +105,6 @@ public:
     void on_state_change(const MemState &mem, ModuleData &v, const VoiceState previous) override;
     void on_param_change(const MemState &mem, ModuleData &data) override;
     void cleanup_voice_state(ModuleData &data) override;
-    static void free_swr_contexts();
 
     static constexpr uint32_t get_max_parameter_size() {
         return sizeof(SceNgsAT9Params);

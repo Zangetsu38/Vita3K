@@ -26,6 +26,7 @@
 
 #ifdef _WIN32
 #include <iphlpapi.h>
+#include <ipifcons.h>
 #include <winsock2.h>
 #else
 #include <arpa/inet.h>
@@ -33,8 +34,16 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#if defined(__linux__)
+#include <netpacket/packet.h>
+#endif
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <net/if_dl.h>
+#include <net/if_types.h>
+#endif
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -44,6 +53,8 @@
 #include <iterator>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace net_utils {
 
@@ -115,8 +126,19 @@ struct DownloadCallbackData {
     const ProgressCallback *callback;
 };
 
+struct DownloadFileData {
+    std::string output_file_path;
+    FILE *file = nullptr;
+};
+
 static size_t write_download_data(void *ptr, size_t size, size_t count, void *stream) {
-    return std::fwrite(ptr, size, count, static_cast<FILE *>(stream));
+    auto &data = *static_cast<DownloadFileData *>(stream);
+    if (!data.file) {
+        data.file = std::fopen(data.output_file_path.c_str(), "ab");
+        if (!data.file)
+            return 0;
+    }
+    return std::fwrite(ptr, size, count, data.file);
 }
 
 static int download_progress_callback(void *user_data, curl_off_t total, curl_off_t current, curl_off_t, curl_off_t) {
@@ -147,6 +169,16 @@ static int download_progress_callback(void *user_data, curl_off_t total, curl_of
     return state->canceled ? 1 : 0;
 }
 
+static void cleanup_failed_download(const std::string &output_file_path, uint64_t bytes_already_downloaded, bool succeeded, long http_code) {
+    if ((http_code != 404) && (succeeded || (bytes_already_downloaded > 0)))
+        return;
+
+    std::error_code error;
+    std::filesystem::remove(output_file_path, error);
+    if (error)
+        LOG_ERROR("Failed to remove incomplete download '{}': {}", output_file_path, error.message());
+}
+
 bool download_file(const std::string &url, const std::string &output_file_path, const ProgressCallback &progress_callback) {
     auto *curl = curl_easy_init();
     if (!curl)
@@ -154,35 +186,34 @@ bool download_file(const std::string &url, const std::string &output_file_path, 
 
     const auto bytes_already_downloaded = std::filesystem::exists(output_file_path) ? std::filesystem::file_size(output_file_path) : 0;
     DownloadCallbackData callback_data{ { get_current_time_ms(), bytes_already_downloaded }, &progress_callback };
+    DownloadFileData file_data{ output_file_path };
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, true);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_download_data);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &file_data);
     curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, static_cast<curl_off_t>(bytes_already_downloaded));
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &callback_data);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, download_progress_callback);
 
-    auto *file = std::fopen(output_file_path.c_str(), "ab");
-    if (!file) {
-        curl_easy_cleanup(curl);
-        return false;
-    }
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
     const auto result = perform_verified_request(curl);
     long response_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-    std::fclose(file);
+    if (file_data.file)
+        std::fclose(file_data.file);
     curl_easy_cleanup(curl);
-    if (result == CURLE_OK && bytes_already_downloaded > 0 && response_code != 206) {
+    bool succeeded = result == CURLE_OK && (response_code == 200 || response_code == 206);
+    if (succeeded && bytes_already_downloaded > 0 && response_code != 206) {
         LOG_ERROR("Expected HTTP 206 for resumed download, got {}.", response_code);
         std::error_code error;
         std::filesystem::resize_file(output_file_path, bytes_already_downloaded, error);
         if (error)
             LOG_ERROR("Failed to restore partial download size: {}.", error.message());
-        return false;
+        succeeded = false;
     }
-    return result == CURLE_OK && (response_code == 200 || response_code == 206);
+    cleanup_failed_download(output_file_path, bytes_already_downloaded, succeeded, response_code);
+    return succeeded;
 }
 
 // 0 is ok, negative is bad
@@ -589,13 +620,7 @@ WebResponse download_file_ex(const std::string &url, const std::string &output_f
     }
 
     const auto downloaded = std::filesystem::exists(output_file_path) ? std::filesystem::file_size(output_file_path) : 0;
-    auto *file = std::fopen(output_file_path.c_str(), downloaded ? "ab" : "wb");
-    if (!file) {
-        response.curl_res = CURLE_WRITE_ERROR;
-        if (owns_session)
-            cleanup_curl_session(local_session);
-        return response;
-    }
+    DownloadFileData file_data{ output_file_path };
 
     auto *curl = static_cast<CURL *>(session->handle);
     curl_easy_reset(curl);
@@ -604,7 +629,7 @@ WebResponse download_file_ex(const std::string &url, const std::string &output_f
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_download_data);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, file);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &file_data);
     curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, static_cast<curl_off_t>(downloaded));
     TransferProgressData progress_data{ &progress_callback, get_current_time_ms(), downloaded };
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, progress_callback ? 0L : 1L);
@@ -616,7 +641,8 @@ WebResponse download_file_ex(const std::string &url, const std::string &output_f
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, static_cast<curl_slist *>(session->headers));
     response.curl_res = perform_verified_request(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.http_code);
-    std::fclose(file);
+    if (file_data.file)
+        std::fclose(file_data.file);
     if (owns_session)
         cleanup_curl_session(local_session);
     if (response.curl_res == CURLE_OK && downloaded > 0 && response.http_code != 206) {
@@ -629,6 +655,7 @@ WebResponse download_file_ex(const std::string &url, const std::string &output_f
     }
     if (response.curl_res == CURLE_OK && response.http_code / 100 != 2)
         response.curl_res = CURLE_HTTP_RETURNED_ERROR;
+    cleanup_failed_download(output_file_path, downloaded, response.is_success(), response.http_code);
     return response;
 }
 
@@ -766,6 +793,35 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
     };
 
 #ifdef _WIN32
+    std::unordered_map<std::string, InterfaceType> adapter_types;
+    ULONG adapter_addresses_size = 0;
+    const DWORD adapter_addresses_result = GetAdaptersAddresses(AF_INET, 0, nullptr, nullptr, &adapter_addresses_size);
+    if (adapter_addresses_result == ERROR_BUFFER_OVERFLOW && adapter_addresses_size > 0) {
+        auto *adapter_addresses = static_cast<IP_ADAPTER_ADDRESSES *>(malloc(adapter_addresses_size));
+        if (!adapter_addresses) {
+            LOG_ERROR("Failed to allocate memory for Windows network adapter types");
+        } else {
+            const DWORD result = GetAdaptersAddresses(AF_INET, 0, nullptr, adapter_addresses, &adapter_addresses_size);
+            if (result == NO_ERROR) {
+                for (auto *adapter = adapter_addresses; adapter; adapter = adapter->Next) {
+                    InterfaceType type = InterfaceType::Other;
+                    if (adapter->IfType == IF_TYPE_IEEE80211)
+                        type = InterfaceType::Wifi;
+                    else if (adapter->IfType == IF_TYPE_ETHERNET_CSMACD)
+                        type = InterfaceType::Ethernet;
+
+                    if (type != InterfaceType::Other && adapter->AdapterName)
+                        adapter_types.emplace(adapter->AdapterName, type);
+                }
+            } else {
+                LOG_WARN("GetAdaptersAddresses failed while classifying interfaces: {}", result);
+            }
+            free(adapter_addresses);
+        }
+    } else if (adapter_addresses_result != NO_ERROR && adapter_addresses_result != ERROR_NO_DATA) {
+        LOG_WARN("GetAdaptersAddresses failed while sizing interface data: {}", adapter_addresses_result);
+    }
+
     PIP_ADAPTER_INFO pAdapterInfo;
     DWORD dwRetVal = 0;
     ULONG ulOutBufLen = sizeof(IP_ADAPTER_INFO);
@@ -784,13 +840,61 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
         }
     }
     if ((dwRetVal = GetAdaptersInfo(pAdapterInfo, &ulOutBufLen)) == NO_ERROR) {
-        PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
         const std::string noAddress = "0.0.0.0";
+        std::array<std::string, 2> dns_servers{};
+        ULONG fixed_info_length = sizeof(FIXED_INFO);
+        auto *fixed_info = static_cast<FIXED_INFO *>(malloc(fixed_info_length));
+        if (!fixed_info) {
+            LOG_CRITICAL("Error allocating memory needed to call GetNetworkParams");
+        } else {
+            DWORD network_params_result = GetNetworkParams(fixed_info, &fixed_info_length);
+            if (network_params_result == ERROR_BUFFER_OVERFLOW) {
+                free(fixed_info);
+                fixed_info = static_cast<FIXED_INFO *>(malloc(fixed_info_length));
+                if (!fixed_info) {
+                    LOG_CRITICAL("Error allocating memory needed to call GetNetworkParams");
+                    network_params_result = ERROR_NOT_ENOUGH_MEMORY;
+                } else {
+                    network_params_result = GetNetworkParams(fixed_info, &fixed_info_length);
+                }
+            }
+            if (network_params_result == NO_ERROR) {
+                IP_ADDR_STRING *dns = &fixed_info->DnsServerList;
+                for (size_t index = 0; dns && index < dns_servers.size(); dns = dns->Next) {
+                    if (noAddress.compare(dns->IpAddress.String) != 0)
+                        dns_servers[index++] = dns->IpAddress.String;
+                }
+            } else {
+                LOG_WARN("GetNetworkParams failed with error: {}", network_params_result);
+            }
+            free(fixed_info);
+        }
+
+        PIP_ADAPTER_INFO pAdapter = pAdapterInfo;
         while (pAdapter) {
+            std::string gateway;
+            if (noAddress.compare(pAdapter->GatewayList.IpAddress.String) != 0)
+                gateway = pAdapter->GatewayList.IpAddress.String;
+
             IP_ADDR_STRING *pIPAddr = &pAdapter->IpAddressList;
+            MIB_IFROW interface_row{};
+            interface_row.dwIndex = pAdapter->Index;
+            const DWORD interface_result = GetIfEntry(&interface_row);
+            const bool link_up = interface_result == NO_ERROR && interface_row.dwOperStatus == MIB_IF_OPER_STATUS_OPERATIONAL;
+            if (interface_result != NO_ERROR)
+                LOG_DEBUG("GetIfEntry failed for network adapter {} with error {}", pAdapter->Description, interface_result);
+
+            const auto adapter_type = adapter_types.find(pAdapter->AdapterName);
+            const auto type = adapter_type != adapter_types.end() ? adapter_type->second : InterfaceType::Other;
+            std::array<uint8_t, 6> hardware_address{};
+            const bool has_hardware_address = pAdapter->AddressLength == hardware_address.size();
+            if (has_hardware_address)
+                std::copy_n(pAdapter->Address, hardware_address.size(), hardware_address.begin());
+
             while (pIPAddr) {
                 if (noAddress.compare(pIPAddr->IpAddress.String) != 0)
-                    out_addrs.push_back({ pAdapter->Description, pIPAddr->IpAddress.String, pIPAddr->IpMask.String });
+                    out_addrs.push_back({ pAdapter->Description, pIPAddr->IpAddress.String, pIPAddr->IpMask.String,
+                        gateway, dns_servers, link_up, type, hardware_address, has_hardware_address });
                 pIPAddr = pIPAddr->Next;
             }
             pAdapter = pAdapter->Next;
@@ -798,12 +902,47 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
     } else {
         LOG_CRITICAL("GetAdaptersInfo failed with error: {}", dwRetVal);
     }
+    free(pAdapterInfo);
 #else
     struct ifaddrs *ifAddrStruct = nullptr;
     struct ifaddrs *ifa = nullptr;
     void *tmpAddrPtr = nullptr;
+    std::unordered_map<std::string, InterfaceType> interface_types;
+    std::unordered_map<std::string, std::array<uint8_t, 6>> interface_hardware_addresses;
 
     getifaddrs(&ifAddrStruct);
+
+#if defined(__linux__)
+    for (auto *link_ifa = ifAddrStruct; link_ifa != nullptr; link_ifa = link_ifa->ifa_next) {
+        if (!link_ifa->ifa_addr || link_ifa->ifa_addr->sa_family != AF_PACKET)
+            continue;
+
+        const auto *link_addr = reinterpret_cast<const sockaddr_ll *>(link_ifa->ifa_addr);
+        if (link_addr->sll_halen == 6) {
+            auto &hardware_address = interface_hardware_addresses[link_ifa->ifa_name];
+            std::copy_n(link_addr->sll_addr, hardware_address.size(), hardware_address.begin());
+        }
+    }
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    for (auto *link_ifa = ifAddrStruct; link_ifa != nullptr; link_ifa = link_ifa->ifa_next) {
+        if (!link_ifa->ifa_addr || link_ifa->ifa_addr->sa_family != AF_LINK)
+            continue;
+
+        const auto *link_addr = reinterpret_cast<const sockaddr_dl *>(link_ifa->ifa_addr);
+        if (link_addr->sdl_alen == 6) {
+            auto &hardware_address = interface_hardware_addresses[link_ifa->ifa_name];
+            const auto *link_address_data = reinterpret_cast<const uint8_t *>(LLADDR(link_addr));
+            std::copy_n(link_address_data, hardware_address.size(), hardware_address.begin());
+        }
+#if defined(IFT_IEEE80211)
+        if (link_addr->sdl_type == IFT_IEEE80211)
+            interface_types[link_ifa->ifa_name] = InterfaceType::Wifi;
+#else
+        if (link_addr->sdl_type == IFT_ETHER)
+#endif
+        interface_types[link_ifa->ifa_name] = InterfaceType::Ethernet;
+    }
+#endif
 
     for (ifa = ifAddrStruct; ifa != nullptr; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr)
@@ -819,7 +958,27 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
                 tmpAddrPtr = &((sockaddr_in *)ifa->ifa_addr)->sin_addr;
                 char addressBuffer[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, tmpAddrPtr, addressBuffer, INET_ADDRSTRLEN);
-                out_addrs.push_back({ ifa->ifa_name, addressBuffer, netMaskAddrStr });
+                const bool link_up = (ifa->ifa_flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING);
+                InterfaceType type = InterfaceType::Other;
+#if defined(__linux__)
+                const auto sysfs_interface = std::filesystem::path("/sys/class/net") / ifa->ifa_name;
+                std::error_code error;
+                if (std::filesystem::exists(sysfs_interface / "wireless", error)) {
+                    type = InterfaceType::Wifi;
+                } else {
+                    std::ifstream interface_type_file(sysfs_interface / "type");
+                    unsigned int hardware_type = 0;
+                    if (interface_type_file >> hardware_type && hardware_type == 1)
+                        type = InterfaceType::Ethernet;
+                }
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+                if (const auto it = interface_types.find(ifa->ifa_name); it != interface_types.end())
+                    type = it->second;
+#endif
+                const auto hardware_address = interface_hardware_addresses.find(ifa->ifa_name);
+                const bool has_hardware_address = hardware_address != interface_hardware_addresses.end();
+                out_addrs.push_back({ ifa->ifa_name, addressBuffer, netMaskAddrStr, {}, {}, link_up, type,
+                    has_hardware_address ? hardware_address->second : std::array<uint8_t, 6>{}, has_hardware_address });
             }
     }
     if (ifAddrStruct != nullptr)
@@ -828,24 +987,76 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
     return ret_addrs();
 }
 
+std::vector<AssignedAddr> get_assigned_addrs_by_type(const std::vector<AssignedAddr> &addresses, InterfaceType type) {
+    std::vector<AssignedAddr> interfaces;
+    std::unordered_set<std::string> names;
+    for (const auto &address : addresses) {
+        if (address.type == type && names.insert(address.name).second)
+            interfaces.push_back(address);
+    }
+    return interfaces;
+}
+
+std::optional<AssignedAddr> get_selected_assigned_addr(int32_t &outIndex, InterfaceType type) {
+    const auto interfaces = get_assigned_addrs_by_type(get_all_assigned_addrs(), type);
+    const auto is_routable_address = [](const AssignedAddr &address) {
+        return address.name != "localhost" && address.addr != "0.0.0.0" && address.addr.rfind("127.", 0) != 0 && address.addr.rfind("169.254.", 0) != 0;
+    };
+
+    if (outIndex >= 0 && static_cast<size_t>(outIndex) < interfaces.size() && is_routable_address(interfaces[outIndex]))
+        return interfaces[outIndex];
+
+    for (size_t index = 0; index < interfaces.size(); ++index) {
+        if (is_routable_address(interfaces[index])) {
+            if (outIndex != static_cast<int32_t>(index)) {
+                const char *type_name = type == InterfaceType::Wifi ? "Wi-Fi" : "Ethernet";
+                LOG_WARN("Selected {} interface index {} is unavailable; using {} ({}) instead",
+                    type_name, outIndex, interfaces[index].name, interfaces[index].addr);
+                outIndex = static_cast<int32_t>(index);
+            }
+            return interfaces[index];
+        }
+    }
+
+    return std::nullopt;
+}
+
 AssignedAddr get_selected_assigned_addr(int32_t &outIndex) {
     const auto addrs = get_all_assigned_addrs();
-    if (outIndex >= addrs.size()) {
+    const auto is_routable_address = [](const AssignedAddr &address) {
+        return address.name != "localhost" && address.addr != "0.0.0.0" && address.addr.rfind("127.", 0) != 0 && address.addr.rfind("169.254.", 0) != 0;
+    };
+
+    if (outIndex >= 0 && static_cast<size_t>(outIndex) < addrs.size() && is_routable_address(addrs[outIndex]))
+        return addrs[outIndex];
+
+    for (size_t index = 0; index < addrs.size(); ++index) {
+        if (is_routable_address(addrs[index])) {
+            if (outIndex != static_cast<int32_t>(index)) {
+                LOG_WARN("Selected network address index {} is unavailable; using {} ({}) instead",
+                    outIndex, addrs[index].name, addrs[index].addr);
+                outIndex = static_cast<int32_t>(index);
+            }
+            return addrs[index];
+        }
+    }
+
+    if (outIndex < 0 || static_cast<size_t>(outIndex) >= addrs.size()) {
         LOG_ERROR("Invalid index {}, returning first address", outIndex);
         outIndex = 0;
     }
     return addrs[outIndex];
 }
 
-void init_address(int32_t &outIndex, uint32_t &netAddr, uint32_t &broadcastAddr) {
+void init_address(int32_t &outIndex, uint32_t &netAddr, uint32_t &broadcastAddr, uint32_t &netMask) {
     // Initialize the net and broadcast address based on the assigned address and netmask
     const auto addr = get_selected_assigned_addr(outIndex);
-    uint32_t netMask = 0;
     if (inet_pton(AF_INET, addr.addr.c_str(), &netAddr) != 1
         || inet_pton(AF_INET, addr.netMask.c_str(), &netMask) != 1) {
         LOG_ERROR("Invalid IPv4 address or netmask: {} / {}", addr.addr, addr.netMask);
         netAddr = 0;
         broadcastAddr = 0;
+        netMask = 0;
         return;
     }
     broadcastAddr = netAddr | ~netMask;

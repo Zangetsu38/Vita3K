@@ -30,12 +30,13 @@ Context::Context(const CommunicationID &comm_id, IOState *io, const SceUID troph
     , trophy_file_stream(trophy_stream)
     , trophy_progress_output_file_path(output_progress_path)
     , io(io) {
-    trophy_file.read_func = [this](void *dest, std::uint32_t amount) -> bool {
-        return read_file(dest, *this->io, this->trophy_file_stream, amount, "parse_trophy_file");
+    trophy_file.read_func = [io, trophy_stream](void *dest, std::uint32_t amount) -> bool {
+        const int read = read_file(dest, *io, trophy_stream, amount, "parse_trophy_file");
+        return read >= 0 && static_cast<std::uint32_t>(read) == amount;
     };
 
-    trophy_file.seek_func = [this](std::uint32_t amount) -> bool {
-        return seek_file(this->trophy_file_stream, amount, SCE_SEEK_SET, *this->io, "parse_trophy_file");
+    trophy_file.seek_func = [io, trophy_stream](std::uint32_t amount) -> bool {
+        return seek_file(trophy_stream, amount, SCE_SEEK_SET, *io, "parse_trophy_file") >= 0;
     };
 }
 
@@ -379,12 +380,8 @@ int Context::install_trophy_conf(IOState *io, const fs::path &vita_fs_path, cons
 
 } // namespace np::trophy
 
-np::trophy::ContextHandle create_trophy_context(NpState &np, IOState *io, const fs::path &vita_fs_path,
-    const np::CommunicationID *custom_comm, const std::uint32_t lang, np::NpTrophyError *error) {
-    if (!custom_comm) {
-        custom_comm = &np.comm_id;
-    }
-
+np::trophy::ContextHandle create_trophy_context(NpTrophyState &state, IOState *io, const fs::path &vita_fs_path,
+    const np::CommunicationID &comm_id, const std::uint32_t lang, np::NpTrophyError *error) {
     if (error)
         *error = np::NpTrophyError::TROPHY_ERROR_NONE;
 
@@ -394,14 +391,14 @@ np::trophy::ContextHandle create_trophy_context(NpState &np, IOState *io, const 
     return np::trophy::INVALID_CONTEXT_HANDLE
 
     // Check if a context has already been created for this communication ID
-    for (const auto &context : np.trophy_state.contexts) {
-        if (context.valid && context.comm_id == *custom_comm) {
+    for (const auto &context : state.contexts) {
+        if (context.valid && context.comm_id == comm_id) {
             TROPHY_RET_ERROR(TROPHY_CONTEXT_EXIST);
         }
     }
 
     // Initialize the stream
-    const auto unique_trophy_folder = fmt::format("{}_{:0>2d}/", std::string(custom_comm->data, 9), custom_comm->num);
+    const auto unique_trophy_folder = fmt::format("{}_{:0>2d}/", std::string(comm_id.data, 9), comm_id.num);
     const auto trophy_file_path = device::construct_normalized_path(VitaIoDevice::app0, "sce_sys/trophy/" + unique_trophy_folder + "TROPHY.TRP");
 
     // Try to open the file
@@ -422,28 +419,31 @@ np::trophy::ContextHandle create_trophy_context(NpState &np, IOState *io, const 
 
     // Yesss, we can now go fully creative
     // Check for free slot first
-    for (auto &context : np.trophy_state.contexts) {
+    for (auto &context : state.contexts) {
         if (!context.valid) {
-            context.comm_id = *custom_comm;
-            context.trophy_file_stream = trophy_file;
-            context.trophy_progress_output_file_path = trophy_progress_save_file;
-            context.valid = true;
-
+            const auto id = context.id;
+            context = np::trophy::Context(comm_id, io, trophy_file, trophy_progress_save_file);
+            context.id = id;
             new_context = &context;
+            break;
         }
     }
 
     if (!new_context) {
         // Yikes. Create new one.
-        np.trophy_state.contexts.emplace_back(*custom_comm, io, trophy_file, trophy_progress_save_file);
-        np.trophy_state.contexts.back().id = static_cast<np::trophy::ContextHandle>(np.trophy_state.contexts.size());
-
-        new_context = &np.trophy_state.contexts.back();
-        new_context->vita_fs_path = vita_fs_path;
+        state.contexts.emplace_back(comm_id, io, trophy_file, trophy_progress_save_file);
+        state.contexts.back().id = static_cast<np::trophy::ContextHandle>(state.contexts.size());
+        new_context = &state.contexts.back();
     }
 
+    new_context->vita_fs_path = vita_fs_path;
     new_context->lang = lang;
-    new_context->trophy_file.header_parse();
+    if (!new_context->trophy_file.header_parse()) {
+        if (trophy_progress_file_inp >= 0)
+            close_file(*io, trophy_progress_file_inp, "create_trophy_context");
+        destroy_trophy_context(state, new_context->id);
+        TROPHY_RET_ERROR(TROPHY_INVALID_TRP);
+    }
 
     new_context->install_trophy_conf(io, vita_fs_path, unique_trophy_folder);
 
@@ -460,7 +460,7 @@ np::trophy::ContextHandle create_trophy_context(NpState &np, IOState *io, const 
 }
 
 np::trophy::Context *get_trophy_context(NpTrophyState &state, const np::trophy::ContextHandle handle) {
-    if (handle < 0 || handle > static_cast<np::trophy::ContextHandle>(state.contexts.size())) {
+    if (handle <= 0 || handle > static_cast<np::trophy::ContextHandle>(state.contexts.size()) || !state.contexts[handle - 1].valid) {
         return nullptr;
     }
 
@@ -468,7 +468,7 @@ np::trophy::Context *get_trophy_context(NpTrophyState &state, const np::trophy::
 }
 
 bool destroy_trophy_context(NpTrophyState &state, const np::trophy::ContextHandle handle) {
-    if (handle < 0 || handle > static_cast<np::trophy::ContextHandle>(state.contexts.size())) {
+    if (handle <= 0 || handle > static_cast<np::trophy::ContextHandle>(state.contexts.size())) {
         return false;
     }
 

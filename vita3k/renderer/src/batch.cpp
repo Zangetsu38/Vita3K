@@ -62,7 +62,7 @@ bool is_cmd_ready(MemState &mem, CommandList &command_list) {
     SceGxmSyncObject *sync = reinterpret_cast<Ptr<SceGxmSyncObject> *>(&command_list.first->data[0])->get(mem);
     const uint32_t timestamp = *reinterpret_cast<uint32_t *>(&command_list.first->data[sizeof(uint32_t)]);
 
-    return sync->timestamp_current >= timestamp;
+    return sync->state().timestamp_current >= timestamp;
 }
 
 static renderer::SyncWaitResult wait_cmd(MemState &mem, CommandList &command_list) {
@@ -144,8 +144,13 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
 
         // Try to wait for a batch (about 2 or 3ms, game should be fast for this)
         auto cmd_list = state.command_buffer_queue.top(3);
+        MemState &batch_mem = cmd_list && cmd_list->address_space
+            ? *cmd_list->address_space
+            : cmd_list && cmd_list->context && cmd_list->context->address_space
+            ? *cmd_list->context->address_space
+            : mem;
 
-        if (!cmd_list || !is_cmd_ready(mem, *cmd_list)) {
+        if (!cmd_list || !is_cmd_ready(batch_mem, *cmd_list)) {
             // beginning of the game or homebrew not using gxm
             if (state.context == nullptr)
                 return;
@@ -156,7 +161,7 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
 
             renderer::SyncWaitResult wait_result = renderer::SyncWaitResult::TimedOut;
             if (cmd_list)
-                wait_result = wait_cmd(mem, *cmd_list);
+                wait_result = wait_cmd(batch_mem, *cmd_list);
             if (!cmd_list || wait_result != renderer::SyncWaitResult::Ready) {
                 if (wait_result == renderer::SyncWaitResult::Shutdown)
                     return;
@@ -175,7 +180,7 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
         }
 
         state.command_buffer_queue.pop();
-        process_batch(state, features, mem, config, *cmd_list);
+        process_batch(state, features, batch_mem, config, *cmd_list);
     }
 }
 
@@ -190,8 +195,8 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             ? state.overlay_manager->create<overlay::shader_precompile_progress>()
             : std::shared_ptr<overlay::shader_precompile_progress>();
 
-        if (progress_overlay && !state.precompile_bg_path.empty()) {
-            auto bg = std::make_unique<overlay::image_info>(state.precompile_bg_path);
+        if (progress_overlay && !state.precompile_bg_data.empty()) {
+            auto bg = std::make_unique<overlay::image_info>(state.precompile_bg_data);
             if (bg->get_data())
                 progress_overlay->set_background_image(std::move(bg));
         }
@@ -230,14 +235,14 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
 
     if (!state.precompile_requested
         && state.overlay_manager
-        && !state.precompile_bg_path.empty()) {
+        && !state.precompile_bg_data.empty()) {
         auto loading = state.overlay_manager->create<overlay::shader_precompile_progress>();
         if (loading) {
             if (!state.set_current()) {
                 state.done_current();
                 return;
             }
-            auto bg = std::make_unique<overlay::image_info>(state.precompile_bg_path);
+            auto bg = std::make_unique<overlay::image_info>(state.precompile_bg_data);
             if (bg->get_data())
                 loading->set_background_image(std::move(bg));
             loading->set_background_only();

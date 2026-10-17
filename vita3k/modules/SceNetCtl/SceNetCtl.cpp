@@ -15,6 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <../SceAppMgr/SceAppMgr.h>
 #include <../SceAppUtil/SceAppUtil.h>
 #include <../SceNet/SceNet.h>
 #include <../SceNpManager/SceNpManager.h>
@@ -22,6 +23,7 @@
 #include <module/module.h>
 
 #include <dialog/state.h>
+#include <io/state.h>
 #include <kernel/state.h>
 #include <net/state.h>
 #include <net/types.h>
@@ -95,6 +97,12 @@ enum SceNetCtlInfoType {
     SCE_NETCTL_INFO_GET_HTTP_PROXY_PORT,
 };
 
+enum SceNetCtlDeviceType {
+    SCE_NET_CTL_DEVICE_WIRELESS = 0,
+    SCE_NET_CTL_DEVICE_WIRED = 1,
+    SCE_NET_CTL_DEVICE_PHONE = 2,
+};
+
 typedef union SceNetCtlInfo {
     char cnf_name[SCE_NETCTL_INFO_CONFIG_NAME_LEN_MAX + 1];
     unsigned int device;
@@ -136,7 +144,21 @@ struct SceNetCtlIfStat {
     SceUInt32 reserved[8];
 };
 
+#define GET_PROCESS_NETWORK_CONTEXT()                                                                 \
+    const auto process_network_context = get_process_network_context(emuenv, thread_id, export_name); \
+    if (!process_network_context)                                                                     \
+        return RET_ERROR(process_network_context.error());                                            \
+    NetState &process_net = *process_network_context->net;                                            \
+    (void)process_net;                                                                                \
+    NetCtlState &process_netctl = *process_network_context->netctl
+
 static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
+    const auto process_network_context = get_process_network_context(emuenv, thread_id, "SceNetCtl adhoc thread");
+    if (!process_network_context)
+        return;
+    NetState &process_net = *process_network_context->net;
+    NetCtlState &process_netctl = *process_network_context->netctl;
+
     LOG_INFO("Adhoc thread started");
     constexpr uint16_t AUTH_RECV_VPORT = 0x8235;
     constexpr uint16_t AUTH_SEND_VPORT = 0x8236;
@@ -150,11 +172,11 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
 
         {
             // Set the adhoc state and event to disconnected and notify the condition variable
-            std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-            emuenv.netctl.adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
-            emuenv.netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_DISCONNECTED;
-            emuenv.netctl.adhocCondVarReady = false;
-            emuenv.netctl.adhocCondVar.notify_all();
+            std::lock_guard<std::mutex> lock(process_netctl.mutex);
+            process_netctl.adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
+            process_netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_DISCONNECTED;
+            process_netctl.adhocCondVarReady = false;
+            process_netctl.adhocCondVar.notify_all();
         }
 
         {
@@ -169,13 +191,13 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
         LOG_ERROR("Adhoc thread: error occurred, closing sockets");
     };
 
-    while (emuenv.netctl.adhocThreadRun.load()) {
+    while (process_netctl.adhocThreadRun.load()) {
         {
-            std::unique_lock<std::mutex> lock(emuenv.netctl.mutex);
-            emuenv.netctl.adhocCondVar.wait(lock, [&emuenv] {
-                return emuenv.netctl.adhocCondVarReady || !emuenv.netctl.adhocThreadRun;
+            std::unique_lock<std::mutex> lock(process_netctl.mutex);
+            process_netctl.adhocCondVar.wait(lock, [&process_netctl] {
+                return process_netctl.adhocCondVarReady || !process_netctl.adhocThreadRun;
             });
-            if (!emuenv.netctl.adhocThreadRun)
+            if (!process_netctl.adhocThreadRun)
                 break;
         }
 
@@ -238,32 +260,33 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
             continue;
         }
 
-        const auto snd_sock = lock_and_find(send_id, emuenv.net.socks, emuenv.netctl.mutex);
+        const auto snd_sock = lock_and_find(send_id, process_net.socks, process_netctl.mutex);
         if (!snd_sock) {
             LOG_ERROR("Failed to find send socket with ID {} in the list", send_id);
             handle_error_and_disconnect(recv_id, send_id);
             continue;
         }
 
-        const auto rcv_sock = lock_and_find(recv_id, emuenv.net.socks, emuenv.netctl.mutex);
+        const auto rcv_sock = lock_and_find(recv_id, process_net.socks, process_netctl.mutex);
         if (!rcv_sock) {
             LOG_ERROR("Failed to find recv socket with ID {} in the list", recv_id);
             handle_error_and_disconnect(recv_id, send_id);
             continue;
         }
 
-        if (emuenv.cfg.adhoc_addr != emuenv.net.current_addr_index) {
+        if (emuenv.cfg.adhoc_addr != process_net.current_addr_index) {
             // If address has changed, reinitialize the network address and broadcast address
-            std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-            net_utils::init_address(emuenv.cfg.adhoc_addr, emuenv.net.netAddr, emuenv.net.broadcastAddr);
-            emuenv.net.current_addr_index = emuenv.cfg.adhoc_addr;
+            std::lock_guard<std::mutex> lock(process_netctl.mutex);
+            net_utils::init_address(emuenv.cfg.adhoc_addr, process_net.netAddr, process_net.broadcastAddr, process_net.netMask);
+            process_net.interface_address_configured = false;
+            process_net.current_addr_index = emuenv.cfg.adhoc_addr;
         }
 
         const SceNetSockaddrIn to{
             .sin_len = sizeof(SceNetSockaddrIn),
             .sin_family = AF_INET,
             .sin_port = htons(SCE_NET_ADHOC_PORT),
-            .sin_addr{ .s_addr = emuenv.net.broadcastAddr },
+            .sin_addr{ .s_addr = process_net.broadcastAddr },
             .sin_vport = htons(AUTH_RECV_VPORT),
         };
 
@@ -278,7 +301,7 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
         }
 
         SceNetCtlAdhocPeerInfo selfInfo{
-            .addr = { .s_addr = emuenv.net.netAddr },
+            .addr = { .s_addr = process_net.netAddr },
             .lastRecv = 0,
             .appVer = app_ver,
             .isValidNpId = 1,
@@ -286,7 +309,8 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
 
         std::vector<int8_t> username(SCE_SYSTEM_PARAM_USERNAME_MAXSIZE);
         CALL_EXPORT(sceAppUtilSystemParamGetString, SCE_SYSTEM_PARAM_ID_USER_NAME, username.data(), sizeof(selfInfo.username));
-        CALL_EXPORT(sceNpManagerGetNpId, &selfInfo.npId);
+        if (sce_np_manager_populate_np_id(emuenv.io.user_name, selfInfo.npId) != 0)
+            selfInfo.isValidNpId = 0;
         std::strncpy(selfInfo.username, reinterpret_cast<const char *>(username.data()), sizeof(selfInfo.username) - 1);
         selfInfo.username[sizeof(selfInfo.username) - 1] = '\0';
 
@@ -301,9 +325,9 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
 
         {
             // Set the adhoc event and state to indicate that the connection is established
-            std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-            emuenv.netctl.adhocState = SCE_NET_CTL_STATE_IPOBTAINED;
-            emuenv.netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_IPOBTAINED;
+            std::lock_guard<std::mutex> lock(process_netctl.mutex);
+            process_netctl.adhocState = SCE_NET_CTL_STATE_IPOBTAINED;
+            process_netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_IPOBTAINED;
         }
 
         // Timeout for peer inactivity set to 5 seconds, expressed in microseconds
@@ -313,9 +337,9 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
         constexpr uint64_t SEND_INTERVAL_USEC = 1'000'000;
 
         uint64_t lastSendTicks = rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick - SEND_INTERVAL_USEC;
-        while (emuenv.netctl.adhocCondVarReady.load()) {
+        while (process_netctl.adhocCondVarReady.load()) {
             const uint64_t currentTicks = rtc_get_ticks(emuenv.kernel.base_tick.tick) - emuenv.kernel.start_tick;
-            std::erase_if(emuenv.netctl.adhocPeers, [&](const SceNetCtlAdhocPeerInfo &peer) {
+            std::erase_if(process_netctl.adhocPeers, [&](const SceNetCtlAdhocPeerInfo &peer) {
                 return currentTicks - peer.lastRecv > TIMEOUT_USEC;
             });
 
@@ -330,21 +354,21 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
             auto fromlen = uint32_t(sizeof(fromAddr));
             SceNetCtlAdhocPeerInfo peerInfo{};
             const auto res = rcv_sock->recv_packet(&peerInfo, sizeof(SceNetCtlAdhocPeerInfo), 0, (SceNetSockaddr *)&fromAddr, &fromlen);
-            if ((res > 0) && (res == sizeof(SceNetCtlAdhocPeerInfo)) && (fromAddr.sin_addr.s_addr != emuenv.net.netAddr)) {
+            if ((res > 0) && (res == sizeof(SceNetCtlAdhocPeerInfo)) && (fromAddr.sin_addr.s_addr != process_net.netAddr)) {
                 auto peerIt = std::find_if(
-                    emuenv.netctl.adhocPeers.begin(),
-                    emuenv.netctl.adhocPeers.end(),
+                    process_netctl.adhocPeers.begin(),
+                    process_netctl.adhocPeers.end(),
                     [&](const SceNetCtlAdhocPeerInfo &peer) {
                         return peer.addr.s_addr == fromAddr.sin_addr.s_addr;
                     });
 
-                if (peerIt != emuenv.netctl.adhocPeers.end()) {
+                if (peerIt != process_netctl.adhocPeers.end()) {
                     // If the peer is already in the list, update its lastRecv time
                     peerIt->lastRecv = currentTicks;
                 } else {
                     // Add the peer info to the list if the packet is a valid peer info packet
                     peerInfo.lastRecv = currentTicks;
-                    emuenv.netctl.adhocPeers.push_back(peerInfo);
+                    process_netctl.adhocPeers.push_back(peerInfo);
                 }
             }
         }
@@ -355,9 +379,9 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
 
         {
             // Notify the event and update the adhoc state
-            std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-            emuenv.netctl.adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
-            emuenv.netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_DISCONNECT_REQ_FINISHED;
+            std::lock_guard<std::mutex> lock(process_netctl.mutex);
+            process_netctl.adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
+            process_netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_DISCONNECT_REQ_FINISHED;
         }
 
         LOG_INFO("Adhoc thread: stopping network loop");
@@ -368,51 +392,59 @@ static void adhoc_thread(EmuEnvState &emuenv, int thread_id) {
 
 EXPORT(int, sceNetCtlAdhocDisconnect) {
     TRACY_FUNC(sceNetCtlAdhocDisconnect);
-    if (!emuenv.netctl.inited)
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited)
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
 
-    const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-    emuenv.netctl.adhocPeers.clear();
-    emuenv.netctl.adhocCondVarReady = false;
-    emuenv.netctl.adhocCondVar.notify_all();
+    const std::lock_guard<std::mutex> lock(process_netctl.mutex);
+    process_netctl.adhocPeers.clear();
+    process_netctl.adhocCondVarReady = false;
+    process_netctl.adhocCondVar.notify_all();
 
     return STUBBED("Stub");
 }
 
 EXPORT(int, sceNetCtlAdhocGetInAddr, SceNetInAddr *inaddr) {
     TRACY_FUNC(sceNetCtlAdhocGetInAddr, inaddr);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
     if (!inaddr)
         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ADDR);
 
-    inaddr->s_addr = emuenv.net.netAddr;
+    inaddr->s_addr = process_net.netAddr;
 
     return 0;
 }
 
 EXPORT(int, sceNetCtlAdhocGetPeerList, SceSize *peerInfoNum, SceNetCtlAdhocPeerInfo *peerInfo) {
     TRACY_FUNC(sceNetCtlAdhocGetPeerList, peerInfoNum, peerInfo);
-    if (!emuenv.netctl.inited)
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited)
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
 
     if (!peerInfoNum)
         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ADDR);
 
-    std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
+    std::lock_guard<std::mutex> lock(process_netctl.mutex);
     if (peerInfo)
-        memcpy(peerInfo, emuenv.netctl.adhocPeers.data(), emuenv.netctl.adhocPeers.size() * sizeof(*peerInfo));
+        memcpy(peerInfo, process_netctl.adhocPeers.data(), process_netctl.adhocPeers.size() * sizeof(*peerInfo));
 
-    *peerInfoNum = emuenv.netctl.adhocPeers.size();
+    *peerInfoNum = process_netctl.adhocPeers.size();
 
     return 0;
 }
 
 EXPORT(int, sceNetCtlAdhocGetResult, int eventType, int *errorCode) {
     TRACY_FUNC(sceNetCtlAdhocGetResult, eventType, errorCode);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -426,19 +458,23 @@ EXPORT(int, sceNetCtlAdhocGetResult, int eventType, int *errorCode) {
 
 EXPORT(int, sceNetCtlAdhocGetState, int *state) {
     TRACY_FUNC(sceNetCtlAdhocGetState, state);
-    if (!emuenv.netctl.inited)
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited)
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
 
     if (!state)
         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ADDR);
 
-    *state = emuenv.netctl.adhocState;
+    *state = process_netctl.adhocState;
     return 0;
 }
 
 EXPORT(int, sceNetCtlAdhocRegisterCallback, Ptr<void> func, Ptr<void> arg, int *cid) {
     TRACY_FUNC(sceNetCtlAdhocRegisterCallback, func, arg, cid);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -446,11 +482,11 @@ EXPORT(int, sceNetCtlAdhocRegisterCallback, Ptr<void> func, Ptr<void> arg, int *
         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ADDR);
     }
 
-    const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
+    const std::lock_guard<std::mutex> lock(process_netctl.mutex);
 
     // Find the next available slot
     int next_id = 0;
-    for (const auto &callback : emuenv.netctl.adhocCallbacks) {
+    for (const auto &callback : process_netctl.adhocCallbacks) {
         if (callback.pc == 0) {
             break;
         }
@@ -461,15 +497,17 @@ EXPORT(int, sceNetCtlAdhocRegisterCallback, Ptr<void> func, Ptr<void> arg, int *
         return RET_ERROR(SCE_NET_CTL_ERROR_CALLBACK_MAX);
     }
 
-    emuenv.netctl.adhocCallbacks[next_id].pc = func.address();
-    emuenv.netctl.adhocCallbacks[next_id].arg = arg.address();
+    process_netctl.adhocCallbacks[next_id].pc = func.address();
+    process_netctl.adhocCallbacks[next_id].arg = arg.address();
     *cid = next_id;
     return 0;
 }
 
 EXPORT(int, sceNetCtlAdhocUnregisterCallback, int cid) {
     TRACY_FUNC(sceNetCtlAdhocUnregisterCallback, cid);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -477,39 +515,41 @@ EXPORT(int, sceNetCtlAdhocUnregisterCallback, int cid) {
         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ID);
     }
 
-    const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-    emuenv.netctl.adhocCallbacks[cid].pc = 0;
-    emuenv.netctl.adhocCallbacks[cid].arg = 0;
+    const std::lock_guard<std::mutex> lock(process_netctl.mutex);
+    process_netctl.adhocCallbacks[cid].pc = 0;
+    process_netctl.adhocCallbacks[cid].arg = 0;
     return 0;
 }
 
 EXPORT(int, sceNetCtlCheckCallback) {
     TRACY_FUNC(sceNetCtlCheckCallback);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
 
     // TODO: Check if the network is connected
-    if (emuenv.net.state != 1) {
-        for (auto &callback : emuenv.netctl.callbacks) {
+    if (process_net.state != 1) {
+        for (auto &callback : process_netctl.callbacks) {
             if (callback.pc != 0) {
                 thread->call_guest(callback.pc, { SCE_NET_CTL_EVENT_TYPE_DISCONNECTED, callback.arg });
             }
         }
-        emuenv.net.state = 1;
+        process_net.state = 1;
     }
 
     // Check if there are any adhoc events to notify
-    if ((emuenv.netctl.adhocEvent != SCE_NET_CTL_EVENT_TYPE_NONE) && (emuenv.netctl.adhocEvent != emuenv.netctl.lastNotifiedAdhocEvent)) {
-        for (auto &callback : emuenv.netctl.adhocCallbacks) {
+    if ((process_netctl.adhocEvent != SCE_NET_CTL_EVENT_TYPE_NONE) && (process_netctl.adhocEvent != process_netctl.lastNotifiedAdhocEvent)) {
+        for (auto &callback : process_netctl.adhocCallbacks) {
             if (callback.pc != 0)
-                thread->call_guest(callback.pc, { emuenv.netctl.adhocEvent, callback.arg });
+                thread->call_guest(callback.pc, { process_netctl.adhocEvent, callback.arg });
         }
 
         // Update the last notified adhoc event
-        emuenv.netctl.lastNotifiedAdhocEvent = emuenv.netctl.adhocEvent;
+        process_netctl.lastNotifiedAdhocEvent = process_netctl.adhocEvent;
     }
 
     return STUBBED("Stub");
@@ -517,7 +557,9 @@ EXPORT(int, sceNetCtlCheckCallback) {
 
 EXPORT(int, sceNetCtlGetIfStat, int device, SceNetCtlIfStat *ifstat) {
     TRACY_FUNC(sceNetCtlGetIfStat, device, ifstat);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -534,7 +576,9 @@ EXPORT(int, sceNetCtlGetIfStat, int device, SceNetCtlIfStat *ifstat) {
 
 EXPORT(int, sceNetCtlGetNatInfo, SceNetCtlNatInfo *natinfo) {
     TRACY_FUNC(sceNetCtlGetNatInfo, natinfo);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -547,7 +591,9 @@ EXPORT(int, sceNetCtlGetNatInfo, SceNetCtlNatInfo *natinfo) {
 
 EXPORT(int, sceNetCtlGetPhoneMaxDownloadableSize, SceInt64 *maxDownloadableSize) {
     TRACY_FUNC(sceNetCtlGetPhoneMaxDownloadableSize, maxDownloadableSize);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -561,7 +607,9 @@ EXPORT(int, sceNetCtlGetPhoneMaxDownloadableSize, SceInt64 *maxDownloadableSize)
 
 EXPORT(int, sceNetCtlInetGetInfo, int code, SceNetCtlInfo *info) {
     TRACY_FUNC(sceNetCtlInetGetInfo, code, info);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -661,7 +709,9 @@ EXPORT(int, sceNetCtlInetGetInfo, int code, SceNetCtlInfo *info) {
 
 EXPORT(int, sceNetCtlInetGetResult, int eventType, int *errorCode) {
     TRACY_FUNC(sceNetCtlInetGetResult, eventType, errorCode);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -675,7 +725,9 @@ EXPORT(int, sceNetCtlInetGetResult, int eventType, int *errorCode) {
 
 EXPORT(int, sceNetCtlInetGetState, int *state) {
     TRACY_FUNC(sceNetCtlInetGetState, state);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -689,7 +741,9 @@ EXPORT(int, sceNetCtlInetGetState, int *state) {
 
 EXPORT(int, sceNetCtlInetRegisterCallback, Ptr<void> func, Ptr<void> arg, int *cid) {
     TRACY_FUNC(sceNetCtlInetRegisterCallback, func, arg, cid);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -697,11 +751,11 @@ EXPORT(int, sceNetCtlInetRegisterCallback, Ptr<void> func, Ptr<void> arg, int *c
         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ADDR);
     }
 
-    const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
+    const std::lock_guard<std::mutex> lock(process_netctl.mutex);
 
     // Find the next available slot
     int next_id = 0;
-    for (const auto &callback : emuenv.netctl.callbacks) {
+    for (const auto &callback : process_netctl.callbacks) {
         if (callback.pc == 0) {
             break;
         }
@@ -712,15 +766,17 @@ EXPORT(int, sceNetCtlInetRegisterCallback, Ptr<void> func, Ptr<void> arg, int *c
         return RET_ERROR(SCE_NET_CTL_ERROR_CALLBACK_MAX);
     }
 
-    emuenv.netctl.callbacks[next_id].pc = func.address();
-    emuenv.netctl.callbacks[next_id].arg = arg.address();
+    process_netctl.callbacks[next_id].pc = func.address();
+    process_netctl.callbacks[next_id].arg = arg.address();
     *cid = next_id;
     return 0;
 }
 
 EXPORT(int, sceNetCtlInetUnregisterCallback, int cid) {
     TRACY_FUNC(sceNetCtlInetUnregisterCallback, cid);
-    if (!emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
     }
 
@@ -728,47 +784,67 @@ EXPORT(int, sceNetCtlInetUnregisterCallback, int cid) {
         return RET_ERROR(SCE_NET_CTL_ERROR_INVALID_ID);
     }
 
-    const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-    emuenv.netctl.callbacks[cid].pc = 0;
-    emuenv.netctl.callbacks[cid].arg = 0;
+    const std::lock_guard<std::mutex> lock(process_netctl.mutex);
+    process_netctl.callbacks[cid].pc = 0;
+    process_netctl.callbacks[cid].arg = 0;
 
     return 0;
 }
 
 EXPORT(int, sceNetCtlInit) {
     TRACY_FUNC(sceNetCtlInit);
-    if (emuenv.netctl.inited) {
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (process_netctl.inited) {
         return RET_ERROR(SCE_NET_CTL_ERROR_NOT_TERMINATED);
     }
 
-    const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-    emuenv.netctl.adhocCallbacks.fill({ 0, 0 });
-    emuenv.netctl.callbacks.fill({ 0, 0 });
+    const std::lock_guard<std::mutex> lock(process_netctl.mutex);
+    process_netctl.adhocCallbacks.fill({ 0, 0 });
+    process_netctl.callbacks.fill({ 0, 0 });
 
-    emuenv.netctl.inited = true;
-    emuenv.netctl.adhocThreadRun = true;
-    emuenv.netctl.adhocThread = std::thread(adhoc_thread, std::ref(emuenv), thread_id);
+    process_netctl.inited = true;
+    process_netctl.adhocThreadRun = true;
+    process_netctl.adhocThread = std::thread(adhoc_thread, std::ref(emuenv), thread_id);
 
     return STUBBED("Stub");
 }
 
+EXPORT(int, SceNetCtl_719DD1DA) {
+    TRACY_FUNC(SceNetCtl_719DD1DA);
+    GET_PROCESS_NETWORK_CONTEXT();
+
+    if (!process_netctl.inited)
+        return RET_ERROR(SCE_NET_CTL_ERROR_NOT_INITIALIZED);
+
+    return STUBBED("NetCtl service query");
+}
+
 EXPORT(void, sceNetCtlTerm) {
     TRACY_FUNC(sceNetCtlTerm);
+    const auto process_network_context = get_process_network_context(emuenv, thread_id, export_name);
+    if (!process_network_context) {
+        LOG_ERROR("Failed to terminate SceNetCtl: {}", process_network_context.error());
+        return;
+    }
+    NetCtlState &process_netctl = *process_network_context->netctl;
     STUBBED("Stub");
-    emuenv.netctl.inited = false;
+    process_netctl.inited = false;
 
     {
-        const std::lock_guard<std::mutex> lock(emuenv.netctl.mutex);
-        emuenv.netctl.adhocThreadRun = false;
-        emuenv.netctl.adhocCondVarReady = false;
-        emuenv.netctl.adhocCondVar.notify_all();
+        const std::lock_guard<std::mutex> lock(process_netctl.mutex);
+        process_netctl.adhocThreadRun = false;
+        process_netctl.adhocCondVarReady = false;
+        process_netctl.adhocCondVar.notify_all();
     }
 
-    if (emuenv.netctl.adhocThread.joinable())
-        emuenv.netctl.adhocThread.join();
+    if (process_netctl.adhocThread.joinable()) {
+        ThreadHostWait host_wait(emuenv.kernel.get_thread(thread_id));
+        process_netctl.adhocThread.join();
+    }
 
-    emuenv.netctl.adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
-    emuenv.netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;
-    emuenv.netctl.lastNotifiedAdhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;
-    emuenv.netctl.adhocPeers.clear();
+    process_netctl.adhocState = SCE_NET_CTL_STATE_DISCONNECTED;
+    process_netctl.adhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;
+    process_netctl.lastNotifiedAdhocEvent = SCE_NET_CTL_EVENT_TYPE_NONE;
+    process_netctl.adhocPeers.clear();
 }

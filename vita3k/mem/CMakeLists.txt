@@ -11,10 +11,12 @@ add_library(
 	include/mem/util.h
 	src/allocator.cpp
 	src/mem.cpp
+	src/mspace.cpp
 )
 
 target_include_directories(mem PUBLIC include)
 target_link_libraries(mem PUBLIC util)
+target_link_libraries(mem PRIVATE dlmalloc)
 
 if(NOT ANDROID)
 	add_executable(

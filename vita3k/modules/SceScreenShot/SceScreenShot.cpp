@@ -17,6 +17,10 @@
 
 #include <module/module.h>
 
+EXPORT(int, SceScreenShot_0757A17F) {
+    return UNIMPLEMENTED();
+}
+
 EXPORT(int, sceScreenShotCapture) {
     return UNIMPLEMENTED();
 }

@@ -185,7 +185,7 @@ bool is_lle_module(SceSysmoduleModuleId module_id, EmuEnvState &emuenv) {
 }
 
 static std::vector<std::string> init_auto_lle_module_names() {
-    std::vector<std::string> auto_lle_module_names = { "libc", "libSceFt2", "libpvf", "libfiber" };
+    std::vector<std::string> auto_lle_module_names = { "libc", "libSceFt2", "libpvf", "libfiber", "libpaf", "libshellsvc" };
     for (const auto module_id : auto_lle_modules) {
         for (const auto module : sysmodule_paths[module_id]) {
             auto_lle_module_names.emplace_back(module);
@@ -195,9 +195,7 @@ static std::vector<std::string> init_auto_lle_module_names() {
 }
 
 bool is_lle_module(const std::string &module_name, EmuEnvState &emuenv) {
-    static std::vector<std::string> auto_lle_module_names{};
-    if (auto_lle_module_names.empty())
-        auto_lle_module_names = init_auto_lle_module_names();
+    static const std::vector<std::string> auto_lle_module_names = init_auto_lle_module_names();
     if (emuenv.cfg.current_config.modules_mode != ModulesMode::AUTOMATIC) {
         if (std::ranges::contains(emuenv.cfg.current_config.lle_modules, module_name))
             return true;
@@ -209,7 +207,8 @@ bool is_lle_module(const std::string &module_name, EmuEnvState &emuenv) {
     return false;
 }
 
-bool is_module_loaded(KernelState &kernel, SceSysmoduleModuleId module_id) {
+bool is_module_loaded(KernelState &kernel, const MemState &mem, SceSysmoduleModuleId module_id) {
     std::lock_guard<std::mutex> guard(kernel.mutex);
-    return kernel.loaded_sysmodules.contains(module_id);
+    const auto process = kernel.loaded_sysmodules.find(&mem);
+    return process != kernel.loaded_sysmodules.end() && process->second.contains(module_id);
 }

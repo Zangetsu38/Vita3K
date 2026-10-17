@@ -166,14 +166,14 @@ enum class SceGxmLastReserveStatus {
     AvailableAgain = 2 // TODO: Not sure what's the point of this third state (why libgxm doesn't set this back to Available)
 };
 
-struct SceGxmSyncObject {
+struct SceGxmSyncObjectState {
     // timestamp_current is the timestamp for what has already been processed by the renderer
-    std::atomic<uint32_t> timestamp_current;
+    std::atomic<uint32_t> timestamp_current{ 0 };
     // timestamp_ahead is the timestamp for everything that has been asked to SceGxm so far (timestamp_ahead >= timestamp_current)
-    std::atomic<uint32_t> timestamp_ahead;
+    std::atomic<uint32_t> timestamp_ahead{ 0 };
 
     // timestamp for the last time the object was displayed
-    std::atomic<uint32_t> last_display;
+    std::atomic<uint32_t> last_display{ 0 };
 
     // last signal operation done, given using the global timestamp
     uint32_t last_operation_global = 0;
@@ -183,6 +183,15 @@ struct SceGxmSyncObject {
 
     std::mutex lock;
     std::condition_variable cond;
+};
+
+struct SceGxmSyncObject {
+    std::shared_ptr<SceGxmSyncObjectState> shared_state;
+    SceGxmSyncObjectState local_state;
+
+    SceGxmSyncObjectState &state() {
+        return shared_state ? *shared_state : local_state;
+    }
 };
 
 struct GxmContextState {

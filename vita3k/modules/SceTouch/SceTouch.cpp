@@ -35,14 +35,20 @@ std::string to_debug_str<SceTouchSamplingState>(const MemState &mem, SceTouchSam
     return std::to_string(type);
 }
 
-EXPORT(int, sceTouchActivateRegion) {
-    TRACY_FUNC(sceTouchActivateRegion);
-    return UNIMPLEMENTED();
+EXPORT(int, sceTouchActivateRegion, SceUInt32 port, SceUInt32 region, SceUInt32 enable) {
+    TRACY_FUNC(sceTouchActivateRegion, port, region, enable);
+    if (port >= SCE_TOUCH_PORT_MAX_NUM || region > 0xFF)
+        return RET_ERROR(SCE_TOUCH_ERROR_INVALID_ARG);
+    STUBBED("Ignore touch region activation");
+    return SCE_TOUCH_OK;
 }
 
-EXPORT(int, sceTouchClearRegion) {
-    TRACY_FUNC(sceTouchClearRegion);
-    return UNIMPLEMENTED();
+EXPORT(int, sceTouchClearRegion, SceUInt32 port, SceUInt32 region) {
+    TRACY_FUNC(sceTouchClearRegion, port, region);
+    if (port >= SCE_TOUCH_PORT_MAX_NUM || region > 0xFF)
+        return RET_ERROR(SCE_TOUCH_ERROR_INVALID_ARG);
+    STUBBED("Ignore touch region clearing");
+    return SCE_TOUCH_OK;
 }
 
 EXPORT(int, sceTouchDisableTouchForce, SceUInt32 port) {
@@ -223,9 +229,12 @@ EXPORT(int, sceTouchPeekRegion, SceUInt32 port, SceTouchData *pData, SceUInt32 n
     return CALL_EXPORT(sceTouchPeek, port, pData, nBufs);
 }
 
-EXPORT(int, sceTouchPeekRegionExt) {
-    TRACY_FUNC(sceTouchPeekRegionExt);
-    return UNIMPLEMENTED();
+EXPORT(int, sceTouchPeekRegionExt, SceUInt32 port, SceTouchData *pData, SceUInt32 nBufs, SceUInt32 region) {
+    TRACY_FUNC(sceTouchPeekRegionExt, port, pData, nBufs, region);
+    if (region > 0xFF)
+        return RET_ERROR(SCE_TOUCH_ERROR_INVALID_ARG);
+    STUBBED("Ignore extended touch region filtering");
+    return CALL_EXPORT(sceTouchPeek, port, pData, nBufs);
 }
 
 EXPORT(int, sceTouchRead, SceUInt32 port, SceTouchData *pData, SceUInt32 nBufs) {

@@ -44,6 +44,8 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Vulkan Validation Layer");
     case config::RestartRequiredSetting::DisableMaskBit:
         return QCoreApplication::translate("SettingsDialogTooltips", "Disable Mask Bit Emulation");
+    case config::RestartRequiredSetting::ThreadScheduler:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Thread Scheduler");
     }
 
     return {};
@@ -159,7 +161,7 @@ SettingsDialogTooltips::SettingsDialogTooltips(QObject *parent)
     , http_timeout_sleep(tr("How long to wait between connection retries. Could be useful if you have very unstable or VERY SLOW internet."))
     , http_read_end_attempts(tr("How many retries to attempt when there isn't more data to read, lower can improve performance but can make games unstable if you have bad enough internet."))
     , http_read_end_sleep(tr("How long to wait between read attempt retries, lower can improve performance but can make games unstable if you have bad enough internet"))
-    , adhoc_address(tr("Select the IP address to be used in adhoc networking."))
+    , adhoc_address(tr("Select the IP address to be used in Ad-Hoc networking. This list includes addresses from all network interfaces."))
     , log_imports(tr("Log module import symbols."))
     , log_exports(tr("Log module export symbols."))
     , log_active_shaders(tr("Log active shader programs."))

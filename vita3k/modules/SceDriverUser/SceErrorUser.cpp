@@ -19,8 +19,8 @@
 
 TRACY_MODULE_NAME(SceErrorUser);
 
-EXPORT(SceInt32, sceErrorGetExternalString, char *result, uint32_t err) {
-    TRACY_FUNC(sceErrorGetExternalString, result, err);
+EXPORT(SceInt32, sceErrorGetExternalString, Ptr<char> result, uint32_t err) {
+    TRACY_FUNC(sceErrorGetExternalString, result.address(), err);
     return CALL_EXPORT(_sceErrorGetExternalString, result, err);
 }
 
@@ -32,8 +32,9 @@ EXPORT(int, sceErrorHistoryGetError) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceErrorHistoryPostError) {
-    return UNIMPLEMENTED();
+EXPORT(int, sceErrorHistoryPostError, Ptr<const SceErrorHistoryPostInfo> info) {
+    TRACY_FUNC(sceErrorHistoryPostError, info.address());
+    return CALL_EXPORT(_sceErrorHistoryPostError, info);
 }
 
 EXPORT(int, sceErrorHistorySetDefaultFormat) {

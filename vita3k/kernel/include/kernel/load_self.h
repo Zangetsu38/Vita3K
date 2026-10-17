@@ -20,11 +20,14 @@
 #include <util/fs.h>
 #include <util/types.h>
 
+#include <memory>
 #include <string>
 
 struct KernelState;
 struct MemState;
 struct KernelModule;
 
-SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std::string &self_path, const fs::path &dump_path);
+// Dynamic loads in a running process can reject TLS before publishing module bindings.
+SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std::string &self_path, const fs::path &dump_path, bool capture_shared_initial_segments = false, bool allow_process_tls = true, uint32_t module_load_flags = 0);
+SceUID load_self_from_initial_segments(KernelState &kernel, MemState &mem, const std::shared_ptr<KernelModule> &source, uint32_t module_load_flags = 0);
 int unload_self(KernelState &kernel, MemState &mem, KernelModule &module);

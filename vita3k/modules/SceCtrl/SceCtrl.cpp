@@ -70,6 +70,8 @@ EXPORT(int, sceCtrlGetButtonIntercept) {
 
 EXPORT(int, sceCtrlGetControllerPortInfo, SceCtrlPortInfo *info) {
     TRACY_FUNC(sceCtrlGetControllerPortInfo, info);
+    if (!info)
+        return RET_ERROR(SCE_CTRL_ERROR_INVALID_ARG);
     info->port[0] = emuenv.cfg.current_config.pstv_mode ? SCE_CTRL_TYPE_VIRT : SCE_CTRL_TYPE_PHY;
     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
         info->port[i + 1] = (emuenv.cfg.current_config.pstv_mode && !emuenv.ctrl.free_ports[i]) ? get_type_of_controller(emuenv.ctrl, i) : SCE_CTRL_TYPE_UNPAIRED;
@@ -87,6 +89,7 @@ EXPORT(int, sceCtrlGetSamplingMode, SceCtrlPadInputMode *mode) {
     if (mode == nullptr) {
         return RET_ERROR(SCE_CTRL_ERROR_INVALID_ARG);
     }
+    const std::lock_guard lock(emuenv.ctrl.mutex);
     *mode = emuenv.ctrl.input_mode;
     return SCE_KERNEL_OK;
 }
@@ -96,6 +99,7 @@ EXPORT(int, sceCtrlGetSamplingModeExt, SceCtrlPadInputMode *mode) {
     if (mode == nullptr) {
         return RET_ERROR(SCE_CTRL_ERROR_INVALID_ARG);
     }
+    const std::lock_guard lock(emuenv.ctrl.mutex);
     *mode = emuenv.ctrl.input_mode_ext;
     return SCE_KERNEL_OK;
 }
@@ -238,20 +242,22 @@ EXPORT(int, sceCtrlSetRapidFire) {
 
 EXPORT(int, sceCtrlSetSamplingMode, SceCtrlPadInputMode mode) {
     TRACY_FUNC(sceCtrlSetSamplingMode, mode);
-    SceCtrlPadInputMode old = emuenv.ctrl.input_mode;
     if (mode < SCE_CTRL_MODE_DIGITAL || mode > SCE_CTRL_MODE_ANALOG_WIDE) {
         return RET_ERROR(SCE_CTRL_ERROR_INVALID_ARG);
     }
+    const std::lock_guard lock(emuenv.ctrl.mutex);
+    SceCtrlPadInputMode old = emuenv.ctrl.input_mode;
     emuenv.ctrl.input_mode = mode;
     return old;
 }
 
 EXPORT(int, sceCtrlSetSamplingModeExt, SceCtrlPadInputMode mode) {
     TRACY_FUNC(sceCtrlSetSamplingModeExt, mode);
-    SceCtrlPadInputMode old = emuenv.ctrl.input_mode_ext;
     if (mode < SCE_CTRL_MODE_DIGITAL || mode > SCE_CTRL_MODE_ANALOG_WIDE) {
         return RET_ERROR(SCE_CTRL_ERROR_INVALID_ARG);
     }
+    const std::lock_guard lock(emuenv.ctrl.mutex);
+    SceCtrlPadInputMode old = emuenv.ctrl.input_mode_ext;
     emuenv.ctrl.input_mode_ext = mode;
     return old;
 }

@@ -32,7 +32,20 @@
 #include <util/log.h>
 #include <util/tracy.h>
 
+#include <algorithm>
+
 namespace renderer {
+
+static void set_texture_info(ShaderProgram &shader, const SceGxmProgram &program) {
+    shader.textures_used = gxp::get_textures_used(program);
+    shader.texture_count = std::bit_width(shader.textures_used.to_ulong());
+    shader.cube_textures.reset();
+    for (uint32_t i = 0; i < program.parameter_count; ++i) {
+        const auto &parameter = program.program_parameters()[i];
+        if (parameter.category == SCE_GXM_PARAMETER_CATEGORY_SAMPLER && parameter.is_sampler_cube())
+            shader.cube_textures.set(parameter.resource_index);
+    }
+}
 
 static void layout_ssbo_offset_from_uniform_buffer_sizes(UniformBufferSizes &sizes, UniformBufferSizes &offsets, std::size_t &total_hold) {
     std::uint32_t last_offset = 0;
@@ -53,6 +66,8 @@ static void layout_ssbo_offset_from_uniform_buffer_sizes(UniformBufferSizes &siz
 COMMAND(handle_create_context) {
     TRACY_FUNC_COMMANDS(handle_create_context);
     std::unique_ptr<Context> *ctx = helper.pop<std::unique_ptr<Context> *>();
+    MemState *target_mem = helper.pop<MemState *>();
+    const bool select_context = helper.pop<bool>();
     bool result = false;
 
     switch (renderer.current_backend) {
@@ -62,7 +77,7 @@ COMMAND(handle_create_context) {
     }
 
     case Backend::Vulkan: {
-        result = vulkan::create(dynamic_cast<vulkan::VKState &>(renderer), *ctx, mem);
+        result = vulkan::create(dynamic_cast<vulkan::VKState &>(renderer), *ctx, *target_mem);
         break;
     }
 
@@ -72,15 +87,21 @@ COMMAND(handle_create_context) {
     }
     }
 
-    renderer.context = ctx->get();
+    if (!result || !*ctx) {
+        complete_command(renderer, helper, 0);
+        return;
+    }
+    (*ctx)->address_space = target_mem;
+    if (select_context)
+        renderer.context = ctx->get();
 
     // fill with default values
-    renderer.context->shader_hints = {
+    (*ctx)->shader_hints = {
         .attributes = nullptr,
         .color_format = SCE_GXM_COLOR_FORMAT_U8U8U8U8_ABGR
     };
-    std::fill_n(renderer.context->shader_hints.vertex_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
-    std::fill_n(renderer.context->shader_hints.fragment_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
+    std::fill_n((*ctx)->shader_hints.vertex_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
+    std::fill_n((*ctx)->shader_hints.fragment_textures, SCE_GXM_MAX_TEXTURE_UNITS, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
 
     complete_command(renderer, helper, result);
 }
@@ -155,11 +176,15 @@ COMMAND(handle_destroy_render_target) {
 
 COMMAND(handle_memory_map) {
     TRACY_FUNC_COMMANDS(handle_memory_map);
+    MemState *target_mem = helper.pop<MemState *>();
     const Ptr<void> addr = helper.pop<Ptr<void>>();
     const uint32_t size = helper.pop<uint32_t>();
 
     if (renderer.current_backend == Backend::Vulkan) {
-        dynamic_cast<vulkan::VKState &>(renderer).map_memory(mem, addr, size);
+        if (!dynamic_cast<vulkan::VKState &>(renderer).map_memory(*target_mem, addr, size)) {
+            complete_command(renderer, helper, CommandErrorBackendFailure);
+            return;
+        }
     }
 
     complete_command(renderer, helper, 0);
@@ -168,10 +193,14 @@ COMMAND(handle_memory_map) {
 COMMAND(handle_memory_unmap) {
     TRACY_FUNC_COMMANDS(handle_memory_unmap);
 
+    MemState *target_mem = helper.pop<MemState *>();
     const Ptr<void> addr = helper.pop<Ptr<void>>();
 
     if (renderer.current_backend == Backend::Vulkan) {
-        dynamic_cast<vulkan::VKState &>(renderer).unmap_memory(mem, addr);
+        if (!dynamic_cast<vulkan::VKState &>(renderer).unmap_memory(*target_mem, addr)) {
+            complete_command(renderer, helper, CommandErrorBackendFailure);
+            return;
+        }
     }
 
     complete_command(renderer, helper, 0);
@@ -199,8 +228,7 @@ bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProg
 
     fp->buffer_count = shader::usse::get_uniform_buffer_sizes(program, fp->uniform_buffer_sizes);
     layout_ssbo_offset_from_uniform_buffer_sizes(fp->uniform_buffer_sizes, fp->uniform_buffer_data_offsets, fp->max_total_uniform_buffer_storage);
-    fp->textures_used = gxp::get_textures_used(program);
-    fp->texture_count = std::bit_width(fp->textures_used.to_ulong());
+    set_texture_info(*fp, program);
 
     return true;
 }
@@ -227,10 +255,9 @@ bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgra
     vp->buffer_count = shader::usse::get_uniform_buffer_sizes(program, vp->uniform_buffer_sizes);
     shader::usse::get_attribute_informations(program, vp->attribute_infos);
     layout_ssbo_offset_from_uniform_buffer_sizes(vp->uniform_buffer_sizes, vp->uniform_buffer_data_offsets, vp->max_total_uniform_buffer_storage);
-    vp->textures_used = gxp::get_textures_used(program);
-    vp->texture_count = std::bit_width(vp->textures_used.to_ulong());
+    set_texture_info(*vp, program);
 
-    if (vp->attribute_infos.empty()) {
+    if (vp->attribute_infos.empty() && !gxp::has_attribute_symbols(program)) {
         // Insert some symbols here
         if (program.primary_reg_count != 0) {
             for (size_t i = 0; i < attributes.size(); i++) {
@@ -239,15 +266,48 @@ bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgra
         }
     }
 
+    for (const auto &attribute : attributes) {
+        auto info = vp->attribute_infos.lower_bound(attribute.regIndex);
+        const bool untyped = attribute.format == SCE_GXM_ATTRIBUTE_FORMAT_UNTYPED;
+        const uint32_t end_register = attribute.regIndex + attribute.componentCount;
+        for (; info != vp->attribute_infos.end(); ++info) {
+            if (info->first != attribute.regIndex && (!untyped || !info->second.regformat || info->first >= end_register))
+                break;
+
+            // An untyped fetch may cover several shader parameters in consecutive PA registers.
+            const uint32_t byte_offset = attribute.offset + static_cast<uint32_t>(info->first - attribute.regIndex) * 4;
+            vp->attribute_bindings.push_back({ attribute.streamIndex, byte_offset, attribute.format, attribute.componentCount, info->second });
+            if (!untyped)
+                break;
+        }
+    }
+
+    for (uint32_t i = 0; i < program.parameter_count; ++i) {
+        const auto &parameter = program.program_parameters()[i];
+        if (parameter.category != SCE_GXM_PARAMETER_CATEGORY_ATTRIBUTE
+            || parameter.semantic == SCE_GXM_PARAMETER_SEMANTIC_INDEX
+            || parameter.semantic == SCE_GXM_PARAMETER_SEMANTIC_INSTANCE
+            || !gxp::is_attribute_used(program, parameter))
+            continue;
+        const auto &info = vp->attribute_infos.at(parameter.resource_index);
+        if (std::none_of(vp->attribute_bindings.begin(), vp->attribute_bindings.end(), [&](const auto &binding) { return binding.info.location == info.location; })) {
+            LOG_WARN("Vertex shader {} has no stream for location {} (PA {}, type {}, components {})",
+                hex_string(vp->hash), info.location, parameter.resource_index, static_cast<uint32_t>(info.gxm_type), info.component_count);
+            for (const auto &attribute : attributes)
+                LOG_WARN("Vertex fetch: PA {}, words/components {}, format {}, stream {}, byte offset {}", attribute.regIndex, attribute.componentCount,
+                    static_cast<uint32_t>(attribute.format), attribute.streamIndex, attribute.offset);
+        }
+    }
+
     return true;
 }
 
 void create(SceGxmSyncObject *sync, State &state) {
     // Set as if the last display was already done
-    sync->last_display = 0;
-    sync->timestamp_current = 0;
-    sync->timestamp_ahead = 0;
-    sync->being_deleted = false;
+    sync->state().last_display = 0;
+    sync->state().timestamp_current = 0;
+    sync->state().timestamp_ahead = 0;
+    sync->state().being_deleted = false;
 }
 
 void destroy(SceGxmSyncObject *sync, State &state) {

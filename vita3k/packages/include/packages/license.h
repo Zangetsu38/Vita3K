@@ -26,7 +26,10 @@
 
 #include <util/log.h>
 
+#include <array>
+#include <iosfwd>
 #include <map>
+#include <optional>
 #include <string>
 
 struct SceNpDrmLicense {
@@ -58,6 +61,10 @@ struct License {
 };
 
 bool validate_zrif(const std::string &zRIF);
-bool copy_license(EmuEnvState &emuenv, const fs::path &license_path);
-bool create_license(EmuEnvState &emuenv, const std::string &zRIF);
+bool decode_zrif(const std::string &zRIF, std::array<uint8_t, 512> &license);
+bool open_license(const fs::path &license_path, SceNpDrmLicense &license_buf);
+std::optional<fs::path> find_license_for_content_id(const fs::path &directory, const std::string &content_id);
+std::string rif2zrif(std::ifstream &binfile);
+bool copy_license(EmuEnvState &emuenv, const fs::path &license_path, const fs::path &destination_directory = {});
+bool create_license(EmuEnvState &emuenv, const std::string &zRIF, const fs::path &destination_directory = {});
 void get_license(EmuEnvState &emuenv, const std::string &title_id, const std::string &content_id);

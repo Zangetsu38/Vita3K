@@ -3,16 +3,24 @@
 #include <http/state.h>
 #include <util/log.h>
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <string>
 #include <vector>
 
 namespace net_utils {
+
+enum class InterfaceType {
+    Ethernet,
+    Wifi,
+    Other,
+};
 
 enum SceHttpMethods {
     SCE_HTTP_METHOD_GET,
@@ -42,6 +50,12 @@ struct AssignedAddr {
     std::string name; // Name of the interface
     std::string addr; // Assigned address
     std::string netMask; // Network mask
+    std::string gateway;
+    std::array<std::string, 2> dns_servers{};
+    bool link_up = false;
+    InterfaceType type = InterfaceType::Other;
+    std::array<uint8_t, 6> hardware_address{};
+    bool has_hardware_address = false;
 };
 
 struct ProgressState {
@@ -100,7 +114,9 @@ bool parseResponse(const std::string &response, SceRequestResponse &reqres);
 bool socketSetBlocking(int sockfd, bool blocking);
 
 std::vector<AssignedAddr> get_all_assigned_addrs();
+std::vector<AssignedAddr> get_assigned_addrs_by_type(const std::vector<AssignedAddr> &addresses, InterfaceType type);
 AssignedAddr get_selected_assigned_addr(int32_t &outIndex);
-void init_address(int32_t &outIndex, uint32_t &netAddr, uint32_t &broadcastAddr);
+std::optional<AssignedAddr> get_selected_assigned_addr(int32_t &outIndex, InterfaceType type);
+void init_address(int32_t &outIndex, uint32_t &netAddr, uint32_t &broadcastAddr, uint32_t &netMask);
 
 } // namespace net_utils

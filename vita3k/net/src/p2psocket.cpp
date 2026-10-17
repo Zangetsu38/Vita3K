@@ -93,6 +93,9 @@ int P2PSocket::recv_packet(void *buf, unsigned int len, int flags, SceNetSockadd
 }
 
 int P2PSocket::send_packet(const void *msg, unsigned int len, int flags, const SceNetSockaddr *to, unsigned int tolen) {
+    if (!to)
+        return PosixSocket::send_packet(msg, len, flags, nullptr, tolen);
+
     const auto p2p_to = convertP2PToPosix(to);
     return PosixSocket::send_packet(msg, len, flags, &p2p_to, tolen);
 }

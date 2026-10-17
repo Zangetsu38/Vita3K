@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include "SceDisplay.h"
+#include "../SceAppMgr/SceAppMgr.h"
 
 #include <display/functions.h>
 #include <display/state.h>
@@ -30,6 +31,14 @@ TRACY_MODULE_NAME(SceDisplay);
 
 static int display_wait(EmuEnvState &emuenv, SceUID thread_id, int vcount, const bool is_since_setbuf, const bool is_cb) {
     const auto &thread = emuenv.kernel.get_thread(thread_id);
+    if (!thread) {
+        LOG_ERROR("Display wait called by unknown thread {}", thread_id);
+        return static_cast<int>(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
+    }
+    if (!valid_vblank_wait_count(vcount)) {
+        LOG_ERROR("Invalid display wait count {}", vcount);
+        return static_cast<int>(SCE_DISPLAY_ERROR_INVALID_VALUE);
+    }
     if (is_cb)
         thread->process_callbacks();
 
@@ -91,7 +100,10 @@ EXPORT(SceInt32, _sceDisplayGetMaximumFrameBufResolution, SceInt32 *width, SceIn
         *height = 1088;
     } else {
         // PSVita does this exact same check
-        auto &title_id = emuenv.io.title_id;
+        const auto io_context = get_process_io_context(emuenv, thread_id, export_name);
+        if (!io_context)
+            return RET_ERROR(io_context.error());
+        const auto &title_id = io_context->io->title_id;
         bool cond = (title_id == "PCSG80001")
             || (title_id == "PCSG80007")
             || (title_id == "PCSG00318")
@@ -144,7 +156,7 @@ EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, Sc
         STUBBED("SCE_DISPLAY_SETBUF_IMMEDIATE is not supported");
     }
 
-    DisplayFrameInfo &info = emuenv.display.sce_frame;
+    DisplayFrameInfo info;
 
     info.base = pFrameBuf->base;
     info.pitch = pFrameBuf->pitch;
@@ -154,7 +166,7 @@ EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, Sc
     update_prediction(emuenv, info);
 
     emuenv.display.last_setframe_vblank_count = emuenv.display.vblank_count.load();
-    emuenv.frame_count++;
+    emuenv.frame_count.fetch_add(1, std::memory_order_relaxed);
 
 #ifdef TRACY_ENABLE
     FrameMarkNamed("SCE frame buffer"); // Tracy - Secondary frame end mark for the emulated frame buffer
